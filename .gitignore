@@ -1,0 +1,17 @@
+build/
+build-*/
+cmake-build-*/
+.cache/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Local session test data
+sessions/
+*.wav
+*.flac
+!resources/**/*.wav
