@@ -15,7 +15,7 @@ ADH DAW is a deliberately constrained, portastudio-style DAW for Linux, JUCE 8 /
 ## Architecture cheat-sheet
 
 - **Audio backend**: PipeWire (primary) via JUCE's JACK backend; ALSA fallback.
-- **DSP**: extracted from the user's existing Dusk Audio plugins at `/home/marc/projects/plugins/`. Shared headers live (or will live) at `plugins/plugins/shared/dsp-cores/` so both ADH DAW and the Dusk plugins are single-source-of-truth consumers.
+- **DSP**: extracted from the user's existing Dusk Audio plugins at `/home/marc/projects/plugins/`. Shared headers live (or will live) at `plugins/plugins/shared/dsp-cores/` so both ADH DAW and the Dusk plugins are single-source-of-truth consumers. Resolved via `-DDUSK_PLUGINS_PATH=/path/to/plugins` or sibling `../plugins` (mirror of the JUCE pattern). Header-only cores: edit a file in the plugins repo, next ADH DAW build picks it up — no copy step, no submodule bump.
 - **JUCE**: 8.x, resolved via `-DJUCE_PATH` or sibling `../JUCE` (same scheme as the Dusk plugins repo).
 - **Topology**: 16 channel strips (HPF → 4-band EQ → FET/Opto comp → sends → pan → bus assign → fader → mute/solo) → 4 aux buses (EQ + comp + fader) → master (Pultec EQ + bus comp + tape sat + fader).
 
