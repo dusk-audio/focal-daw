@@ -51,39 +51,8 @@ Channel 1-16 → 4 Aux Buses → Master → Output
    Mute / Solo / Ø
 ```
 
-- **DSP**: extracted from the [Dusk Audio plugin suite](../plugins/) (4K EQ, Multi-Comp FET/Opto, Multi-Q Pultec, TapeMachine, shared AnalogEmulation). Header-only cores live in the plugins repo and are picked up at build time — no copy step, no submodule bump.
-- **JUCE**: 8.x, resolved via `-DJUCE_PATH` or a sibling `../JUCE` directory.
-- **Plugin host**: VST3 + LV2 (yabridge-friendly) on every channel strip; aux buses get plugin chains for reverb / delay returns (Phase 1b).
-
-## Build
-
-```bash
-# JUCE expected at ../JUCE (or pass -DJUCE_PATH=/path/to/JUCE)
-# Dusk plugins at ../plugins (or pass -DDUSK_PLUGINS_PATH=/path/to/plugins)
-
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc)
-
-./build/Focal_artefacts/Release/Focal
-```
-
-## Self-test
-
-Headless audio-pipeline test (no GUI, no audio device — runs in CI / on push):
-
-```bash
-FOCAL_RUN_SELFTEST=1 ./build/Focal_artefacts/Release/"Focal"
-```
-
-Six tests: pass-through unity, mute silence, master fader −6 dB, channel routing 2-out, channel routing 4-out, master tape gain. All must PASS.
-
-## Dev affordances
-
-```bash
-FOCAL_START_STAGE=mixing       # land directly in Mixing stage
-FOCAL_START_STAGE=mastering    # ... or Mastering
-FOCAL_SKIP_STARTUP_DIALOG=1    # bypass the session-picker on launch
-```
+- **DSP** is extracted from the Dusk Audio plugin suite (4K EQ, Multi-Comp FET/Opto, Multi-Q Pultec, TapeMachine, shared AnalogEmulation) so the mixer and the standalone plugins share a single DSP source of truth.
+- **Plugin host**: VST3 + LV2 (yabridge-friendly) on every channel strip; aux buses host reverb / delay returns.
 
 ## Repository
 
@@ -91,11 +60,14 @@ FOCAL_SKIP_STARTUP_DIALOG=1    # bypass the session-picker on launch
 src/
   dsp/         # ChannelStrip, AuxBusStrip, MasterBus, BrickwallLimiter, etc.
   engine/      # AudioEngine, RecordManager, PlaybackEngine, BounceEngine, MasteringChain
-  session/     # Session model + JSON serialization
+  session/     # Session model + JSON serialisation
   ui/          # MainComponent, ConsoleView, channel/aux/master strips, mastering view
-Focal.md      # authoritative product spec (read this before non-trivial changes)
-CLAUDE.md      # AI-assist instructions
+Focal.md      # authoritative product spec
 ```
+
+## Builds & contributing
+
+Pre-built signed binaries will be available at **focal.audio** (coming soon). The source is GPL-3.0 and you're welcome to read it and propose changes; for build instructions and contributor onboarding, please reach out via the project's contact channel rather than relying on what's in this repository.
 
 ## License
 
