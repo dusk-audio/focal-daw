@@ -2,7 +2,7 @@
 #include <cmath>
 #include <cstring>
 
-namespace adhdaw
+namespace focal
 {
 void ChannelStrip::prepare (double sampleRate, int blockSize)
 {
@@ -27,7 +27,7 @@ void ChannelStrip::prepare (double sampleRate, int blockSize)
     // change, the slot re-preps it for the new config.
     pluginSlot.prepareToPlay (sampleRate, juce::jmax (1, blockSize));
 
-#if ADHDAW_HAS_DUSK_DSP
+#if FOCAL_HAS_DUSK_DSP
     // BritishEQProcessor.prepare expects (sampleRate, blockSize, numChannels).
     eq.prepare (sampleRate, juce::jmax (1, blockSize), 1);
     eq.reset();
@@ -40,7 +40,7 @@ void ChannelStrip::prepare (double sampleRate, int blockSize)
 #endif
 }
 
-#if ADHDAW_HAS_DUSK_DSP
+#if FOCAL_HAS_DUSK_DSP
 void ChannelStrip::bindCompParams()
 {
     auto& apvts = compressor.getParameters();
@@ -96,7 +96,7 @@ void ChannelStrip::updateGainTargets() noexcept
 
 void ChannelStrip::updateEqParameters() noexcept
 {
-#if ADHDAW_HAS_DUSK_DSP
+#if FOCAL_HAS_DUSK_DSP
     if (paramsRef == nullptr) return;
     // Value-init so padding bytes are zero - paired with lastEqParams's {}
     // initializer, this lets memcmp tell us reliably whether the params
@@ -135,7 +135,7 @@ void ChannelStrip::updateEqParameters() noexcept
 
 void ChannelStrip::updateCompParameters() noexcept
 {
-#if ADHDAW_HAS_DUSK_DSP
+#if FOCAL_HAS_DUSK_DSP
     if (paramsRef == nullptr) return;
 
     // Direct atomic stores - no lock, no message-thread notification, no
@@ -230,7 +230,7 @@ void ChannelStrip::processAndAccumulate (const float* monoIn,
     // pointer otherwise.
     pluginSlot.processMonoBlock (tempMono.data(), numSamples);
 
-#if ADHDAW_HAS_DUSK_DSP
+#if FOCAL_HAS_DUSK_DSP
     // Wrap our mono scratch buffer as a 1-channel juce::AudioBuffer<float>
     // (no allocation - referenceTo points at the existing storage).
     float* monoChannel[1] = { tempMono.data() };
@@ -351,4 +351,4 @@ void ChannelStrip::processAndAccumulate (const float* monoIn,
         }
     }
 }
-} // namespace adhdaw
+} // namespace focal

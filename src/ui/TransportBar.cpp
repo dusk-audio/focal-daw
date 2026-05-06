@@ -1,6 +1,6 @@
 #include "TransportBar.h"
 
-namespace adhdaw
+namespace focal
 {
 TransportIconButton::TransportIconButton (const juce::String& name, Icon icon,
                                             juce::Colour active)
@@ -332,4 +332,4 @@ void TransportBar::setHintVisible (bool visible)
 {
     hintLabel.setVisible (visible);
 }
-} // namespace adhdaw
+} // namespace focal

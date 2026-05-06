@@ -3,7 +3,7 @@
 #include <juce_data_structures/juce_data_structures.h>
 #include "Session.h"
 
-namespace adhdaw
+namespace focal
 {
 class AudioEngine;
 
@@ -93,4 +93,4 @@ private:
     AudioRegion removed;
     bool        haveRemoved = false;
 };
-} // namespace adhdaw
+} // namespace focal

@@ -2,15 +2,15 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
-namespace adhdaw
+namespace focal
 {
 class MainComponent;
 
-class ADHDawApp final : public juce::JUCEApplication
+class FocalApp final : public juce::JUCEApplication
 {
 public:
-    ADHDawApp();
-    ~ADHDawApp() override;
+    FocalApp();
+    ~FocalApp() override;
 
     const juce::String getApplicationName() override       { return JUCE_APPLICATION_NAME_STRING; }
     const juce::String getApplicationVersion() override    { return JUCE_APPLICATION_VERSION_STRING; }
@@ -25,4 +25,4 @@ private:
     class MainWindow;
     std::unique_ptr<MainWindow> mainWindow;
 };
-} // namespace adhdaw
+} // namespace focal

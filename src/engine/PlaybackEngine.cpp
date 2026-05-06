@@ -1,7 +1,7 @@
 #include "PlaybackEngine.h"
 #include <cstring>
 
-namespace adhdaw
+namespace focal
 {
 PlaybackEngine::PlaybackEngine (Session& s) : session (s)
 {
@@ -137,4 +137,4 @@ void PlaybackEngine::readForTrack (int trackIndex,
                       sizeof (float) * (size_t) withinSamples);
     }
 }
-} // namespace adhdaw
+} // namespace focal

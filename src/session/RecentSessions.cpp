@@ -1,11 +1,11 @@
 #include "RecentSessions.h"
 
-namespace adhdaw
+namespace focal
 {
 juce::File RecentSessions::getStoreFile()
 {
     auto cfgDir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
-                      .getChildFile ("ADH DAW");
+                      .getChildFile ("Focal");
     if (! cfgDir.exists()) cfgDir.createDirectory();
     return cfgDir.getChildFile ("recent.txt");
 }
@@ -51,4 +51,4 @@ void RecentSessions::add (const juce::File& sessionDirectory)
     for (auto& f : entries) lines.add (f.getFullPathName());
     getStoreFile().replaceWithText (lines.joinIntoString ("\n"));
 }
-} // namespace adhdaw
+} // namespace focal

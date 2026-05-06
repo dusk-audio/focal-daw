@@ -1,7 +1,7 @@
 #include "AudioPipelineSelfTest.h"
 #include <cmath>
 
-namespace adhdaw
+namespace focal
 {
 namespace
 {
@@ -429,7 +429,7 @@ juce::String AudioPipelineSelfTest::probeUMC1820AlsaFormat()
         {
             out << juce::String::formatted (
                 "  %s\n      OPENED rate=%.0f buf=%d in=%d out=%d "
-                "(see [ADHDaw/JUCE-ALSA] line in stderr for format/access)\n",
+                "(see [Focal/JUCE-ALSA] line in stderr for format/access)\n",
                 name.toRawUTF8(),
                 dev->getCurrentSampleRate(),
                 dev->getCurrentBufferSizeSamples(),
@@ -497,7 +497,7 @@ juce::String AudioPipelineSelfTest::testBackendsOpenCleanly()
 juce::String AudioPipelineSelfTest::runAll()
 {
     juce::StringArray report;
-    report.add ("=== ADHDaw Audio Pipeline Self-Test ===");
+    report.add ("=== Focal Audio Pipeline Self-Test ===");
     report.add ("Time: " + juce::Time::getCurrentTime().toString (true, true));
     {
         const auto& setup = deviceManager.getAudioDeviceSetup();
@@ -669,7 +669,7 @@ juce::String AudioPipelineSelfTest::runPerfBenchmark (const juce::String& label,
 juce::String AudioPipelineSelfTest::runPerfSuite()
 {
     juce::StringArray report;
-    report.add ("=== ADHDaw Engine Perf Benchmark ===");
+    report.add ("=== Focal Engine Perf Benchmark ===");
     report.add (juce::String ("Time: ") + juce::Time::getCurrentTime().toString (true, true));
     report.add ("Measures pure-engine callback wall time across configs.");
     report.add ("All callbacks driven directly via audioDeviceIOCallbackWithContext;");
@@ -733,4 +733,4 @@ juce::String AudioPipelineSelfTest::runPerfSuite()
     report.add ("=== End of Engine Perf Benchmark ===");
     return report.joinIntoString ("\n");
 }
-} // namespace adhdaw
+} // namespace focal

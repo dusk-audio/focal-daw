@@ -1,6 +1,6 @@
 #include "StartupDialog.h"
 
-namespace adhdaw
+namespace focal
 {
 namespace
 {
@@ -20,7 +20,7 @@ void styleRecentButton (juce::TextButton& b)
 StartupDialog::StartupDialog (juce::Array<juce::File> r)
     : recents (std::move (r))
 {
-    titleLabel.setText ("ADH DAW", juce::dontSendNotification);
+    titleLabel.setText ("Focal", juce::dontSendNotification);
     titleLabel.setFont (juce::Font (juce::FontOptions (20.0f, juce::Font::bold)));
     titleLabel.setColour (juce::Label::textColourId, juce::Colour (0xffe8e8e8));
     addAndMakeVisible (titleLabel);
@@ -131,4 +131,4 @@ void StartupDialog::closeDialog (int returnCode)
     if (auto* parent = findParentComponentOfClass<juce::DialogWindow>())
         parent->exitModalState (returnCode);
 }
-} // namespace adhdaw
+} // namespace focal

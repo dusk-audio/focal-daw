@@ -3,7 +3,7 @@
 #include <juce_core/juce_core.h>
 #include "Session.h"
 
-namespace adhdaw
+namespace focal
 {
 // Serialise / restore a Session to/from JSON on disk. Save uses an atomic
 // write pattern (write to .tmp, move into place) so a crash mid-save never
@@ -15,4 +15,4 @@ public:
     static bool save (const Session& session, const juce::File& target);
     static bool load (Session& session,       const juce::File& source);
 };
-} // namespace adhdaw
+} // namespace focal

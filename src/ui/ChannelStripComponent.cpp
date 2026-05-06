@@ -1,11 +1,11 @@
 #include "ChannelStripComponent.h"
-#include "ADHDawLookAndFeel.h"
+#include "FocalLookAndFeel.h"
 #include "ChannelEqEditor.h"
 #include "ChannelCompEditor.h"
 #include "../engine/PluginSlot.h"
 #include "../engine/PluginManager.h"
 
-namespace adhdaw
+namespace focal
 {
 namespace
 {
@@ -2037,4 +2037,4 @@ void ChannelStripComponent::resized()
     meterScaleArea = scaleColumn;
     faderSlider.setBounds (faderArea);
 }
-} // namespace adhdaw
+} // namespace focal

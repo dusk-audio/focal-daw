@@ -1,6 +1,6 @@
 #include "PluginManager.h"
 
-namespace adhdaw
+namespace focal
 {
 PluginManager::PluginManager()
 {
@@ -18,7 +18,7 @@ PluginManager::~PluginManager() = default;
 juce::File PluginManager::getCacheFile() const
 {
     auto cfgDir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
-                      .getChildFile ("ADH DAW");
+                      .getChildFile ("Focal");
     if (! cfgDir.exists()) cfgDir.createDirectory();
     return cfgDir.getChildFile ("plugin-cache.xml");
 }
@@ -136,4 +136,4 @@ PluginManager::createPluginInstance (const juce::PluginDescription& desc,
 
     return instance;
 }
-} // namespace adhdaw
+} // namespace focal

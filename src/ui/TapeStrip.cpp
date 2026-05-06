@@ -1,7 +1,7 @@
 #include "TapeStrip.h"
 #include "../session/RegionEditActions.h"
 
-namespace adhdaw
+namespace focal
 {
 TapeStrip::TapeStrip (Session& s, AudioEngine& e) : session (s), engine (e)
 {
@@ -118,6 +118,24 @@ TapeStrip::RegionHit TapeStrip::hitTestRegion (int x, int y) const noexcept
             RegionHit hit;
             hit.track = t;
             hit.regionIdx = i;
+
+            // Take-history badge takes precedence over the trim-start gutter
+            // since the two share screen area at the region's top-left. Same
+            // bounds as the painter so the click target visibly lines up.
+            if (! r.previousTakes.empty())
+            {
+                const int regionWidth = juce::jmax (2, x1 - x0);
+                const int badgeW = juce::jmin (regionWidth, 16);
+                const int badgeH = juce::jmin (row.getHeight() - 2, 10);
+                const int badgeYTop = row.getY() + 1;
+                if (badgeW >= 8 && badgeH >= 6
+                    && x >= x0 && x <= x0 + badgeW
+                    && y >= badgeYTop && y <= badgeYTop + badgeH)
+                {
+                    hit.op = RegionOp::TakeBadge;
+                    return hit;
+                }
+            }
 
             // Edge gutters at the ends - only when the region is wide enough
             // that body + two gutters still leaves a body to drag.
@@ -277,6 +295,34 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
     // marks that region as selected - keyboard copy/cut/delete then act on
     // it without needing a separate selection step.
     const auto hit = hitTestRegion (e.x, e.y);
+
+    // Take-history badge: rotate to the next take. No drag, no selection
+    // change beyond marking the rotated region as selected. Rotation is
+    // FIFO - front of previousTakes surfaces, current goes to the back.
+    // We keep this off the UndoManager for now: a rotation is reversible
+    // by N more clicks, and undo of a single click would be visually
+    // identical to clicking back manually.
+    if (hit.op == RegionOp::TakeBadge)
+    {
+        auto& region = session.track (hit.track).regions[(size_t) hit.regionIdx];
+        if (! region.previousTakes.empty())
+        {
+            TakeRef next = std::move (region.previousTakes.front());
+            region.previousTakes.erase (region.previousTakes.begin());
+            TakeRef current { region.file, region.sourceOffset, region.lengthInSamples };
+            region.previousTakes.push_back (std::move (current));
+            region.file            = next.file;
+            region.sourceOffset    = next.sourceOffset;
+            region.lengthInSamples = next.lengthInSamples;
+
+            selectedTrack  = hit.track;
+            selectedRegion = hit.regionIdx;
+            rebuildPlaybackIfStopped();
+            repaint();
+        }
+        return;
+    }
+
     if (hit.op != RegionOp::None)
     {
         const auto& region = session.track (hit.track).regions[(size_t) hit.regionIdx];
@@ -371,7 +417,9 @@ void TapeStrip::mouseDrag (const juce::MouseEvent& e)
             r.lengthInSamples = newLen;
             break;
         }
-        case RegionOp::None: break;
+        case RegionOp::None:
+        case RegionOp::TakeBadge:
+            break;  // mouseDown handled the rotation; no drag semantics
     }
     repaint();
 }
@@ -426,6 +474,9 @@ void TapeStrip::mouseMove (const juce::MouseEvent& e)
             break;
         case RegionOp::Move:
             setMouseCursor (juce::MouseCursor::DraggingHandCursor);
+            break;
+        case RegionOp::TakeBadge:
+            setMouseCursor (juce::MouseCursor::PointingHandCursor);
             break;
         case RegionOp::None:
             setMouseCursor (juce::MouseCursor::NormalCursor);
@@ -587,6 +638,27 @@ void TapeStrip::paint (juce::Graphics& g)
             const float midY = (float) regionRect.getCentreY();
             g.drawHorizontalLine ((int) midY, (float) regionRect.getX() + 2.0f,
                                    (float) regionRect.getRight() - 2.0f);
+
+            // Take-history badge. Shows total take count (current + prior)
+            // anchored to the region's top-left when there's at least one
+            // prior take. Clicking it rotates to the next prior take; the
+            // rotation is hit-tested via hitTestRegion's TakeBadge op.
+            if (! region.previousTakes.empty())
+            {
+                const int badgeW = juce::jmin (regionRect.getWidth(), 16);
+                const int badgeH = juce::jmin (regionRect.getHeight(), 10);
+                if (badgeW >= 8 && badgeH >= 6)
+                {
+                    juce::Rectangle<int> badge (regionRect.getX(), regionRect.getY(),
+                                                  badgeW, badgeH);
+                    g.setColour (juce::Colours::black.withAlpha (0.6f));
+                    g.fillRoundedRectangle (badge.toFloat(), 1.5f);
+                    g.setColour (juce::Colours::white);
+                    g.setFont (juce::Font (juce::FontOptions (8.0f, juce::Font::bold)));
+                    g.drawText (juce::String ((int) region.previousTakes.size() + 1),
+                                 badge, juce::Justification::centred, false);
+                }
+            }
         }
     }
 
@@ -729,4 +801,4 @@ bool TapeStrip::deleteSelectedRegion()
     repaint();
     return true;
 }
-} // namespace adhdaw
+} // namespace focal

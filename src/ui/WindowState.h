@@ -2,10 +2,10 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
-namespace adhdaw
+namespace focal
 {
 // Window position / size / fullscreen-flag persistence. Stored at
-//   <userApplicationDataDirectory>/ADH DAW/window-state.txt
+//   <userApplicationDataDirectory>/Focal/window-state.txt
 // - separate from session.json (session-portable) and recent.txt (per-user
 // session list) because window geometry is per-machine state.
 //
@@ -36,4 +36,4 @@ public:
 private:
     static juce::File getStorePath();
 };
-} // namespace adhdaw
+} // namespace focal

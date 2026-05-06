@@ -1,6 +1,6 @@
 #include "SessionSerializer.h"
 
-namespace adhdaw
+namespace focal
 {
 namespace
 {
@@ -109,6 +109,24 @@ juce::DynamicObject::Ptr trackToObject (const Track& t)
         rObj->setProperty ("timeline_start",  (juce::int64) r.timelineStart);
         rObj->setProperty ("length",          (juce::int64) r.lengthInSamples);
         rObj->setProperty ("source_offset",   (juce::int64) r.sourceOffset);
+
+        // Take history. Empty array on the common case (no overdubs); only
+        // serialised when at least one prior take has been captured to keep
+        // session.json compact.
+        if (! r.previousTakes.empty())
+        {
+            juce::Array<juce::var> prior;
+            for (auto& take : r.previousTakes)
+            {
+                auto* tObj = new juce::DynamicObject();
+                tObj->setProperty ("file",          take.file.getFullPathName());
+                tObj->setProperty ("source_offset", (juce::int64) take.sourceOffset);
+                tObj->setProperty ("length",        (juce::int64) take.lengthInSamples);
+                prior.add (juce::var (tObj));
+            }
+            rObj->setProperty ("previous_takes", prior);
+        }
+
         regions.add (juce::var (rObj));
     }
     obj->setProperty ("regions", regions);
@@ -122,8 +140,28 @@ juce::DynamicObject::Ptr auxToObject (const AuxBus& a)
     obj->setProperty ("name",     a.name);
     obj->setProperty ("colour",   colourToHex (a.colour));
     obj->setProperty ("fader_db", a.strip.faderDb.load());
+    obj->setProperty ("pan",      a.strip.pan.load());
     obj->setProperty ("mute",     a.strip.mute.load());
     obj->setProperty ("solo",     a.strip.solo.load());
+
+    obj->setProperty ("eq_enabled",   a.strip.eqEnabled.load());
+    obj->setProperty ("eq_lf_db",     a.strip.eqLfGainDb.load());
+    obj->setProperty ("eq_mid_db",    a.strip.eqMidGainDb.load());
+    obj->setProperty ("eq_hf_db",     a.strip.eqHfGainDb.load());
+
+    obj->setProperty ("comp_enabled",     a.strip.compEnabled.load());
+    obj->setProperty ("comp_thresh_db",   a.strip.compThreshDb.load());
+    obj->setProperty ("comp_ratio",       a.strip.compRatio.load());
+    obj->setProperty ("comp_attack_ms",   a.strip.compAttackMs.load());
+    obj->setProperty ("comp_release_ms",  a.strip.compReleaseMs.load());
+    obj->setProperty ("comp_makeup_db",   a.strip.compMakeupDb.load());
+
+    // Send-FX plugin slot. Same encoding as Track.
+    if (a.pluginDescriptionXml.isNotEmpty())
+        obj->setProperty ("plugin_desc_xml", a.pluginDescriptionXml);
+    if (a.pluginStateBase64.isNotEmpty())
+        obj->setProperty ("plugin_state",    a.pluginStateBase64);
+
     return obj;
 }
 
@@ -256,6 +294,21 @@ void restoreTrack (Track& t, const juce::var& v)
             r.timelineStart   = (juce::int64) rv["timeline_start"];
             r.lengthInSamples = (juce::int64) rv["length"];
             r.sourceOffset    = (juce::int64) rv["source_offset"];
+
+            if (auto prior = rv["previous_takes"]; prior.isArray())
+            {
+                for (int k = 0; k < prior.size(); ++k)
+                {
+                    auto tv = prior[k];
+                    if (! tv.isObject()) continue;
+                    TakeRef take;
+                    take.file            = juce::File (tv["file"].toString());
+                    take.sourceOffset    = (juce::int64) tv["source_offset"];
+                    take.lengthInSamples = (juce::int64) tv["length"];
+                    r.previousTakes.push_back (std::move (take));
+                }
+            }
+
             t.regions.push_back (std::move (r));
         }
     }
@@ -267,8 +320,24 @@ void restoreAux (AuxBus& a, const juce::var& v)
     if (auto s = v["name"].toString();   s.isNotEmpty()) a.name = s;
     if (auto s = v["colour"].toString(); s.isNotEmpty()) a.colour = hexToColour (s, a.colour);
     if (v.hasProperty ("fader_db"))                       a.strip.faderDb.store ((float) (double) v["fader_db"]);
+    if (v.hasProperty ("pan"))                            a.strip.pan.store     ((float) (double) v["pan"]);
     if (v.hasProperty ("mute"))                           a.strip.mute.store ((bool) v["mute"]);
     if (v.hasProperty ("solo"))                           a.strip.solo.store ((bool) v["solo"]);
+
+    if (v.hasProperty ("eq_enabled"))   a.strip.eqEnabled  .store ((bool)  v["eq_enabled"]);
+    if (v.hasProperty ("eq_lf_db"))     a.strip.eqLfGainDb .store ((float) (double) v["eq_lf_db"]);
+    if (v.hasProperty ("eq_mid_db"))    a.strip.eqMidGainDb.store ((float) (double) v["eq_mid_db"]);
+    if (v.hasProperty ("eq_hf_db"))     a.strip.eqHfGainDb .store ((float) (double) v["eq_hf_db"]);
+
+    if (v.hasProperty ("comp_enabled"))    a.strip.compEnabled  .store ((bool)  v["comp_enabled"]);
+    if (v.hasProperty ("comp_thresh_db"))  a.strip.compThreshDb .store ((float) (double) v["comp_thresh_db"]);
+    if (v.hasProperty ("comp_ratio"))      a.strip.compRatio    .store ((float) (double) v["comp_ratio"]);
+    if (v.hasProperty ("comp_attack_ms"))  a.strip.compAttackMs .store ((float) (double) v["comp_attack_ms"]);
+    if (v.hasProperty ("comp_release_ms")) a.strip.compReleaseMs.store ((float) (double) v["comp_release_ms"]);
+    if (v.hasProperty ("comp_makeup_db"))  a.strip.compMakeupDb .store ((float) (double) v["comp_makeup_db"]);
+
+    a.pluginDescriptionXml = v["plugin_desc_xml"].toString();
+    a.pluginStateBase64    = v["plugin_state"]   .toString();
 }
 } // namespace
 
@@ -435,4 +504,4 @@ bool SessionSerializer::load (Session& s, const juce::File& source)
     s.recomputeRtCounters();
     return true;
 }
-} // namespace adhdaw
+} // namespace focal

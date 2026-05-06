@@ -1,6 +1,6 @@
 #include "RecordManager.h"
 
-namespace adhdaw
+namespace focal
 {
 RecordManager::RecordManager (Session& s) : session (s)
 {
@@ -90,7 +90,44 @@ void RecordManager::stopRecording (juce::int64 /*endSample*/)
             region.timelineStart = recordStartSample;
             region.lengthInSamples = frames;
             region.sourceOffset = 0;
-            session.track (t).regions.push_back (std::move (region));
+
+            // Take-history capture: any existing region whose timeline range
+            // is FULLY CONTAINED within the new take's range gets absorbed
+            // into previousTakes. The user can then cycle through them via
+            // the badge UI without losing access to earlier takes.
+            //
+            // Partial overlaps (e.g. punch-in over the middle of a longer
+            // take) are intentionally NOT absorbed - the longer region stays
+            // visible on either side of the new take, and the painter just
+            // draws the new region on top inside the punch range. Phase 3
+            // proper will handle splitting a partially-overlapping region
+            // into outer fragments + a new take cycle slot.
+            const juce::int64 newStart = region.timelineStart;
+            const juce::int64 newEnd   = newStart + region.lengthInSamples;
+            auto& regs = session.track (t).regions;
+            for (auto it = regs.begin(); it != regs.end(); )
+            {
+                const auto exStart = it->timelineStart;
+                const auto exEnd   = it->timelineStart + it->lengthInSamples;
+                const bool fullyContained = exStart >= newStart && exEnd <= newEnd;
+                if (! fullyContained) { ++it; continue; }
+
+                TakeRef ref;
+                ref.file            = it->file;
+                ref.sourceOffset    = it->sourceOffset;
+                ref.lengthInSamples = it->lengthInSamples;
+                region.previousTakes.push_back (std::move (ref));
+
+                // Carry forward the displaced region's own history so we
+                // don't drop deeper takes when overdubbing repeatedly. The
+                // newly-displaced take goes first, then the older ones.
+                for (auto& deeper : it->previousTakes)
+                    region.previousTakes.push_back (std::move (deeper));
+
+                it = regs.erase (it);
+            }
+
+            regs.push_back (std::move (region));
         }
         else
         {
@@ -112,4 +149,4 @@ void RecordManager::writeInputBlock (int trackIndex,
     if (slot->writer->write (channels, numSamples))
         slot->framesWritten += numSamples;
 }
-} // namespace adhdaw
+} // namespace focal

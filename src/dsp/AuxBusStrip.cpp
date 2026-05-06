@@ -2,7 +2,7 @@
 #include <cmath>
 #include <cstring>
 
-namespace adhdaw
+namespace focal
 {
 void AuxBusStrip::bind (const AuxBusParams& params) noexcept
 {
@@ -18,7 +18,11 @@ void AuxBusStrip::prepare (double sampleRate, int blockSize, int oversamplingFac
     panGainL .setCurrentAndTargetValue (1.0f);
     panGainR .setCurrentAndTargetValue (1.0f);
 
-#if ADHDAW_HAS_DUSK_DSP
+    // Plugin slot - sized for the current device config so the audio thread
+    // never sees an unprepared instance. Cheap when no plugin is loaded.
+    pluginSlot.prepareToPlay (sampleRate, juce::jmax (1, blockSize));
+
+#if FOCAL_HAS_DUSK_DSP
     eq.prepare (sampleRate, juce::jmax (1, blockSize), 2);
     eq.reset();
 
@@ -33,7 +37,7 @@ void AuxBusStrip::prepare (double sampleRate, int blockSize, int oversamplingFac
 #endif
 }
 
-#if ADHDAW_HAS_DUSK_DSP
+#if FOCAL_HAS_DUSK_DSP
 void AuxBusStrip::bindCompParams()
 {
     auto& apvts = busComp.getParameters();
@@ -122,7 +126,7 @@ void AuxBusStrip::updateGainTargets() noexcept
 
 void AuxBusStrip::processInPlace (float* L, float* R, int numSamples) noexcept
 {
-   #if ADHDAW_HAS_DUSK_DSP
+   #if FOCAL_HAS_DUSK_DSP
     // Contract: numSamples must fit the buffer prepare() sized for the comp.
     // The chunk loop below is the production safety net.
     jassert (numSamples <= compStereoBuffer.getNumSamples());
@@ -130,7 +134,7 @@ void AuxBusStrip::processInPlace (float* L, float* R, int numSamples) noexcept
 
     updateGainTargets();
 
-#if ADHDAW_HAS_DUSK_DSP
+#if FOCAL_HAS_DUSK_DSP
     {
         float* channels[2] = { L, R };
         juce::AudioBuffer<float> buf (channels, 2, numSamples);
@@ -161,6 +165,13 @@ void AuxBusStrip::processInPlace (float* L, float* R, int numSamples) noexcept
     }
 #endif
 
+    // Send-FX plugin (Phase 1b). No-op when nothing is loaded; otherwise
+    // runs in place on the post-comp L/R buffer. Time-budget watchdog inside
+    // PluginSlot auto-bypasses on stalls so a misbehaving reverb can't lock
+    // the audio thread. Position is post-comp / pre-fader so the bus fader
+    // still trims the wet return level.
+    pluginSlot.processStereoBlock (L, R, numSamples);
+
     float postPeakL = 0.0f, postPeakR = 0.0f;
     for (int i = 0; i < numSamples; ++i)
     {
@@ -183,4 +194,4 @@ void AuxBusStrip::processInPlace (float* L, float* R, int numSamples) noexcept
         paramsRef->meterPostBusRDb.store (toDb (postPeakR), std::memory_order_relaxed);
     }
 }
-} // namespace adhdaw
+} // namespace focal

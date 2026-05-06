@@ -2,10 +2,10 @@
 
 #include <juce_data_structures/juce_data_structures.h>
 
-namespace adhdaw::appconfig
+namespace focal::appconfig
 {
 // Per-machine preferences. Backed by a juce::PropertiesFile at
-//   <userApplicationDataDirectory>/ADH DAW/app-config.properties
+//   <userApplicationDataDirectory>/Focal/app-config.properties
 // - separate store from window-state.txt (geometry) and recent.txt
 // (recent sessions list) so each file has a single concern.
 //
@@ -22,4 +22,4 @@ constexpr float kUiScaleDefault = 1.0f;
 
 float getUiScaleOverride();
 void  setUiScaleOverride (float scale);
-} // namespace adhdaw::appconfig
+} // namespace focal::appconfig

@@ -5,7 +5,7 @@
 #include <atomic>
 #include <functional>
 
-namespace adhdaw
+namespace focal
 {
 class AudioEngine;
 class Session;
@@ -100,4 +100,4 @@ private:
 
     juce::int64 computeBounceLength (double sampleRate, double tail) const;
 };
-} // namespace adhdaw
+} // namespace focal

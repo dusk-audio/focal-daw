@@ -6,7 +6,7 @@
 #include "../session/Session.h"
 #include "../engine/PluginSlot.h"
 
-#if ADHDAW_HAS_DUSK_DSP
+#if FOCAL_HAS_DUSK_DSP
   #include "BritishEQProcessor.h"   // multi-q
   // ChannelComp is a thin facade over UniversalCompressor with the donor's
   // minimal-processing fast path enabled. Same Opto/FET/VCA per-sample DSP,
@@ -19,7 +19,7 @@
   #include "ChannelComp.h"          // shared/channel-comp/ - header-only
 #endif
 
-namespace adhdaw
+namespace focal
 {
 // Phase 1a channel strip: 4K-style HPF + 4-band EQ + per-aux sends + pan +
 // fader + SIP gating. FET/Opto/VCA compressor inserts after the EQ stage in
@@ -86,7 +86,7 @@ private:
     // the signal path before the channel's EQ + comp shape it.
     PluginSlot pluginSlot;
 
-#if ADHDAW_HAS_DUSK_DSP
+#if FOCAL_HAS_DUSK_DSP
     BritishEQProcessor eq;
     // Cache of the most recent Parameters we pushed to `eq`. updateEqParameters
     // memcmp's the freshly-built Parameters against this and only calls
@@ -142,4 +142,4 @@ private:
     void updateEqParameters() noexcept;
     void updateCompParameters() noexcept;
 };
-} // namespace adhdaw
+} // namespace focal

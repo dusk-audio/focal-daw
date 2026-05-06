@@ -1,7 +1,7 @@
 #include "MasteringEqEditor.h"
 #include <cmath>
 
-namespace adhdaw
+namespace focal
 {
 namespace
 {
@@ -576,4 +576,4 @@ void MasteringEqEditor::resized()
             layoutKnob (bandUI[(size_t) i].qKnob, col);
     }
 }
-} // namespace adhdaw
+} // namespace focal

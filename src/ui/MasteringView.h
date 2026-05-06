@@ -6,7 +6,7 @@
 #include "../engine/AudioEngine.h"
 #include "../session/Session.h"
 
-namespace adhdaw
+namespace focal
 {
 class MasteringPlayer;
 
@@ -129,4 +129,4 @@ private:
     juce::Label                                   compPanelTitle;
     juce::ToggleButton                            compPanelEnable { "ON" };
 };
-} // namespace adhdaw
+} // namespace focal

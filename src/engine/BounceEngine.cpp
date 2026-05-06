@@ -3,11 +3,11 @@
 #include "MasteringPlayer.h"
 #include "../session/Session.h"
 
-namespace adhdaw
+namespace focal
 {
 BounceEngine::BounceEngine (AudioEngine& e, Session& s,
                               juce::AudioDeviceManager& dm) noexcept
-    : juce::Thread ("ADHDaw bounce"), engine (e), session (s), deviceManager (dm)
+    : juce::Thread ("Focal bounce"), engine (e), session (s), deviceManager (dm)
 {}
 
 BounceEngine::~BounceEngine()
@@ -233,4 +233,4 @@ void BounceEngine::run()
     }
     if (onFinished) onFinished (succeeded, errSnapshot);
 }
-} // namespace adhdaw
+} // namespace focal

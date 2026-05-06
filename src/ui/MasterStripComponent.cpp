@@ -1,7 +1,7 @@
 #include "MasterStripComponent.h"
-#include "ADHDawLookAndFeel.h"
+#include "FocalLookAndFeel.h"
 
-namespace adhdaw
+namespace focal
 {
 namespace
 {
@@ -444,4 +444,4 @@ void MasterStripComponent::resized()
     area.removeFromRight (4);
     faderSlider.setBounds (area);
 }
-} // namespace adhdaw
+} // namespace focal

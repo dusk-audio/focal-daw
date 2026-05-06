@@ -4,7 +4,7 @@
 #include "../engine/AudioEngine.h"
 #include "../session/Session.h"
 
-namespace adhdaw
+namespace focal
 {
 AudioSettingsPanel::AudioSettingsPanel (juce::AudioDeviceManager& dm,
                                           AudioEngine& e, Session& s)
@@ -175,4 +175,4 @@ void AudioSettingsPanel::applyOversamplingChange()
     auto setup = deviceManager.getAudioDeviceSetup();
     deviceManager.setAudioDeviceSetup (setup, /*treatAsChosenDevice*/ true);
 }
-} // namespace adhdaw
+} // namespace focal

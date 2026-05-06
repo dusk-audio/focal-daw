@@ -3,7 +3,7 @@
 #include <juce_core/juce_core.h>
 #include <atomic>
 
-namespace adhdaw
+namespace focal
 {
 // Phase 2 minimum: Stopped / Playing / Recording. Punch-in/out + Loop arrive
 // in Phase 3 per the spec. The state itself is a single atomic so the audio
@@ -69,4 +69,4 @@ private:
     std::atomic<juce::int64> punchIn          { 0 };
     std::atomic<juce::int64> punchOut         { 0 };
 };
-} // namespace adhdaw
+} // namespace focal

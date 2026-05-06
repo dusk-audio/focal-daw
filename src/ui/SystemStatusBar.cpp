@@ -1,6 +1,6 @@
 #include "SystemStatusBar.h"
 
-namespace adhdaw
+namespace focal
 {
 SystemStatusBar::SystemStatusBar (AudioEngine& e) : engine (e)
 {
@@ -80,4 +80,4 @@ void SystemStatusBar::paint (juce::Graphics& g)
     g.setColour (warn ? juce::Colour (0xffe05050) : juce::Colour (0xffb0b0b8));
     g.drawText (dspInfo, dspBounds, juce::Justification::centredRight, false);
 }
-} // namespace adhdaw
+} // namespace focal

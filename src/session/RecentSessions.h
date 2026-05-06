@@ -2,10 +2,10 @@
 
 #include <juce_core/juce_core.h>
 
-namespace adhdaw
+namespace focal
 {
 // Persistent list of session directories the user has recently saved/loaded.
-// Stored as a newline-delimited file at <userApplicationDataDirectory>/ADH DAW/recent.txt
+// Stored as a newline-delimited file at <userApplicationDataDirectory>/Focal/recent.txt
 // (one absolute path per line, most recent first). Cap at kMaxEntries - older
 // entries are evicted on overflow. Stale paths (directory removed) are pruned
 // on read so the startup dialog never shows broken entries.
@@ -24,4 +24,4 @@ public:
 private:
     static juce::File getStoreFile();
 };
-} // namespace adhdaw
+} // namespace focal

@@ -4,7 +4,7 @@
 #include <array>
 #include "../session/Session.h"
 
-namespace adhdaw
+namespace focal
 {
 // Custom editor for the mastering chain's MasteringDigitalEq. Shows the
 // 5-band frequency-response curve at the top with a row of band controls
@@ -86,4 +86,4 @@ private:
     std::array<float, 5> lastQ    {};
     bool lastEnabled = false;
 };
-} // namespace adhdaw
+} // namespace focal

@@ -1,7 +1,7 @@
 #include "MasteringChain.h"
 #include <cstring>
 
-namespace adhdaw
+namespace focal
 {
 void MasteringChain::bind (const MasteringParams& params) noexcept
 {
@@ -15,7 +15,7 @@ void MasteringChain::prepare (double sampleRate, int blockSize)
     digitalEq.prepare (sampleRate, bs);
     digitalEq.reset();
 
-#if ADHDAW_HAS_DUSK_DSP
+#if FOCAL_HAS_DUSK_DSP
     busComp.setPlayConfigDetails (2, 2, sampleRate, bs);
     busComp.prepareToPlay (sampleRate, bs);
     compStereoBuffer.setSize (2, bs, false, false, true);
@@ -36,7 +36,7 @@ void MasteringChain::resetLoudness()
     loudnessMeter.reset();
 }
 
-#if ADHDAW_HAS_DUSK_DSP
+#if FOCAL_HAS_DUSK_DSP
 void MasteringChain::bindCompParams()
 {
     auto& apvts = busComp.getParameters();
@@ -76,7 +76,7 @@ void MasteringChain::updateCompParameters() noexcept
 #endif
 
 // MasteringDigitalEq is built unconditionally - its updater must be too,
-// otherwise the link fails when ADHDAW_HAS_DUSK_DSP is off (the call site
+// otherwise the link fails when FOCAL_HAS_DUSK_DSP is off (the call site
 // in processInPlace is unconditional and the prototype lives outside the
 // macro guard in the header).
 void MasteringChain::updateEqParameters() noexcept
@@ -110,7 +110,7 @@ void MasteringChain::processInPlace (float* L, float* R, int numSamples) noexcep
     updateEqParameters();
     digitalEq.processInPlace (L, R, numSamples);
 
-#if ADHDAW_HAS_DUSK_DSP
+#if FOCAL_HAS_DUSK_DSP
     {
         const int bufSize = compStereoBuffer.getNumSamples();
         updateCompParameters();
@@ -168,4 +168,4 @@ void MasteringChain::processInPlace (float* L, float* R, int numSamples) noexcep
         paramsRef->meterTruePeakDb.store     (loudnessMeter.getTruePeakDb(),    std::memory_order_relaxed);
     }
 }
-} // namespace adhdaw
+} // namespace focal

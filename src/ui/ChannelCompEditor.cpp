@@ -1,7 +1,7 @@
 #include "ChannelCompEditor.h"
-#include "ADHDawLookAndFeel.h"
+#include "FocalLookAndFeel.h"
 
-namespace adhdaw
+namespace focal
 {
 namespace
 {
@@ -730,4 +730,4 @@ void ChannelCompEditor::resized()
     inputMeterArea   = inMeter;
     grMeterArea      = grMeter;
 }
-} // namespace adhdaw
+} // namespace focal

@@ -6,7 +6,7 @@
 #include "AudioEngine.h"
 #include "../session/Session.h"
 
-namespace adhdaw
+namespace focal
 {
 // Headless self-test for the audio pipeline. The synthetic tests detach the
 // AudioEngine from deviceManager and call audioDeviceIOCallbackWithContext
@@ -110,4 +110,4 @@ private:
     juce::AudioDeviceManager& deviceManager;
     Session& session;
 };
-} // namespace adhdaw
+} // namespace focal

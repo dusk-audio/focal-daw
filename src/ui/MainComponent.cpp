@@ -10,18 +10,18 @@
 #include "../session/SessionSerializer.h"
 #include "ConsoleView.h"  // (already included transitively, kept explicit)
 
-namespace adhdaw
+namespace focal
 {
 MainComponent::MainComponent()
 {
     juce::LookAndFeel::setDefaultLookAndFeel (&lookAndFeel);
 
-    // Default to a session under ~/Music/ADHDaw/Untitled. The user can change
+    // Default to a session under ~/Music/Focal/Untitled. The user can change
     // this later via a session-management UI; for the recorder MVP this is
     // enough to get WAVs on disk.
     auto musicDir = juce::File::getSpecialLocation (juce::File::userMusicDirectory);
     if (! musicDir.exists()) musicDir = juce::File::getSpecialLocation (juce::File::userHomeDirectory);
-    session.setSessionDirectory (musicDir.getChildFile ("ADHDaw").getChildFile ("Untitled"));
+    session.setSessionDirectory (musicDir.getChildFile ("Focal").getChildFile ("Untitled"));
 
     // Top-of-window menu bar drives File / Settings actions. Replaces the
     // old row of TextButtons (Audio settings... / Save / Save As... / etc).
@@ -85,7 +85,7 @@ MainComponent::MainComponent()
     statusLabel.setJustificationType (juce::Justification::centredLeft);
     statusLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
     statusLabel.setText (juce::CharPointer_UTF8 (
-                             "ADH DAW \xe2\x80\x94 Phase 1a (mixer, no recording, no plugin hosting). "
+                             "Focal \xe2\x80\x94 Phase 1a (mixer, no recording, no plugin hosting). "
                              "Faders / pan / mute / solo / sends / HPF / EQ / Comp are live."),
                          juce::dontSendNotification);
     addAndMakeVisible (statusLabel);
@@ -116,7 +116,7 @@ MainComponent::MainComponent()
 
     // Intentionally NO auto-load on startup. Standard DAW behavior is to
     // start with a fresh session and require the user to explicitly Load. The
-    // previous best-effort auto-load of ~/Music/ADHDaw/Untitled/session.json
+    // previous best-effort auto-load of ~/Music/Focal/Untitled/session.json
     // was confusing - settings (master fader, mutes, etc.) silently persisted
     // across launches. Use the Load button to restore a saved session.
     // TODO: replace with a startup dialog (New / Open Recent / Browse...) when
@@ -152,9 +152,9 @@ MainComponent::MainComponent()
 
     setSize (w, h);
 
-    // Dev affordance for screenshot / xdotool flows: set ADHDAW_START_STAGE=mastering
+    // Dev affordance for screenshot / xdotool flows: set FOCAL_START_STAGE=mastering
     // to land in Mastering at startup. No-op in normal use.
-    if (auto envStage = std::getenv ("ADHDAW_START_STAGE"))
+    if (auto envStage = std::getenv ("FOCAL_START_STAGE"))
     {
         const juce::String s (envStage);
         if (s.equalsIgnoreCase ("mastering"))
@@ -172,9 +172,9 @@ MainComponent::MainComponent()
     // window paints first - otherwise the dialog can pop up over a blank
     // canvas. SafePointer guards the case where the user closes the app
     // before the message loop catches up to the queued lambda.
-    // ADHDAW_SKIP_STARTUP_DIALOG=1 bypasses the picker for screenshot /
+    // FOCAL_SKIP_STARTUP_DIALOG=1 bypasses the picker for screenshot /
     // xdotool flows.
-    if (std::getenv ("ADHDAW_SKIP_STARTUP_DIALOG") == nullptr)
+    if (std::getenv ("FOCAL_SKIP_STARTUP_DIALOG") == nullptr)
     {
         juce::Component::SafePointer<MainComponent> safeThis (this);
         juce::MessageManager::callAsync ([safeThis]
@@ -182,10 +182,18 @@ MainComponent::MainComponent()
             if (safeThis != nullptr) safeThis->launchStartupDialog();
         });
     }
+
+    // Autosave heartbeat. Writes session.json.autosave next to the canonical
+    // session.json every kAutosaveIntervalMs (30 s) so a crash loses at most
+    // ~30 s of work. The write is atomic (temp + rename), so even a kill
+    // during the timer fire never leaves a half-written autosave.
+    startTimer (kAutosaveIntervalMs);
 }
 
 MainComponent::~MainComponent()
 {
+    stopTimer();   // halt autosave before tearing down engine / session
+
     // Force-delete any audio settings dialog we launched. JUCE's
     // ModalComponentManager keeps modal dialogs alive on its own stack and
     // would clean them up at app exit via ScopedJuceInitialiser_GUI's
@@ -545,7 +553,7 @@ void MainComponent::launchStartupDialog()
 
     juce::DialogWindow::LaunchOptions opts;
     opts.content.setOwned (panel);
-    opts.dialogTitle = "ADH DAW";
+    opts.dialogTitle = "Focal";
     opts.dialogBackgroundColour = juce::Colour (0xff202024);
     opts.escapeKeyTriggersCloseButton = true;
     opts.useNativeTitleBar = true;
@@ -556,7 +564,7 @@ void MainComponent::launchStartupDialog()
 void MainComponent::newSessionPrompt()
 {
     auto startDir = juce::File::getSpecialLocation (juce::File::userMusicDirectory)
-                        .getChildFile ("ADH DAW");
+                        .getChildFile ("Focal");
     if (! startDir.exists()) startDir.createDirectory();
 
     sessionFileChooser = std::make_unique<juce::FileChooser> (
@@ -599,11 +607,63 @@ bool MainComponent::saveSessionTo (const juce::File& dir)
     if (SessionSerializer::save (session, target))
     {
         RecentSessions::add (dir);
+        // A successful manual save makes the autosave stale - drop it so the
+        // recovery prompt doesn't fire on the next clean load.
+        deleteAutosaveFor (dir);
         statusLabel.setText ("Saved: " + target.getFullPathName(), juce::dontSendNotification);
         return true;
     }
     statusLabel.setText ("Save failed at " + target.getFullPathName(), juce::dontSendNotification);
     return false;
+}
+
+juce::File MainComponent::getAutosaveFileFor (const juce::File& sessionDir) const
+{
+    return sessionDir.getChildFile ("session.json.autosave");
+}
+
+bool MainComponent::autosaveIsNewerThan (const juce::File& sessionJson) const
+{
+    const auto autosave = getAutosaveFileFor (sessionJson.getParentDirectory());
+    if (! autosave.existsAsFile()) return false;
+    if (! sessionJson.existsAsFile()) return true;   // autosave is the only state we have
+    return autosave.getLastModificationTime() > sessionJson.getLastModificationTime();
+}
+
+void MainComponent::deleteAutosaveFor (const juce::File& sessionDir) const
+{
+    const auto autosave = getAutosaveFileFor (sessionDir);
+    if (autosave.existsAsFile()) autosave.deleteFile();
+}
+
+void MainComponent::writeAutosave()
+{
+    const auto dir = session.getSessionDirectory();
+    if (dir == juce::File()) return;
+
+    // Ensure the directory exists before serialising. setSessionDirectory's
+    // ctor path normally handles this, but a session that was constructed
+    // via the default ~/Music/Focal/Untitled fallback may never have been
+    // touched on disk yet.
+    dir.createDirectory();
+
+    // Same publish bookend as the manual save - the serializer reads only
+    // from Session, not from the live engine.
+    engine.publishPluginStateForSave();
+    engine.publishTransportStateForSave();
+
+    const auto target = getAutosaveFileFor (dir);
+    if (! SessionSerializer::save (session, target))
+        DBG ("MainComponent: autosave write failed at " << target.getFullPathName());
+}
+
+void MainComponent::timerCallback()
+{
+    // The audio thread is independent of the message thread, so a slow JSON
+    // serialise here doesn't glitch playback. Still, we want autosave cheap -
+    // SessionSerializer::save on a 16-track session should land well under
+    // 30 ms.
+    writeAutosave();
 }
 
 void MainComponent::saveSessionAndThen (std::function<void(bool)> onComplete)
@@ -622,7 +682,7 @@ void MainComponent::saveSessionAndThen (std::function<void(bool)> onComplete)
     auto startDir = session.getSessionDirectory();
     if (! startDir.isDirectory())
         startDir = juce::File::getSpecialLocation (juce::File::userMusicDirectory)
-                       .getChildFile ("ADH DAW");
+                       .getChildFile ("Focal");
 
     sessionFileChooser = std::make_unique<juce::FileChooser> (
         "Save session to folder",
@@ -691,7 +751,7 @@ void MainComponent::saveAsParentPrompt (const juce::String& sessionName)
     auto startDir = session.getSessionDirectory().getParentDirectory();
     if (! startDir.isDirectory())
         startDir = juce::File::getSpecialLocation (juce::File::userMusicDirectory)
-                       .getChildFile ("ADH DAW");
+                       .getChildFile ("Focal");
     if (! startDir.exists()) startDir.createDirectory();
 
     sessionFileChooser = std::make_unique<juce::FileChooser> (
@@ -723,14 +783,62 @@ bool MainComponent::loadSessionFromJson (const juce::File& sessionJson)
     }
 
     const auto dir = sessionJson.getParentDirectory();
+
+    // Recovery prompt path. The dialog is async so we hand it a continuation
+    // that runs the actual load once the user has picked. The synchronous
+    // bool return reflects only "we accepted the load attempt"; the load
+    // itself completes after the dialog dismisses.
+    if (autosaveIsNewerThan (sessionJson))
+    {
+        const auto autosave = getAutosaveFileFor (dir);
+        juce::Component::SafePointer<MainComponent> safe (this);
+
+        juce::AlertWindow::showAsync (
+            juce::MessageBoxOptions()
+                .withIconType (juce::MessageBoxIconType::QuestionIcon)
+                .withTitle ("Recover from autosave?")
+                .withMessage (
+                    "An autosave file is newer than the saved session at\n"
+                    + dir.getFullPathName()
+                    + "\n\nAutosave: "  + autosave  .getLastModificationTime().toString (true, true)
+                    + "\nSaved:    "    + sessionJson.getLastModificationTime().toString (true, true)
+                    + "\n\nFocal probably exited unexpectedly. "
+                      "Recover the newer autosave, or load the saved session and discard it?")
+                .withButton ("Recover autosave")
+                .withButton ("Load saved session")
+                .withButton ("Cancel"),
+            [safe, sessionJson, dir, autosave] (int choice)
+            {
+                auto* self = safe.getComponent();
+                if (self == nullptr) return;
+                // MessageBoxOptions returns 1 for the first button, 2 for second,
+                // 3 for third. 0 means dismissed without a choice.
+                if (choice == 0 || choice == 3) return;
+                const auto src = (choice == 1) ? autosave : sessionJson;
+                self->finishLoadingSessionFrom (src, dir);
+            });
+        return true;
+    }
+
+    return finishLoadingSessionFrom (sessionJson, dir);
+}
+
+bool MainComponent::finishLoadingSessionFrom (const juce::File& sourceJson,
+                                                 const juce::File& dir)
+{
     session.setSessionDirectory (dir);
 
-    if (! SessionSerializer::load (session, sessionJson))
+    if (! SessionSerializer::load (session, sourceJson))
     {
-        statusLabel.setText ("Load failed: " + sessionJson.getFullPathName(),
+        statusLabel.setText ("Load failed: " + sourceJson.getFullPathName(),
                              juce::dontSendNotification);
         return false;
     }
+
+    // Autosave's job is done - clean up so the next load has a clean slate.
+    // (Even when the user chose "load saved session" we drop the autosave, on
+    // the assumption they've made a deliberate choice to discard it.)
+    deleteAutosaveFor (dir);
 
     // After deserialisation, the Track::pluginDescriptionXml /
     // pluginStateBase64 fields are populated; ask the engine to
@@ -749,7 +857,7 @@ bool MainComponent::loadSessionFromJson (const juce::File& sessionJson)
     resized();
 
     RecentSessions::add (dir);
-    statusLabel.setText ("Loaded: " + sessionJson.getFullPathName(),
+    statusLabel.setText ("Loaded: " + sourceJson.getFullPathName(),
                          juce::dontSendNotification);
     return true;
 }
@@ -894,4 +1002,4 @@ void MainComponent::menuItemSelected (int menuItemID, int /*topLevelMenuIndex*/)
         default: break;
     }
 }
-} // namespace adhdaw
+} // namespace focal

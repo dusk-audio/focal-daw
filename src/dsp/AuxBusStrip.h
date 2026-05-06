@@ -3,19 +3,22 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <atomic>
 #include "../session/Session.h"
+#include "../engine/PluginSlot.h"
 
-#if ADHDAW_HAS_DUSK_DSP
+#if FOCAL_HAS_DUSK_DSP
   #include "BritishEQProcessor.h"
   #include "UniversalCompressor.h"
 #endif
 
-namespace adhdaw
+namespace focal
 {
-// Phase 1a aux bus: 3-band EQ → bus compressor → pan → fader → meter.
-// EQ uses BritishEQProcessor's LF / LM / HF bands (with the LM band exposed
-// as MID and the HM band fixed-zero). Comp uses UniversalCompressor's Bus
-// mode. Both DSP instances are owned by the strip; APVTS atoms for the comp
-// are cached in bind so updateCompParameters can write lock-free.
+// Phase 1a aux bus: 3-band EQ → bus compressor → send-FX plugin → pan →
+// fader → meter. EQ uses BritishEQProcessor's LF / LM / HF bands (with the
+// LM band exposed as MID and the HM band fixed-zero). Comp uses
+// UniversalCompressor's Bus mode. The plugin slot (Phase 1b) hosts a single
+// reverb / delay / etc. that processes the summed bus signal stereo-in,
+// stereo-out before the pan/fader stage; same audio-thread-safe swap as the
+// per-channel insert slots, so loading mid-playback is glitch-free.
 class AuxBusStrip
 {
 public:
@@ -25,6 +28,13 @@ public:
     // oversampling on the bus comp.
     void prepare (double sampleRate, int blockSize, int oversamplingFactor = 1);
     void bind (const AuxBusParams& params) noexcept;
+
+    // Bind the per-app PluginManager so this aux's PluginSlot can resolve
+    // plugin files. Mirrors the channel-strip binding done at engine
+    // construction. The slot stays dormant until a plugin is loaded.
+    void bindPluginManager (PluginManager& mgr) noexcept { pluginSlot.setManager (mgr); }
+    PluginSlot&       getPluginSlot()       noexcept { return pluginSlot; }
+    const PluginSlot& getPluginSlot() const noexcept { return pluginSlot; }
 
     // Applies all bus DSP to L/R in place. Caller has already applied the
     // SIP gate (mute/solo) before invoking.
@@ -36,7 +46,13 @@ private:
     juce::SmoothedValue<float> panGainL  { 1.0f };
     juce::SmoothedValue<float> panGainR  { 1.0f };
 
-#if ADHDAW_HAS_DUSK_DSP
+    // Send-FX plugin slot. Sits between the bus comp and the pan/fader so the
+    // reverb / delay sees the post-EQ/post-comp summed signal, but the user
+    // can still trim its return level with the bus fader. Stereo in / stereo
+    // out via PluginSlot::processStereoBlock.
+    PluginSlot pluginSlot;
+
+#if FOCAL_HAS_DUSK_DSP
     BritishEQProcessor       eq;
     BritishEQProcessor::Parameters lastEqParams {};   // see ChannelStrip equivalent
     UniversalCompressor      busComp;
@@ -65,4 +81,4 @@ private:
 
     void updateGainTargets() noexcept;
 };
-} // namespace adhdaw
+} // namespace focal

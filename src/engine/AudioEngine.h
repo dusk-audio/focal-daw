@@ -17,7 +17,7 @@
 #include "RecordManager.h"
 #include "Transport.h"
 
-namespace adhdaw
+namespace focal
 {
 // Phase 2 engine: input -> channel strip (live or playback source) -> aux/master.
 // Adds Transport state, recording (RecordManager), and playback (PlaybackEngine).
@@ -70,6 +70,8 @@ public:
     // still owns the strips; this is just a typed accessor.
     ChannelStrip&       getStrip (int idx)       noexcept { return strips[(size_t) idx]; }
     const ChannelStrip& getStrip (int idx) const noexcept { return strips[(size_t) idx]; }
+    AuxBusStrip&        getAuxStrip (int idx)       noexcept { return auxStrips[(size_t) idx]; }
+    const AuxBusStrip&  getAuxStrip (int idx) const noexcept { return auxStrips[(size_t) idx]; }
 
     // Convenience for the UI; runs on the message thread. Coordinates the
     // RecordManager / PlaybackEngine state changes around Transport.
@@ -183,4 +185,4 @@ private:
     // until the playhead catches up. INT64_MIN sentinel = no record active.
     std::atomic<juce::int64> activeRecordStart { std::numeric_limits<juce::int64>::min() };
 };
-} // namespace adhdaw
+} // namespace focal

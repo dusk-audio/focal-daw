@@ -3,7 +3,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../session/Session.h"
 
-namespace adhdaw
+namespace focal
 {
 class MasterStripComponent final : public juce::Component, private juce::Timer
 {
@@ -64,4 +64,4 @@ private:
     int   outputPeakHoldFramesL = 0;
     int   outputPeakHoldFramesR = 0;
 };
-} // namespace adhdaw
+} // namespace focal

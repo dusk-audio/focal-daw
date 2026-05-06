@@ -5,7 +5,7 @@
 #include <memory>
 #include "../engine/BounceEngine.h"
 
-namespace adhdaw
+namespace focal
 {
 class AudioEngine;
 class Session;
@@ -59,4 +59,4 @@ private:
     bool   finished      = false;
     bool   succeeded     = false;
 };
-} // namespace adhdaw
+} // namespace focal

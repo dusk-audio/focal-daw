@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(ADHDaw VERSION 0.0.1 LANGUAGES C CXX)
+project(Focal VERSION 0.0.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -25,10 +25,10 @@ else()
         "  3. Add as submodule: git submodule add https://github.com/juce-framework/JUCE.git external/JUCE")
 endif()
 
-juce_add_gui_app(ADHDaw
-    PRODUCT_NAME       "ADH DAW"
+juce_add_gui_app(Focal
+    PRODUCT_NAME       "Focal"
     COMPANY_NAME       "Marc Korte"
-    BUNDLE_ID          "com.marckorte.adhdaw"
+    BUNDLE_ID          "com.marckorte.focal"
     VERSION            ${PROJECT_VERSION})
 
 # Dusk Audio plugins repo — donor for the analog DSP cores (4K EQ filter chain,
@@ -36,7 +36,7 @@ juce_add_gui_app(ADHDaw
 # AnalogEmulation library). Resolved via -DDUSK_PLUGINS_PATH > sibling
 # ../plugins. Header-only cores are picked up via the include paths below;
 # editing a header in the plugins repo automatically rebuilds the affected
-# ADH DAW translation units. No copy / submodule bump required.
+# Focal translation units. No copy / submodule bump required.
 if(DEFINED DUSK_PLUGINS_PATH)
     message(STATUS "Using Dusk plugins from: ${DUSK_PLUGINS_PATH}")
 elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../plugins/plugins/shared")
@@ -44,14 +44,14 @@ elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../plugins/plugins/shared")
     message(STATUS "Using Dusk plugins from sibling directory: ${DUSK_PLUGINS_PATH}")
 else()
     message(WARNING
-        "Dusk plugins repo not found. ADH DAW will build but DSP cores will be "
+        "Dusk plugins repo not found. Focal will build but DSP cores will be "
         "unavailable until you set -DDUSK_PLUGINS_PATH=/path/to/plugins or clone "
         "the plugins repo to ../plugins (sibling directory).")
 endif()
 
-target_sources(ADHDaw PRIVATE
+target_sources(Focal PRIVATE
     src/Main.cpp
-    src/ADHDawApp.cpp
+    src/FocalApp.cpp
     src/engine/AudioEngine.cpp
     src/engine/BounceEngine.cpp
     src/engine/MasteringPlayer.cpp
@@ -88,25 +88,26 @@ target_sources(ADHDaw PRIVATE
     src/ui/MasteringLimiterEditor.cpp
     src/ui/MasteringView.cpp
     src/ui/MasterStripComponent.cpp
+    src/ui/PluginPickerHelpers.cpp
     src/ui/SystemStatusBar.cpp
     src/ui/TapeStrip.cpp
     src/ui/TransportBar.cpp
     src/ui/WindowState.cpp)
 
-target_include_directories(ADHDaw PRIVATE
+target_include_directories(Focal PRIVATE
     src
     external/projucer-shim)  # JuceHeader.h shim used by vendored plugin DSP headers
 
 if(DEFINED DUSK_PLUGINS_PATH)
     # Per-plugin DSP headers from the Dusk plugins repo's main branch. Each
-    # plugin owns its DSP; ADHDaw vendors:
+    # plugin owns its DSP; Focal vendors:
     #   - multi-q    (BritishEQProcessor — per-channel 4-band British EQ)
     #   - multi-comp (UniversalCompressor — per-channel Opto/FET/VCA comp,
     #                 used here as a juce::AudioProcessor; only its DSP path is
     #                 active — the plugin editor is compiled-in but never
-    #                 instantiated by ADHDaw's UI)
+    #                 instantiated by Focal's UI)
     #   - tape-echo  (TapeEchoDSP::TapeSaturation — master bus tape sat)
-    target_include_directories(ADHDaw PRIVATE
+    target_include_directories(Focal PRIVATE
         "${DUSK_PLUGINS_PATH}/plugins/shared"
         "${DUSK_PLUGINS_PATH}/plugins/shared/AnalogEmulation"
         "${DUSK_PLUGINS_PATH}/plugins/shared/channel-comp"
@@ -117,22 +118,22 @@ if(DEFINED DUSK_PLUGINS_PATH)
 
     # Compile multi-comp's processor + editor + shared LEDMeter so
     # UniversalCompressor links cleanly. Editor sources are linked but not
-    # invoked from ADHDaw's UI — they exist only because UniversalCompressor's
+    # invoked from Focal's UI — they exist only because UniversalCompressor's
     # createEditor() references them.
-    target_sources(ADHDaw PRIVATE
+    target_sources(Focal PRIVATE
         "${DUSK_PLUGINS_PATH}/plugins/multi-comp/multicomp.cpp"
         "${DUSK_PLUGINS_PATH}/plugins/multi-comp/AnalogLookAndFeel.cpp"
         "${DUSK_PLUGINS_PATH}/plugins/multi-comp/EnhancedCompressorEditor.cpp"
         "${DUSK_PLUGINS_PATH}/plugins/shared/LEDMeter.cpp")
 
-    target_compile_definitions(ADHDaw PRIVATE ADHDAW_HAS_DUSK_DSP=1)
+    target_compile_definitions(Focal PRIVATE FOCAL_HAS_DUSK_DSP=1)
 endif()
 
-target_compile_definitions(ADHDaw PRIVATE
+target_compile_definitions(Focal PRIVATE
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
-    JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:ADHDaw,JUCE_PRODUCT_NAME>"
-    JUCE_APPLICATION_VERSION_STRING="$<TARGET_PROPERTY:ADHDaw,JUCE_VERSION>"
+    JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:Focal,JUCE_PRODUCT_NAME>"
+    JUCE_APPLICATION_VERSION_STRING="$<TARGET_PROPERTY:Focal,JUCE_VERSION>"
     JUCE_JACK=1
     JUCE_ALSA=1
     # Plugin host formats. Default JUCE setting is OFF; turn on the two
@@ -144,10 +145,10 @@ target_compile_definitions(ADHDaw PRIVATE
     JUCE_PLUGINHOST_LV2=1
     # Projucer-style macros that vendored multi-comp sources expect.
     JucePlugin_VersionString="${PROJECT_VERSION}"
-    JucePlugin_Name="ADHDaw_Comp"
+    JucePlugin_Name="Focal_Comp"
     JucePlugin_Manufacturer="Marc Korte")
 
-target_link_libraries(ADHDaw PRIVATE
+target_link_libraries(Focal PRIVATE
     juce::juce_audio_basics
     juce::juce_audio_devices
     juce::juce_audio_formats

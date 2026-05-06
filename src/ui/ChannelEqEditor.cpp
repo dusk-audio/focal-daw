@@ -1,7 +1,7 @@
 #include "ChannelEqEditor.h"
-#include "ADHDawLookAndFeel.h"
+#include "FocalLookAndFeel.h"
 
-namespace adhdaw
+namespace focal
 {
 namespace
 {
@@ -300,4 +300,4 @@ void ChannelEqEditor::resized()
         area.removeFromTop (kRowGap);
     }
 }
-} // namespace adhdaw
+} // namespace focal

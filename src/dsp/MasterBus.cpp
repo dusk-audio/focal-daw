@@ -2,7 +2,7 @@
 #include <cmath>
 #include <cstring>
 
-namespace adhdaw
+namespace focal
 {
 MasterBus::MasterBus() = default;
 
@@ -20,7 +20,7 @@ void MasterBus::prepare (double sampleRate, int blockSize, int oversamplingFacto
     currentOxFactor = (oversamplingFactor == 2 || oversamplingFactor == 4)
                        ? oversamplingFactor : 1;
 
-#if ADHDAW_HAS_DUSK_DSP
+#if FOCAL_HAS_DUSK_DSP
     tape.prepare (sampleRate, juce::jmax (1, blockSize));
     tape.setDrive (kTapeDrive);
     tape.reset();
@@ -64,7 +64,7 @@ void MasterBus::prepare (double sampleRate, int blockSize, int oversamplingFacto
     }
 }
 
-#if ADHDAW_HAS_DUSK_DSP
+#if FOCAL_HAS_DUSK_DSP
 void MasterBus::bindCompParams()
 {
     auto& apvts = busComp.getParameters();
@@ -154,7 +154,7 @@ void MasterBus::processInPlace (float* L, float* R, int numSamples) noexcept
         faderGain.setTargetValue (gain);
     }
 
-#if ADHDAW_HAS_DUSK_DSP
+#if FOCAL_HAS_DUSK_DSP
     // EQ first - tube saturation in TubeEQ feels musical pre-comp.
     // Chunk by preparedBlockSize so a host-driven numSamples > preparedBlockSize
     // never overflows TubeEQ's internal scratch (mirrors the comp chunking
@@ -195,7 +195,7 @@ void MasterBus::processInPlace (float* L, float* R, int numSamples) noexcept
     }
 #endif
 
-#if ADHDAW_HAS_DUSK_DSP
+#if FOCAL_HAS_DUSK_DSP
     if (tapeOn && useOversampler)
     {
         float* channels[2] = { L, R };
@@ -237,4 +237,4 @@ void MasterBus::processInPlace (float* L, float* R, int numSamples) noexcept
         paramsRef->meterPostMasterRDb.store (toDb (postPeakR), std::memory_order_relaxed);
     }
 }
-} // namespace adhdaw
+} // namespace focal

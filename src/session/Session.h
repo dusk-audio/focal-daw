@@ -7,7 +7,7 @@
 #include <memory>
 #include <vector>
 
-namespace adhdaw
+namespace focal
 {
 // Phase 1a-minimal channel strip parameters: fader, pan, mute, solo. The full
 // strip (HPF, 4-band EQ, FET/Opto compressor, sends, bus assigns) lands in
@@ -120,15 +120,34 @@ struct ChannelStripParams
     static constexpr float kCompMakeupMin =  -12.0f, kCompMakeupMax =  24.0f;
 };
 
-// Audio region - references a mono WAV file on disk. Phase 2 minimum: a
-// region is a single recorded take; later phases add take history, trim,
-// copy/paste etc. per the spec.
+// One slot in a region's take history. Stores everything needed to swap a
+// previously-recorded version of this region's audio back into the live
+// region: the WAV path on disk, where in that WAV the playable slice starts,
+// and how many samples the slice runs for. Timeline position is NOT stored -
+// rotating takes preserves the region's timelineStart so the user always
+// hears the alternate take in the same spot in the song.
+struct TakeRef
+{
+    juce::File file;
+    juce::int64 sourceOffset    = 0;
+    juce::int64 lengthInSamples = 0;
+};
+
+// Audio region - references a mono WAV file on disk. Multiple recordings
+// over the same timeline range stack into `previousTakes`; the live take's
+// fields (file/sourceOffset/lengthInSamples) plus that vector form a
+// rotating history the user can cycle through via the badge UI.
 struct AudioRegion
 {
     juce::File file;                  // absolute path to the WAV
     juce::int64 timelineStart = 0;    // sample position on the timeline
     juce::int64 lengthInSamples = 0;
     juce::int64 sourceOffset = 0;     // future: trim from left
+
+    // Older takes that occupied this region's timeline range, captured by
+    // RecordManager::stopRecording when the new take's range fully contains
+    // an existing region. Front of the vector = next to surface on a cycle.
+    std::vector<TakeRef> previousTakes;
 };
 
 struct Track
@@ -222,6 +241,13 @@ struct AuxBus
     juce::String name;
     juce::Colour colour;
     AuxBusParams strip;
+
+    // Send-FX plugin slot persistence. Same shape as Track: populated from
+    // the live PluginSlot by AudioEngine::publishPluginStateForSave before
+    // session save, consumed by consumePluginStateAfterLoad on load. Empty
+    // when no plugin is loaded.
+    juce::String pluginDescriptionXml;
+    juce::String pluginStateBase64;
 };
 
 struct MasterBusParams
@@ -449,4 +475,4 @@ private:
     std::atomic<int> soloAuxCount   { 0 };
     std::atomic<int> armedTrackCount { 0 };
 };
-} // namespace adhdaw
+} // namespace focal

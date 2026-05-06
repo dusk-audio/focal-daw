@@ -2,7 +2,7 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
-namespace adhdaw
+namespace focal
 {
 // Per-app plugin host infrastructure. Owns the AudioPluginFormatManager and
 // the shared KnownPluginList (the "what's installed" cache). Channel strips
@@ -17,7 +17,7 @@ namespace adhdaw
 //
 // Lifetime: a single PluginManager instance lives in AudioEngine for now
 // (so the audio engine owns plugin infrastructure alongside the device
-// manager). Could move to ADHDawApp scope later if non-engine code needs
+// manager). Could move to FocalApp scope later if non-engine code needs
 // access.
 class PluginManager
 {
@@ -49,7 +49,7 @@ public:
                            double sampleRate, int blockSize,
                            juce::String& errorMessage);
 
-    // Cache file lives at ~/.config/ADH DAW/plugin-cache.xml (Linux). Saved
+    // Cache file lives at ~/.config/Focal/plugin-cache.xml (Linux). Saved
     // every time a plugin is successfully added to knownPluginList; loaded
     // (best-effort) at construction. Invalid entries are tolerated - JUCE's
     // KnownPluginList::recreateFromXml silently skips bad ones.
@@ -70,4 +70,4 @@ private:
     void loadCache();
     void saveCache() const;
 };
-} // namespace adhdaw
+} // namespace focal

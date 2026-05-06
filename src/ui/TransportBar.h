@@ -3,7 +3,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../engine/AudioEngine.h"
 
-namespace adhdaw
+namespace focal
 {
 // Circular icon button used for the transport row (Stop / Play / Record).
 // Replaces the text-only buttons with a real-mixer look: a dark filled disc
@@ -70,4 +70,4 @@ public:
     void setTapeStripExpanded (bool expanded);
     bool isTapeStripExpanded() const;
 };
-} // namespace adhdaw
+} // namespace focal

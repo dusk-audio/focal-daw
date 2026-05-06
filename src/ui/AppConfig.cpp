@@ -1,6 +1,6 @@
 #include "AppConfig.h"
 
-namespace adhdaw::appconfig
+namespace focal::appconfig
 {
 namespace
 {
@@ -9,7 +9,7 @@ constexpr const char* kKeyUiScale = "ui_scale";
 juce::File getStorePath()
 {
     auto cfgDir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
-                      .getChildFile ("ADH DAW");
+                      .getChildFile ("Focal");
     if (! cfgDir.exists()) cfgDir.createDirectory();
     return cfgDir.getChildFile ("app-config.properties");
 }
@@ -78,4 +78,4 @@ void setUiScaleOverride (float scale)
     const float clamped = juce::jlimit (kUiScaleMin, kUiScaleMax, scale);
     writeKey (kKeyUiScale, juce::String (clamped));
 }
-} // namespace adhdaw::appconfig
+} // namespace focal::appconfig

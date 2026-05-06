@@ -3,7 +3,7 @@
 #include "../engine/PlaybackEngine.h"
 #include "../engine/Transport.h"
 
-namespace adhdaw
+namespace focal
 {
 namespace
 {
@@ -151,4 +151,4 @@ bool DeleteRegionAction::undo()
     rebuildPlaybackIfStopped (engine);
     return true;
 }
-} // namespace adhdaw
+} // namespace focal

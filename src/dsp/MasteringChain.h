@@ -7,11 +7,11 @@
 #include "MasteringDigitalEq.h"
 #include "../session/Session.h"
 
-#if ADHDAW_HAS_DUSK_DSP
+#if FOCAL_HAS_DUSK_DSP
   #include "UniversalCompressor.h"
 #endif
 
-namespace adhdaw
+namespace focal
 {
 // Mastering-stage signal chain: Tube EQ → Bus comp → Brickwall limiter.
 // Reads its parameters from MasteringParams (a sibling of MasterBusParams);
@@ -41,8 +41,8 @@ public:
     // UI-side accessors. The Mastering view embeds the UniversalCompressor's
     // own AudioProcessorEditor for the Multi-Comp panel and drives the
     // limiter atomics through a custom editor. Returns null when the donor
-    // DSP isn't compiled in (ADHDAW_HAS_DUSK_DSP=0 build).
-#if ADHDAW_HAS_DUSK_DSP
+    // DSP isn't compiled in (FOCAL_HAS_DUSK_DSP=0 build).
+#if FOCAL_HAS_DUSK_DSP
     UniversalCompressor* getCompProcessor() noexcept { return &busComp; }
 #else
     juce::AudioProcessor* getCompProcessor() noexcept { return nullptr; }
@@ -59,7 +59,7 @@ private:
     void updateEqParameters() noexcept;
     void updateLimiterParameters() noexcept;
 
-#if ADHDAW_HAS_DUSK_DSP
+#if FOCAL_HAS_DUSK_DSP
     UniversalCompressor         busComp;
     juce::MidiBuffer            compMidi;
     juce::AudioBuffer<float>    compStereoBuffer;
@@ -86,4 +86,4 @@ private:
 
     int preparedBlockSize = 0;
 };
-} // namespace adhdaw
+} // namespace focal

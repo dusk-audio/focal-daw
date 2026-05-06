@@ -1,3 +1,3 @@
-#include "ADHDawApp.h"
+#include "FocalApp.h"
 
-START_JUCE_APPLICATION (adhdaw::ADHDawApp)
+START_JUCE_APPLICATION (focal::FocalApp)

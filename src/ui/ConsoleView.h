@@ -9,7 +9,7 @@
 #include "../session/Session.h"
 #include "../engine/AudioEngine.h"
 
-namespace adhdaw
+namespace focal
 {
 class ConsoleView final : public juce::Component
 {
@@ -69,4 +69,4 @@ private:
 
     void updateBankVisibility();
 };
-} // namespace adhdaw
+} // namespace focal

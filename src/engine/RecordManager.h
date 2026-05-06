@@ -8,7 +8,7 @@
 #include <memory>
 #include "../session/Session.h"
 
-namespace adhdaw
+namespace focal
 {
 // Per-track threaded WAV writer. Lifetime: created on the message thread when
 // recording starts, written to from the audio thread (lock-free queue), drained
@@ -45,7 +45,7 @@ private:
         juce::int64 framesWritten = 0;
     };
 
-    juce::TimeSliceThread diskThread { "ADHDaw recorder" };
+    juce::TimeSliceThread diskThread { "Focal recorder" };
     juce::WavAudioFormat wav;
 
     std::array<std::unique_ptr<PerTrackWriter>, Session::kNumTracks> writers;
@@ -54,4 +54,4 @@ private:
     juce::int64 recordStartSample = 0;
     double      recordSampleRate  = 0.0;
 };
-} // namespace adhdaw
+} // namespace focal

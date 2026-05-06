@@ -1,6 +1,6 @@
 #include "ConsoleView.h"
 
-namespace adhdaw
+namespace focal
 {
 ConsoleView::ConsoleView (Session& session, AudioEngine& engine) : sessionRef (session)
 {
@@ -13,7 +13,8 @@ ConsoleView::ConsoleView (Session& session, AudioEngine& engine) : sessionRef (s
     for (int i = 0; i < Session::kNumAuxBuses; ++i)
     {
         auxStrips[(size_t) i] = std::make_unique<AuxBusComponent> (
-            session.aux (i), session, i);
+            session.aux (i), session, i,
+            engine.getAuxStrip (i).getPluginSlot());
         addAndMakeVisible (auxStrips[(size_t) i].get());
     }
     masterStrip = std::make_unique<MasterStripComponent> (session.master());
@@ -175,4 +176,4 @@ void ConsoleView::setStripsMixingMode (bool mixing)
         if (strip != nullptr)
             strip->setMixingMode (mixing);
 }
-} // namespace adhdaw
+} // namespace focal

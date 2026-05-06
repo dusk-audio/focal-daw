@@ -1,7 +1,7 @@
 #include "CompMeterStrip.h"
-#include "ADHDawLookAndFeel.h"
+#include "FocalLookAndFeel.h"
 
-namespace adhdaw
+namespace focal
 {
 CompMeterStrip::CompMeterStrip (Track& t) : track (t)
 {
@@ -342,4 +342,4 @@ void CompMeterStrip::mouseDoubleClick (const juce::MouseEvent&)
     resetThresholdForMode (track);
     repaint();
 }
-} // namespace adhdaw
+} // namespace focal

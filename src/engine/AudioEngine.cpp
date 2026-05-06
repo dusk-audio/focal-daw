@@ -1,7 +1,7 @@
 #include "AudioEngine.h"
 #include <cstring>
 
-namespace adhdaw
+namespace focal
 {
 AudioEngine::AudioEngine (Session& sessionToBindTo) : session (sessionToBindTo)
 {
@@ -15,7 +15,12 @@ AudioEngine::AudioEngine (Session& sessionToBindTo) : session (sessionToBindTo)
         strips[(size_t) i].bindPluginManager (pluginManager);
     }
     for (int i = 0; i < Session::kNumAuxBuses; ++i)
+    {
         auxStrips[(size_t) i].bind (session.aux (i).strip);
+        // Same PluginManager binding as the channel strips - the aux's
+        // send-FX slot needs it to resolve files into AudioPluginInstances.
+        auxStrips[(size_t) i].bindPluginManager (pluginManager);
+    }
     master.bind (session.master());
     masteringChain.bind (session.mastering());
 
@@ -26,7 +31,7 @@ AudioEngine::AudioEngine (Session& sessionToBindTo) : session (sessionToBindTo)
         err.isNotEmpty())
     {
         std::fprintf (stderr,
-                      "[ADHDaw/AudioEngine] device-manager init reported: %s\n",
+                      "[Focal/AudioEngine] device-manager init reported: %s\n",
                       err.toRawUTF8());
     }
     deviceManager.addAudioCallback (this);
@@ -150,6 +155,13 @@ void AudioEngine::publishPluginStateForSave()
         track.pluginDescriptionXml = slot.getDescriptionXmlForSave();
         track.pluginStateBase64    = slot.getStateBase64ForSave();
     }
+    for (int a = 0; a < Session::kNumAuxBuses; ++a)
+    {
+        auto& aux  = session.aux (a);
+        auto& slot = auxStrips[(size_t) a].getPluginSlot();
+        aux.pluginDescriptionXml = slot.getDescriptionXmlForSave();
+        aux.pluginStateBase64    = slot.getStateBase64ForSave();
+    }
 }
 
 void AudioEngine::publishTransportStateForSave()
@@ -188,6 +200,18 @@ void AudioEngine::consumePluginStateAfterLoad()
                   << ": " << error);
         }
     }
+    for (int a = 0; a < Session::kNumAuxBuses; ++a)
+    {
+        auto& aux  = session.aux (a);
+        auto& slot = auxStrips[(size_t) a].getPluginSlot();
+        juce::String error;
+        if (! slot.restoreFromSavedState (aux.pluginDescriptionXml,
+                                            aux.pluginStateBase64, error))
+        {
+            DBG ("AudioEngine: failed to restore plugin on aux " << (a + 1)
+                  << ": " << error);
+        }
+    }
 }
 
 void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
@@ -203,7 +227,7 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     if (activeOut <= 0)
     {
         std::fprintf (stderr,
-                      "[ADHDaw/AudioEngine] WARNING: device \"%s\" (type %s) opened with "
+                      "[Focal/AudioEngine] WARNING: device \"%s\" (type %s) opened with "
                       "0 output channels (in=%d). Engine output will be silent. Pick a "
                       "different device - \"Default ALSA Output\" or another backend - or "
                       "stop PipeWire if you want raw ALSA on this interface.\n",
@@ -632,4 +656,4 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             xrunCount.fetch_add (1, std::memory_order_relaxed);
     }
 }
-} // namespace adhdaw
+} // namespace focal

@@ -3,7 +3,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../session/Session.h"
 
-namespace adhdaw
+namespace focal
 {
 class BrickwallLimiter;
 
@@ -69,4 +69,4 @@ private:
     float displayedOutDb  = -100.0f;   // post-limiter peak
     float displayedGrDb   = 0.0f;
 };
-} // namespace adhdaw
+} // namespace focal

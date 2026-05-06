@@ -1,7 +1,9 @@
 #include "AuxBusComponent.h"
-#include "ADHDawLookAndFeel.h"  // fourKColors palette
+#include "FocalLookAndFeel.h"  // fourKColors palette
+#include "PluginPickerHelpers.h"
+#include "../engine/PluginSlot.h"
 
-namespace adhdaw
+namespace focal
 {
 namespace
 {
@@ -42,8 +44,8 @@ void styleToggle (juce::TextButton& b, juce::Colour onColour)
 }
 } // namespace
 
-AuxBusComponent::AuxBusComponent (AuxBus& a, Session& s, int idx)
-    : aux (a), sessionRef (s), auxIndex (idx)
+AuxBusComponent::AuxBusComponent (AuxBus& a, Session& s, int idx, PluginSlot& slotRef)
+    : aux (a), sessionRef (s), auxIndex (idx), pluginSlot (slotRef)
 {
     nameLabel.setText (aux.name, juce::dontSendNotification);
     nameLabel.setJustificationType (juce::Justification::centred);
@@ -60,6 +62,38 @@ AuxBusComponent::AuxBusComponent (AuxBus& a, Session& s, int idx)
         else aux.name = txt;
     };
     addAndMakeVisible (nameLabel);
+
+    // FX plugin slot button. Sits in the placeholder fxArea at the top of
+    // the strip. Empty slot → "+ FX"; loaded → plugin name (truncated to
+    // fit). Right-click for replace/remove/re-enable.
+    fxButton.setColour (juce::TextButton::buttonColourId,   juce::Colour (0xff222226));
+    fxButton.setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xff5a4880));
+    fxButton.setColour (juce::TextButton::textColourOffId,  juce::Colour (0xff9080c0));
+    fxButton.setColour (juce::TextButton::textColourOnId,   juce::Colours::white);
+    fxButton.setTooltip ("Click to load a send-FX plugin (reverb / delay / etc).\n"
+                          "Right-click for replace / remove.");
+    fxButton.onClick = [this]
+    {
+        // Loaded → toggle bypass (and clear auto-bypass) on left-click for
+        // quick A/B; empty slot → open picker.
+        if (pluginSlot.isLoaded())
+        {
+            if (pluginSlot.wasAutoBypassed())
+            {
+                pluginSlot.clearAutoBypass();
+                refreshFxButton();
+                return;
+            }
+            pluginSlot.setBypassed (! pluginSlot.isBypassed());
+            refreshFxButton();
+            return;
+        }
+        pluginpicker::openPickerMenu (pluginSlot, fxButton, activeFxChooser,
+                                        [this] { refreshFxButton(); });
+    };
+    fxButton.onRightClick = [this] (const juce::MouseEvent&) { showFxButtonMenu(); };
+    addAndMakeVisible (fxButton);
+    refreshFxButton();
 
     const auto eqGreen = juce::Colour (0xff80c090);
     const auto compGold = juce::Colour (0xffe0c050);
@@ -227,6 +261,82 @@ void AuxBusComponent::timerCallback()
 
     if (! meterArea.isEmpty())   repaint (meterArea);
     if (! grMeterArea.isEmpty()) repaint (grMeterArea.expanded (2, 10));  // include "GR" caption
+
+    // Poll the slot's display name. The PluginSlot is mutated only on the
+    // message thread, so we just refresh whenever the displayed string is
+    // out of sync with the live slot.
+    const auto current = pluginSlot.isLoaded() ? pluginSlot.getLoadedName() : juce::String();
+    if (current != lastSlotName)
+        refreshFxButton();
+}
+
+void AuxBusComponent::refreshFxButton()
+{
+    if (pluginSlot.isLoaded())
+    {
+        const auto name = pluginSlot.getLoadedName();
+        lastSlotName = name;
+        const bool autoBp = pluginSlot.wasAutoBypassed();
+        const bool manBp  = pluginSlot.isBypassed();
+        // Auto-bypass is the loud failure mode (plugin stalled) - show it as
+        // a clear tag so the user knows what happened.
+        if (autoBp)
+            fxButton.setButtonText ("! " + name + " (stalled)");
+        else if (manBp)
+            fxButton.setButtonText ("(bypassed) " + name);
+        else
+            fxButton.setButtonText (name);
+        fxButton.setToggleState (! manBp && ! autoBp, juce::dontSendNotification);
+    }
+    else
+    {
+        lastSlotName.clear();
+        fxButton.setButtonText ("+ FX");
+        fxButton.setToggleState (false, juce::dontSendNotification);
+    }
+}
+
+void AuxBusComponent::showFxButtonMenu()
+{
+    juce::PopupMenu menu;
+    if (pluginSlot.isLoaded())
+    {
+        menu.addItem (3001, "Replace plugin...");
+        menu.addItem (3002, "Remove plugin");
+        if (pluginSlot.wasAutoBypassed())
+            menu.addItem (3003, "Re-enable plugin (auto-bypassed)");
+    }
+    else
+    {
+        menu.addItem (3010, "Pick plugin...");
+    }
+
+    juce::Component::SafePointer<AuxBusComponent> safe (this);
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&fxButton),
+        [safe] (int result)
+        {
+            auto* self = safe.getComponent();
+            if (self == nullptr || result <= 0) return;
+            switch (result)
+            {
+                case 3001:
+                case 3010:
+                    pluginpicker::openPickerMenu (self->pluginSlot, self->fxButton,
+                                                    self->activeFxChooser,
+                                                    [s = juce::Component::SafePointer<AuxBusComponent> (self)]
+                                                    { if (auto* x = s.getComponent()) x->refreshFxButton(); });
+                    break;
+                case 3002:
+                    self->pluginSlot.unload();
+                    self->refreshFxButton();
+                    break;
+                case 3003:
+                    self->pluginSlot.clearAutoBypass();
+                    self->refreshFxButton();
+                    break;
+                default: break;
+            }
+        });
 }
 
 void AuxBusComponent::mouseDown (const juce::MouseEvent& e)
@@ -284,16 +394,9 @@ void AuxBusComponent::paint (juce::Graphics& g)
     g.setColour (juce::Colour (0xff2a2a2e));
     g.drawRoundedRectangle (getLocalBounds().toFloat().reduced (1.5f), 4.0f, 1.0f);
 
-    if (! fxArea.isEmpty())
-    {
-        g.setColour (juce::Colour (0xff222226));
-        g.fillRoundedRectangle (fxArea.toFloat(), 3.0f);
-        g.setColour (juce::Colour (0xff9080c0).withAlpha (0.45f));
-        g.drawRoundedRectangle (fxArea.toFloat().reduced (0.5f), 3.0f, 0.8f);
-        g.setColour (juce::Colour (0xff9080c0).withAlpha (0.85f));
-        g.setFont (juce::Font (juce::FontOptions (9.0f, juce::Font::bold)));
-        g.drawText ("FX", fxArea.reduced (3, 2), juce::Justification::centredTop, false);
-    }
+    // fxArea is now occupied by the FX button (placed in resized()); the
+    // button paints its own background, so we don't draw a placeholder
+    // rectangle here any more.
 
     // Stereo LED meter - two columns side by side inside meterArea.
     if (! meterArea.isEmpty())
@@ -402,8 +505,10 @@ void AuxBusComponent::resized()
     nameLabel.setBounds (area.removeFromTop (20));
     area.removeFromTop (3);
 
-    // FX placeholder for the future plugin slot.
+    // FX plugin slot button. Same vertical budget as the channel strip's
+    // plugin button so the cross-strip rhythm reads cleanly.
     fxArea = area.removeFromTop (32);
+    fxButton.setBounds (fxArea.reduced (3, 4));
     area.removeFromTop (3);
 
     // 26 px rotary + 14 px textbox. Block width is 40 - wider than the
@@ -507,4 +612,4 @@ void AuxBusComponent::resized()
     area.removeFromRight (3);
     faderSlider.setBounds (area);
 }
-} // namespace adhdaw
+} // namespace focal

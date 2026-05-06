@@ -2,7 +2,7 @@
 #include "PluginManager.h"
 #include <cstring>
 
-namespace adhdaw
+namespace focal
 {
 PluginSlot::~PluginSlot()
 {
@@ -287,4 +287,75 @@ void PluginSlot::processMonoBlock (float* monoData, int numSamples) noexcept
             autoBypassed.store (true, std::memory_order_relaxed);
     }
 }
-} // namespace adhdaw
+
+void PluginSlot::processStereoBlock (float* L, float* R, int numSamples) noexcept
+{
+    if (bypassed.load (std::memory_order_relaxed)
+        || autoBypassed.load (std::memory_order_relaxed))
+        return;
+
+    auto* p = currentInstance.load (std::memory_order_acquire);
+    if (p == nullptr) return;
+
+    constexpr double kBudgetFraction = 0.6;
+    const double bufferMs = (preparedSampleRate > 0.0)
+                              ? 1000.0 * (double) numSamples / preparedSampleRate
+                              : 0.0;
+    const auto t0 = juce::Time::getHighResolutionTicks();
+
+    const int numIn  = p->getTotalNumInputChannels();
+    const int numOut = p->getTotalNumOutputChannels();
+
+    if (numIn >= 2 && numOut >= 2)
+    {
+        // Stereo plugin - wrap L/R as a 2-channel AudioBuffer and process in
+        // place. Same shape as the per-aux EQ/comp pass above.
+        float* channels[2] = { L, R };
+        juce::AudioBuffer<float> buf (channels, 2, numSamples);
+        emptyMidi.clear();
+        p->processBlock (buf, emptyMidi);
+    }
+    else if (numIn == 1 && numOut >= 1)
+    {
+        // Mono-only plugin on a stereo bus: collapse to mono, run, then fan
+        // out the (possibly stereo) output back across L/R. Use the
+        // pre-allocated stereoScratch as the working buffer.
+        if (numSamples > stereoScratch.getNumSamples()) return;
+
+        float* mono = stereoScratch.getWritePointer (0);
+        for (int i = 0; i < numSamples; ++i)
+            mono[i] = (L[i] + R[i]) * 0.5f;
+
+        // Use a 1-channel view sized to whatever the plugin reports.
+        // Wide single-channel plugins (rare) still work because we only feed
+        // numIn channels.
+        const int procCh = juce::jmax (1, juce::jmin (numIn, numOut));
+        for (int c = 1; c < procCh; ++c)
+            stereoScratch.copyFrom (c, 0, mono, numSamples);
+
+        float* procPtrs[2] = { stereoScratch.getWritePointer (0),
+                               procCh > 1 ? stereoScratch.getWritePointer (1) : nullptr };
+        juce::AudioBuffer<float> buf (procPtrs, procCh, numSamples);
+        emptyMidi.clear();
+        p->processBlock (buf, emptyMidi);
+
+        const float* outL = stereoScratch.getReadPointer (0);
+        const float* outR = (numOut >= 2) ? stereoScratch.getReadPointer (1) : outL;
+        std::memcpy (L, outL, sizeof (float) * (size_t) numSamples);
+        std::memcpy (R, outR, sizeof (float) * (size_t) numSamples);
+    }
+    else
+    {
+        // Plugin layout we can't handle (zero outputs, etc.) - bail.
+        return;
+    }
+
+    if (bufferMs > 0.0)
+    {
+        const double elapsedMs = juce::Time::highResolutionTicksToSeconds (
+            juce::Time::getHighResolutionTicks() - t0) * 1000.0;
+        if (elapsedMs > bufferMs * kBudgetFraction)
+            autoBypassed.store (true, std::memory_order_relaxed);
+    }
+}
+} // namespace focal

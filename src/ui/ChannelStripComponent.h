@@ -6,7 +6,7 @@
 #include "CompMeterStrip.h"
 #include "../session/Session.h"
 
-namespace adhdaw
+namespace focal
 {
 class ChannelStripComponent final : public juce::Component, private juce::Timer
 {
@@ -205,4 +205,4 @@ private:
     void setEqSectionVisible (bool visible);
     void setCompSectionVisible (bool visible);
 };
-} // namespace adhdaw
+} // namespace focal

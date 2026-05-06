@@ -3,7 +3,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../session/Session.h"
 
-namespace adhdaw
+namespace focal
 {
 class ChannelCompEditor final : public juce::Component, private juce::Timer
 {
@@ -65,4 +65,4 @@ private:
     float displayedGrDb    = 0.0f;
     bool  draggingThreshold = false;
 };
-} // namespace adhdaw
+} // namespace focal

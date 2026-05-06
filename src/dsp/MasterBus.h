@@ -5,13 +5,13 @@
 #include <atomic>
 #include "../session/Session.h"
 
-#if ADHDAW_HAS_DUSK_DSP
+#if FOCAL_HAS_DUSK_DSP
   #include "TapeSaturation.h"     // tape-echo/Source/DSP - TapeEchoDSP::TapeSaturation
   #include "TubeEQProcessor.h"    // multi-q - Pultec-style EQ
   #include "UniversalCompressor.h"// multi-comp - Bus mode for the master comp
 #endif
 
-namespace adhdaw
+namespace focal
 {
 // Phase 1a master bus: Pultec-style Tube EQ → bus compressor → tape
 // saturation → master fader. Parameters come from session.master() via
@@ -35,7 +35,7 @@ private:
 
     static constexpr float kTapeDrive = 0.5f;
 
-#if ADHDAW_HAS_DUSK_DSP
+#if FOCAL_HAS_DUSK_DSP
     TapeEchoDSP::TapeSaturation tape;
     TubeEQProcessor             tubeEQ;
     TubeEQProcessor::Parameters lastTubeEqParams {};   // see ChannelStrip equivalent
@@ -75,4 +75,4 @@ private:
     int preparedBlockSize    = 0;
     int currentOxFactor      = 1;     // 1, 2 or 4 - set in prepare()
 };
-} // namespace adhdaw
+} // namespace focal

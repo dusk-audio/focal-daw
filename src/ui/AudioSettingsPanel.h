@@ -4,7 +4,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <memory>
 
-// ADHDaw-side declarations of the runtime ALSA periods accessors that live
+// Focal-side declarations of the runtime ALSA periods accessors that live
 // in our patched JUCE/modules/juce_audio_devices/native/juce_ALSA_linux.cpp.
 // The default value is 4 to match upstream JUCE; UI writes here before
 // triggering an AudioDeviceManager re-open so the new period count takes
@@ -15,7 +15,7 @@ namespace juce
     JUCE_API int  getALSARequestedPeriods() noexcept;
 }
 
-namespace adhdaw
+namespace focal
 {
 class AudioEngine;
 class Session;
@@ -66,4 +66,4 @@ private:
     void applyUiScaleChange();
     void openSelfTest();
 };
-} // namespace adhdaw
+} // namespace focal

@@ -5,7 +5,7 @@
 #include "../engine/BounceEngine.h"
 #include "../engine/MasteringPlayer.h"
 
-namespace adhdaw
+namespace focal
 {
 WaveformDisplay::WaveformDisplay (MasteringPlayer& p)
     : player (p),
@@ -705,4 +705,4 @@ void MasteringView::doExport()
     opts.resizable = false;
     opts.launchAsync();
 }
-} // namespace adhdaw
+} // namespace focal

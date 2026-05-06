@@ -3,7 +3,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <atomic>
 
-namespace adhdaw
+namespace focal
 {
 class PluginManager;
 
@@ -92,6 +92,13 @@ public:
     // the plugin would just freeze the thread again.
     void processMonoBlock (float* monoData, int numSamples) noexcept;
 
+    // Stereo variant for aux/master buses. L and R are processed in place.
+    // Mono-only plugins: average L+R into a temporary mono buffer, run the
+    // plugin, write the result to both channels (so a mono reverb still
+    // makes sense on a stereo send return).
+    // Same time-budget watchdog as processMonoBlock.
+    void processStereoBlock (float* L, float* R, int numSamples) noexcept;
+
     // True if the slot was AUTO-bypassed by the time-budget watchdog (as
     // distinct from manual setBypassed). UI shows this state so the user
     // knows why their plugin stopped affecting audio.
@@ -142,4 +149,4 @@ private:
     juce::AudioBuffer<float> stereoScratch;
     juce::MidiBuffer         emptyMidi;
 };
-} // namespace adhdaw
+} // namespace focal

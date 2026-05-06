@@ -4,7 +4,7 @@
 #include "../engine/AudioEngine.h"
 #include "../session/Session.h"
 
-namespace adhdaw
+namespace focal
 {
 // Phase 2 minimum tape strip:
 //   - 16 horizontal rows (one per track), color-coded with track accent
@@ -63,7 +63,7 @@ private:
     // Region hit-testing for the editing surface. `op` reports which
     // sub-area of the region the cursor lies over (body / left edge /
     // right edge); kEdgeHitPx controls how wide the resize gutter is.
-    enum class RegionOp { None, Move, TrimStart, TrimEnd };
+    enum class RegionOp { None, Move, TrimStart, TrimEnd, TakeBadge };
     static constexpr int kEdgeHitPx = 6;
     struct RegionHit
     {
@@ -118,4 +118,4 @@ private:
     int selectedTrack    = -1;
     int selectedRegion   = -1;
 };
-} // namespace adhdaw
+} // namespace focal

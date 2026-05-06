@@ -3,7 +3,7 @@
 #include "../engine/AudioPipelineSelfTest.h"
 #include "../session/Session.h"
 
-namespace adhdaw
+namespace focal
 {
 SelfTestPanel::SelfTestPanel (AudioEngine& e,
                                 juce::AudioDeviceManager& dm,
@@ -87,4 +87,4 @@ void SelfTestPanel::copyToClipboard()
 {
     juce::SystemClipboard::copyTextToClipboard (logView.getText());
 }
-} // namespace adhdaw
+} // namespace focal

@@ -1,11 +1,11 @@
 #include "WindowState.h"
 
-namespace adhdaw
+namespace focal
 {
 juce::File WindowState::getStorePath()
 {
     auto cfgDir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
-                      .getChildFile ("ADH DAW");
+                      .getChildFile ("Focal");
     if (! cfgDir.exists()) cfgDir.createDirectory();
     return cfgDir.getChildFile ("window-state.txt");
 }
@@ -34,4 +34,4 @@ bool WindowState::rectIsUsable (juce::Rectangle<int> rect)
     }
     return false;
 }
-} // namespace adhdaw
+} // namespace focal

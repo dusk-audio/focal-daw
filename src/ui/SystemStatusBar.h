@@ -3,7 +3,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../engine/AudioEngine.h"
 
-namespace adhdaw
+namespace focal
 {
 // Compact monospace readout that lives in the upper-right of the window:
 //   Audio: 48 kHz 5.3 ms   DSP: 12% (3)
@@ -23,4 +23,4 @@ private:
     juce::String audioInfo  { "Audio: -" };
     juce::String dspInfo    { "DSP: -"   };
 };
-} // namespace adhdaw
+} // namespace focal

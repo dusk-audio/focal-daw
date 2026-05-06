@@ -1,4 +1,4 @@
-#include "ADHDawApp.h"
+#include "FocalApp.h"
 #include "ui/AppConfig.h"
 #include "ui/ConsoleView.h"
 #include "ui/MainComponent.h"
@@ -15,9 +15,9 @@
  #include <sys/resource.h>
 #endif
 
-namespace adhdaw
+namespace focal
 {
-class ADHDawApp::MainWindow final : public juce::DocumentWindow
+class FocalApp::MainWindow final : public juce::DocumentWindow
 {
 public:
     MainWindow (juce::String name)
@@ -76,7 +76,7 @@ public:
 
         juce::MessageBoxOptions opts;
         opts = opts.withIconType (juce::MessageBoxIconType::QuestionIcon)
-                   .withTitle ("Quit ADH DAW?")
+                   .withTitle ("Quit Focal?")
                    .withMessage ("Any unsaved changes will be lost.\n\n"
                                   "What do you want to do?")
                    .withButton ("Don't quit")
@@ -118,8 +118,8 @@ public:
     }
 };
 
-ADHDawApp::ADHDawApp() = default;
-ADHDawApp::~ADHDawApp() = default;
+FocalApp::FocalApp() = default;
+FocalApp::~FocalApp() = default;
 
 #if JUCE_LINUX
 static void primeRealtimeAudio()
@@ -136,7 +136,7 @@ static void primeRealtimeAudio()
 }
 #endif
 
-// Headless self-test entry: triggered by setting ADHDAW_RUN_SELFTEST=1 in
+// Headless self-test entry: triggered by setting FOCAL_RUN_SELFTEST=1 in
 // the environment before launching. Runs AudioPipelineSelfTest::runAll() at
 // startup, writes the formatted report to stdout, and quits. The MainWindow
 // (and the entire UI) is never created in this mode. Useful for automated
@@ -159,30 +159,30 @@ static bool envFlagSet (const char* name)
 // Test button at low buffer sizes on ALSA + USB interfaces.
 //
 // Env vars (all optional, sensible defaults):
-//   ADHDAW_TONE_BACKEND     "ALSA" | "JACK"           (default "ALSA")
-//   ADHDAW_TONE_DEVICE      output device name        (default "" = backend default)
-//   ADHDAW_TONE_RATE        sample rate in Hz         (default 48000)
-//   ADHDAW_TONE_BUFFER      buffer size in samples    (default 128)
-//   ADHDAW_TONE_DURATION_MS playback duration (ms)    (default 2000)
+//   FOCAL_TONE_BACKEND     "ALSA" | "JACK"           (default "ALSA")
+//   FOCAL_TONE_DEVICE      output device name        (default "" = backend default)
+//   FOCAL_TONE_RATE        sample rate in Hz         (default 48000)
+//   FOCAL_TONE_BUFFER      buffer size in samples    (default 128)
+//   FOCAL_TONE_DURATION_MS playback duration (ms)    (default 2000)
 static void runHeadlessToneTest()
 {
     auto env = [] (const char* name) -> juce::String {
         if (const char* v = std::getenv (name)) return juce::String (v);
         return {};
     };
-    const juce::String backendName = env ("ADHDAW_TONE_BACKEND").isNotEmpty()
-                                     ? env ("ADHDAW_TONE_BACKEND") : juce::String ("ALSA");
-    const juce::String deviceName  = env ("ADHDAW_TONE_DEVICE");
-    const double       targetRate  = env ("ADHDAW_TONE_RATE").isNotEmpty()
-                                     ? env ("ADHDAW_TONE_RATE").getDoubleValue() : 48000.0;
-    const int          targetBuf   = env ("ADHDAW_TONE_BUFFER").isNotEmpty()
-                                     ? env ("ADHDAW_TONE_BUFFER").getIntValue()  : 128;
-    const int          durationMs  = env ("ADHDAW_TONE_DURATION_MS").isNotEmpty()
-                                     ? env ("ADHDAW_TONE_DURATION_MS").getIntValue() : 2000;
+    const juce::String backendName = env ("FOCAL_TONE_BACKEND").isNotEmpty()
+                                     ? env ("FOCAL_TONE_BACKEND") : juce::String ("ALSA");
+    const juce::String deviceName  = env ("FOCAL_TONE_DEVICE");
+    const double       targetRate  = env ("FOCAL_TONE_RATE").isNotEmpty()
+                                     ? env ("FOCAL_TONE_RATE").getDoubleValue() : 48000.0;
+    const int          targetBuf   = env ("FOCAL_TONE_BUFFER").isNotEmpty()
+                                     ? env ("FOCAL_TONE_BUFFER").getIntValue()  : 128;
+    const int          durationMs  = env ("FOCAL_TONE_DURATION_MS").isNotEmpty()
+                                     ? env ("FOCAL_TONE_DURATION_MS").getIntValue() : 2000;
 
     juce::AudioDeviceManager dm;
 
-    std::fprintf (stdout, "=== ADHDaw Headless Tone Test ===\n");
+    std::fprintf (stdout, "=== Focal Headless Tone Test ===\n");
     std::fprintf (stdout, "Requested: backend=%s device=\"%s\" rate=%.0f buf=%d duration=%dms\n",
                   backendName.toRawUTF8(), deviceName.toRawUTF8(),
                   targetRate, targetBuf, durationMs);
@@ -240,7 +240,7 @@ static void runHeadlessToneTest()
 static void runHeadlessSelfTest()
 {
     // Heap-allocated so destruction order matches the GUI path: AudioEngine
-    // first, then Session, before this function returns and ADHDawApp::quit()
+    // first, then Session, before this function returns and FocalApp::quit()
     // tears down the message loop.
     auto session = std::make_unique<Session>();
     auto engine  = std::make_unique<AudioEngine> (*session);
@@ -267,7 +267,7 @@ static void runHeadlessSelfTest()
     }
     if (engine->getCurrentSampleRate() <= 0.0)
         std::fprintf (stderr,
-                      "[ADHDaw/selftest] WARNING: audio engine not ready after %d ms - "
+                      "[Focal/selftest] WARNING: audio engine not ready after %d ms - "
                       "synthetic tests will still run, backend tests may show degraded info\n",
                       maxWaitMs);
 
@@ -278,27 +278,27 @@ static void runHeadlessSelfTest()
     std::fflush (stdout);
 }
 
-void ADHDawApp::initialise (const juce::String&)
+void FocalApp::initialise (const juce::String&)
 {
    #if JUCE_LINUX
     primeRealtimeAudio();
    #endif
 
-    if (envFlagSet ("ADHDAW_RUN_SELFTEST"))
+    if (envFlagSet ("FOCAL_RUN_SELFTEST"))
     {
         runHeadlessSelfTest();
         quit();
         return;
     }
 
-    if (envFlagSet ("ADHDAW_RUN_TONE_TEST"))
+    if (envFlagSet ("FOCAL_RUN_TONE_TEST"))
     {
         runHeadlessToneTest();
         quit();
         return;
     }
 
-    if (envFlagSet ("ADHDAW_RUN_PERF_TEST"))
+    if (envFlagSet ("FOCAL_RUN_PERF_TEST"))
     {
         // Headless engine-CPU benchmark. Builds a Session+AudioEngine the
         // same way the GUI path does, then drives many callbacks directly
@@ -331,7 +331,7 @@ void ADHDawApp::initialise (const juce::String&)
     mainWindow = std::make_unique<MainWindow> (getApplicationName());
 }
 
-void ADHDawApp::shutdown()
+void FocalApp::shutdown()
 {
     // Persist window geometry before tearing down the window. Reading
     // getWindowStateAsString() AFTER mainWindow.reset() would crash; doing
@@ -357,10 +357,10 @@ void ADHDawApp::shutdown()
     mainWindow.reset();
 }
 
-void ADHDawApp::systemRequestedQuit()
+void FocalApp::systemRequestedQuit()
 {
     quit();
 }
 
-void ADHDawApp::anotherInstanceStarted (const juce::String&) {}
-} // namespace adhdaw
+void FocalApp::anotherInstanceStarted (const juce::String&) {}
+} // namespace focal

@@ -3,15 +3,16 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <memory>
-#include "ADHDawLookAndFeel.h"
+#include "FocalLookAndFeel.h"
 #include "ConsoleView.h"
 #include "../engine/AudioEngine.h"
 #include "../session/Session.h"
 
-namespace adhdaw
+namespace focal
 {
 class MainComponent final : public juce::Component,
-                             public juce::MenuBarModel
+                             public juce::MenuBarModel,
+                             private juce::Timer
 {
 public:
     MainComponent();
@@ -50,13 +51,32 @@ private:
     void saveAsPrompt();                                 // 2-step: name + parent dir
     void saveAsParentPrompt (const juce::String& sessionName);
     bool loadSessionFromJson (const juce::File& sessionJson);
+    // Synchronous tail-half of loadSessionFromJson. Called either directly
+    // (no autosave present) or from the autosave recovery prompt's callback
+    // once the user has picked which file to load from.
+    bool finishLoadingSessionFrom (const juce::File& sessionJson,
+                                    const juce::File& sessionDir);
     void openFromFilePrompt();                           // file picker for session.json
     void newSessionPrompt();                             // dir picker + setSessionDirectory + immediate save
+
+    // Autosave: a juce::Timer fires every 30s and writes a session.json.autosave
+    // sibling using the same atomic temp+rename pattern as the manual save. On
+    // session load (loadSessionFromJson) we check whether the autosave is newer
+    // than session.json - if so, prompt the user to recover. Manual saves
+    // delete the autosave so the prompt doesn't fire on the next clean load.
+    void timerCallback() override;
+    void writeAutosave();
+    juce::File getAutosaveFileFor (const juce::File& sessionDir) const;
+    // Returns true if session.json.autosave exists and is newer than session.json.
+    // Caller drives the user-facing prompt.
+    bool autosaveIsNewerThan (const juce::File& sessionJson) const;
+    void deleteAutosaveFor   (const juce::File& sessionDir) const;
+    static constexpr int kAutosaveIntervalMs = 30000;
 
     Session session;
     AudioEngine engine { session };
 
-    ADHDawLookAndFeel lookAndFeel;
+    FocalLookAndFeel lookAndFeel;
 
     // Menu bar at the very top. Replaces the prior row of TextButtons
     // (Audio settings... / Save / Save As... / Open... / Mixdown / Bounce...)
@@ -97,4 +117,4 @@ private:
     std::unique_ptr<class SystemStatusBar>  systemStatusBar;
     bool tapeStripExpanded = false;  // collapsed by default; user expands when arranging
 };
-} // namespace adhdaw
+} // namespace focal

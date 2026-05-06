@@ -4,7 +4,7 @@ A deliberately constrained, portastudio-style DAW for Linux. Built for engineers
 
 > *"If it wouldn't exist as a physical control on a $2000 hardware recorder, it probably doesn't belong here."*
 
-JUCE 8 / C++17. PipeWire (primary) via JUCE's JACK backend; ALSA fallback. Authoritative spec: [ADHDaw.md](ADHDaw.md).
+JUCE 8 / C++17. PipeWire (primary) via JUCE's JACK backend; ALSA fallback. Authoritative spec: [Focal.md](Focal.md).
 
 ## Status
 
@@ -64,17 +64,15 @@ Channel 1-16 → 4 Aux Buses → Master → Output
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 
-./build/ADHDaw_artefacts/Release/"ADH DAW"
+./build/Focal_artefacts/Release/Focal
 ```
-
-(Binary still ships as "ADH DAW" — full rename to Focal is pending.)
 
 ## Self-test
 
 Headless audio-pipeline test (no GUI, no audio device — runs in CI / on push):
 
 ```bash
-ADHDAW_RUN_SELFTEST=1 ./build/ADHDaw_artefacts/Release/"ADH DAW"
+FOCAL_RUN_SELFTEST=1 ./build/Focal_artefacts/Release/"Focal"
 ```
 
 Six tests: pass-through unity, mute silence, master fader −6 dB, channel routing 2-out, channel routing 4-out, master tape gain. All must PASS.
@@ -82,9 +80,9 @@ Six tests: pass-through unity, mute silence, master fader −6 dB, channel routi
 ## Dev affordances
 
 ```bash
-ADHDAW_START_STAGE=mixing       # land directly in Mixing stage
-ADHDAW_START_STAGE=mastering    # ... or Mastering
-ADHDAW_SKIP_STARTUP_DIALOG=1    # bypass the session-picker on launch
+FOCAL_START_STAGE=mixing       # land directly in Mixing stage
+FOCAL_START_STAGE=mastering    # ... or Mastering
+FOCAL_SKIP_STARTUP_DIALOG=1    # bypass the session-picker on launch
 ```
 
 ## Repository
@@ -95,10 +93,10 @@ src/
   engine/      # AudioEngine, RecordManager, PlaybackEngine, BounceEngine, MasteringChain
   session/     # Session model + JSON serialization
   ui/          # MainComponent, ConsoleView, channel/aux/master strips, mastering view
-ADHDaw.md      # authoritative product spec (read this before non-trivial changes)
+Focal.md      # authoritative product spec (read this before non-trivial changes)
 CLAUDE.md      # AI-assist instructions
 ```
 
 ## License
 
-TBD.
+[GPL-3.0](LICENSE), to match JUCE's licensing.

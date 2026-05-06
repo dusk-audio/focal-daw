@@ -1,6 +1,6 @@
 #include "Session.h"
 
-namespace adhdaw
+namespace focal
 {
 Session::Session()
 {
@@ -109,4 +109,4 @@ void Session::setSessionDirectory (const juce::File& dir)
     if (! audioDir.exists())
         audioDir.createDirectory();
 }
-} // namespace adhdaw
+} // namespace focal
