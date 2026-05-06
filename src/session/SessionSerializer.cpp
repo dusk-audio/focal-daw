@@ -24,6 +24,14 @@ juce::DynamicObject::Ptr trackToObject (const Track& t)
     obj->setProperty ("name",   t.name);
     obj->setProperty ("colour", colourToHex (t.colour));
 
+    // Plugin-slot persistence. Empty strings (no plugin loaded) are written
+    // verbatim - round-trip restoreFromSavedState treats empty as "no
+    // plugin", which is the correct steady state for unused slots.
+    if (t.pluginDescriptionXml.isNotEmpty())
+        obj->setProperty ("plugin_desc_xml", t.pluginDescriptionXml);
+    if (t.pluginStateBase64.isNotEmpty())
+        obj->setProperty ("plugin_state",    t.pluginStateBase64);
+
     obj->setProperty ("fader_db",       t.strip.faderDb.load());
     obj->setProperty ("pan",            t.strip.pan.load());
     obj->setProperty ("mute",           t.strip.mute.load());
@@ -32,11 +40,25 @@ juce::DynamicObject::Ptr trackToObject (const Track& t)
     obj->setProperty ("input_monitor",  t.inputMonitor.load());
     obj->setProperty ("print_effects",  t.printEffects.load());
     obj->setProperty ("input_source",   t.inputSource.load());
+    obj->setProperty ("input_source_r", t.inputSourceR.load());
+    obj->setProperty ("midi_input_idx", t.midiInputIndex.load());
+    obj->setProperty ("track_mode",     t.mode.load());
 
     juce::Array<juce::var> buses;
     for (int i = 0; i < ChannelStripParams::kNumBuses; ++i)
         buses.add (t.strip.busAssign[(size_t) i].load());
     obj->setProperty ("bus_assign", buses);
+
+    // Aux sends (continuous send level + pre/post-fader tap) - distinct
+    // from busAssign which is the post-fader on/off routing toggle.
+    juce::Array<juce::var> auxLevels, auxPrePost;
+    for (int i = 0; i < ChannelStripParams::kNumAuxSends; ++i)
+    {
+        auxLevels .add ((double) t.strip.auxSendDb[(size_t) i].load());
+        auxPrePost.add (         t.strip.auxSendPreFader[(size_t) i].load());
+    }
+    obj->setProperty ("aux_send_db",        auxLevels);
+    obj->setProperty ("aux_send_pre_fader", auxPrePost);
 
     auto* hpf = new juce::DynamicObject();
     hpf->setProperty ("enabled", t.strip.hpfEnabled.load());
@@ -63,7 +85,7 @@ juce::DynamicObject::Ptr trackToObject (const Track& t)
     comp->setProperty ("enabled",  t.strip.compEnabled.load());
     comp->setProperty ("mode",     t.strip.compMode.load());
     comp->setProperty ("threshold_db", t.strip.compThresholdDb.load());  // legacy meter-strip drag
-    // Per-mode parameters — UniversalCompressor's native shape.
+    // Per-mode parameters - UniversalCompressor's native shape.
     comp->setProperty ("opto_peak_red", t.strip.compOptoPeakRed.load());
     comp->setProperty ("opto_gain",     t.strip.compOptoGain.load());
     comp->setProperty ("opto_limit",    t.strip.compOptoLimit.load());
@@ -111,6 +133,12 @@ void restoreTrack (Track& t, const juce::var& v)
     if (auto s = v["name"].toString();           s.isNotEmpty()) t.name = s;
     if (auto s = v["colour"].toString();         s.isNotEmpty()) t.colour = hexToColour (s, t.colour);
 
+    // Plugin slot - strings remain empty when the property is absent (older
+    // sessions or unused slots). AudioEngine::consumePluginStateAfterLoad
+    // reads these back and asks each PluginSlot to reinstantiate.
+    t.pluginDescriptionXml = v["plugin_desc_xml"].toString();
+    t.pluginStateBase64    = v["plugin_state"]   .toString();
+
     auto setFloat = [&v] (std::atomic<float>& a, const char* key)
     {
         if (v.hasProperty (key)) a.store ((float) (double) v[key], std::memory_order_relaxed);
@@ -132,12 +160,30 @@ void restoreTrack (Track& t, const juce::var& v)
     setBool  (t.inputMonitor,       "input_monitor");
     setBool  (t.printEffects,       "print_effects");
     setInt   (t.inputSource,        "input_source");
+    setInt   (t.inputSourceR,       "input_source_r");
+    setInt   (t.midiInputIndex,     "midi_input_idx");
+    setInt   (t.mode,               "track_mode");
 
     if (auto buses = v["bus_assign"]; buses.isArray())
     {
         const int n = juce::jmin (ChannelStripParams::kNumBuses, buses.size());
         for (int i = 0; i < n; ++i)
             t.strip.busAssign[(size_t) i].store ((bool) buses[i], std::memory_order_relaxed);
+    }
+
+    if (auto auxLevels = v["aux_send_db"]; auxLevels.isArray())
+    {
+        const int n = juce::jmin (ChannelStripParams::kNumAuxSends, auxLevels.size());
+        for (int i = 0; i < n; ++i)
+            t.strip.auxSendDb[(size_t) i].store ((float) (double) auxLevels[i],
+                                                   std::memory_order_relaxed);
+    }
+    if (auto auxPrePost = v["aux_send_pre_fader"]; auxPrePost.isArray())
+    {
+        const int n = juce::jmin (ChannelStripParams::kNumAuxSends, auxPrePost.size());
+        for (int i = 0; i < n; ++i)
+            t.strip.auxSendPreFader[(size_t) i].store ((bool) auxPrePost[i],
+                                                          std::memory_order_relaxed);
     }
 
     if (auto hpf = v["hpf"]; hpf.isObject())
@@ -247,6 +293,48 @@ bool SessionSerializer::save (const Session& s, const juce::File& target)
     master->setProperty ("tape_hq",      s.master().tapeHQ.load());
     root->setProperty ("master", juce::var (master));
 
+    // Mastering chain - separate from the master strip so its EQ/comp/limiter
+    // settings can diverge from the in-mix master DSP.
+    auto* mast = new juce::DynamicObject();
+    mast->setProperty ("source_file",       s.mastering().sourceFile.getFullPathName());
+    mast->setProperty ("eq_enabled",        s.mastering().eqEnabled.load());
+    mast->setProperty ("eq_lf_boost",       s.mastering().eqLfBoost.load());
+    mast->setProperty ("eq_hf_boost",       s.mastering().eqHfBoost.load());
+    mast->setProperty ("eq_hf_atten",       s.mastering().eqHfAtten.load());
+    mast->setProperty ("eq_tube_drive",     s.mastering().eqTubeDrive.load());
+    mast->setProperty ("eq_output_gain_db", s.mastering().eqOutputGainDb.load());
+    mast->setProperty ("comp_enabled",      s.mastering().compEnabled.load());
+    mast->setProperty ("comp_thresh_db",    s.mastering().compThreshDb.load());
+    mast->setProperty ("comp_ratio",        s.mastering().compRatio.load());
+    mast->setProperty ("comp_attack_ms",    s.mastering().compAttackMs.load());
+    mast->setProperty ("comp_release_ms",   s.mastering().compReleaseMs.load());
+    mast->setProperty ("comp_makeup_db",    s.mastering().compMakeupDb.load());
+    mast->setProperty ("limiter_enabled",   s.mastering().limiterEnabled.load());
+    mast->setProperty ("limiter_drive_db",  s.mastering().limiterDriveDb.load());
+    mast->setProperty ("limiter_ceiling_db",s.mastering().limiterCeilingDb.load());
+    mast->setProperty ("limiter_release_ms",s.mastering().limiterReleaseMs.load());
+    mast->setProperty ("target_preset",     s.mastering().targetPresetIndex.load());
+    root->setProperty ("mastering", juce::var (mast));
+
+    // Transport (loop + punch). Mirrored onto Session by
+    // AudioEngine::publishTransportStateForSave before this call runs.
+    auto* tport = new juce::DynamicObject();
+    tport->setProperty ("loop_enabled",  s.savedLoopEnabled);
+    tport->setProperty ("loop_start",    (juce::int64) s.savedLoopStart);
+    tport->setProperty ("loop_end",      (juce::int64) s.savedLoopEnd);
+    tport->setProperty ("punch_enabled", s.savedPunchEnabled);
+    tport->setProperty ("punch_in",      (juce::int64) s.savedPunchIn);
+    tport->setProperty ("punch_out",     (juce::int64) s.savedPunchOut);
+    tport->setProperty ("snap_to_grid",      s.snapToGrid);
+    tport->setProperty ("tempo_bpm",         s.tempoBpm.load());
+    tport->setProperty ("beats_per_bar",     s.beatsPerBar.load());
+    tport->setProperty ("beat_unit",         s.beatUnit.load());
+    tport->setProperty ("metronome_enabled", s.metronomeEnabled.load());
+    tport->setProperty ("metronome_vol_db",  s.metronomeVolDb.load());
+    tport->setProperty ("count_in_enabled",  s.countInEnabled.load());
+    tport->setProperty ("oversampling_factor", s.oversamplingFactor.load());
+    root->setProperty ("transport", juce::var (tport));
+
     const juce::String json = juce::JSON::toString (juce::var (root), false /*allOnOneLine*/);
 
     // Atomic write: temp file + move-to-target. JUCE's File::moveFileTo uses
@@ -290,6 +378,61 @@ bool SessionSerializer::load (Session& s, const juce::File& source)
         if (master.hasProperty ("tape_enabled")) s.master().tapeEnabled.store ((bool) master["tape_enabled"]);
         if (master.hasProperty ("tape_hq"))      s.master().tapeHQ.store ((bool) master["tape_hq"]);
     }
+    if (auto mast = root["mastering"]; mast.isObject())
+    {
+        auto& m = s.mastering();
+        if (mast.hasProperty ("source_file"))
+        {
+            const juce::String p = mast["source_file"].toString();
+            m.sourceFile = p.isNotEmpty() ? juce::File (p) : juce::File();
+        }
+        auto loadF = [&] (const char* k, std::atomic<float>& dst)
+            { if (mast.hasProperty (k)) dst.store ((float) (double) mast[k]); };
+        auto loadB = [&] (const char* k, std::atomic<bool>& dst)
+            { if (mast.hasProperty (k)) dst.store ((bool) mast[k]); };
+        loadB ("eq_enabled",        m.eqEnabled);
+        loadF ("eq_lf_boost",       m.eqLfBoost);
+        loadF ("eq_hf_boost",       m.eqHfBoost);
+        loadF ("eq_hf_atten",       m.eqHfAtten);
+        loadF ("eq_tube_drive",     m.eqTubeDrive);
+        loadF ("eq_output_gain_db", m.eqOutputGainDb);
+        loadB ("comp_enabled",      m.compEnabled);
+        loadF ("comp_thresh_db",    m.compThreshDb);
+        loadF ("comp_ratio",        m.compRatio);
+        loadF ("comp_attack_ms",    m.compAttackMs);
+        loadF ("comp_release_ms",   m.compReleaseMs);
+        loadF ("comp_makeup_db",    m.compMakeupDb);
+        loadB ("limiter_enabled",   m.limiterEnabled);
+        loadF ("limiter_drive_db",  m.limiterDriveDb);
+        loadF ("limiter_ceiling_db",m.limiterCeilingDb);
+        loadF ("limiter_release_ms",m.limiterReleaseMs);
+        if (mast.hasProperty ("target_preset"))
+            m.targetPresetIndex.store ((int) mast["target_preset"]);
+    }
+    if (auto tport = root["transport"]; tport.isObject())
+    {
+        if (tport.hasProperty ("loop_enabled"))  s.savedLoopEnabled  = (bool) tport["loop_enabled"];
+        if (tport.hasProperty ("loop_start"))    s.savedLoopStart    = (juce::int64) tport["loop_start"];
+        if (tport.hasProperty ("loop_end"))      s.savedLoopEnd      = (juce::int64) tport["loop_end"];
+        if (tport.hasProperty ("punch_enabled")) s.savedPunchEnabled = (bool) tport["punch_enabled"];
+        if (tport.hasProperty ("punch_in"))      s.savedPunchIn      = (juce::int64) tport["punch_in"];
+        if (tport.hasProperty ("punch_out"))     s.savedPunchOut     = (juce::int64) tport["punch_out"];
+        if (tport.hasProperty ("snap_to_grid"))  s.snapToGrid        = (bool) tport["snap_to_grid"];
+        if (tport.hasProperty ("tempo_bpm"))         s.tempoBpm.store         ((float) (double) tport["tempo_bpm"]);
+        if (tport.hasProperty ("beats_per_bar"))     s.beatsPerBar.store      ((int)    tport["beats_per_bar"]);
+        if (tport.hasProperty ("beat_unit"))         s.beatUnit.store         ((int)    tport["beat_unit"]);
+        if (tport.hasProperty ("metronome_enabled")) s.metronomeEnabled.store ((bool)   tport["metronome_enabled"]);
+        if (tport.hasProperty ("metronome_vol_db"))  s.metronomeVolDb.store   ((float) (double) tport["metronome_vol_db"]);
+        if (tport.hasProperty ("count_in_enabled"))  s.countInEnabled.store   ((bool)   tport["count_in_enabled"]);
+        if (tport.hasProperty ("oversampling_factor"))
+        {
+            const int f = (int) tport["oversampling_factor"];
+            s.oversamplingFactor.store ((f == 2 || f == 4) ? f : 1, std::memory_order_relaxed);
+        }
+    }
+    // Bulk load wrote solo / armed atoms directly - resync the RT counters
+    // so the audio thread's any-X-soloed reads are correct on first callback.
+    s.recomputeRtCounters();
     return true;
 }
 } // namespace adhdaw

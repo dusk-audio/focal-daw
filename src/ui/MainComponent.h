@@ -10,7 +10,8 @@
 
 namespace adhdaw
 {
-class MainComponent final : public juce::Component
+class MainComponent final : public juce::Component,
+                             public juce::MenuBarModel
 {
 public:
     MainComponent();
@@ -18,18 +19,77 @@ public:
 
     void paint (juce::Graphics&) override;
     void resized() override;
+    bool keyPressed (const juce::KeyPress&) override;
+
+    // MenuBarModel overrides - drive the File / Settings menus at the top
+    // of the window. Replaces the previous row of large TextButtons.
+    juce::StringArray getMenuBarNames() override;
+    juce::PopupMenu   getMenuForIndex (int topLevelMenuIndex,
+                                         const juce::String& menuName) override;
+    void              menuItemSelected (int menuItemID,
+                                          int topLevelMenuIndex) override;
+
+    // Public entry-point used by MainWindow's close-confirm dialog. Saves
+    // to the current sessionDir if a session.json already exists there;
+    // otherwise opens the Save As file chooser. The optional `onComplete`
+    // callback runs on the message thread once the save is committed -
+    // synchronously when no chooser is needed, asynchronously after the
+    // chooser dismisses. The bool argument is true on success.
+    void saveSessionAndThen (std::function<void(bool)> onComplete);
 
 private:
     void openAudioSettings();
+    void openBounceDialog();
+    void launchStartupDialog();
+    void switchToStage (AudioEngine::Stage);
+    void doMixdown();
+
+    // Session-management helpers shared by the header buttons and the
+    // startup dialog. All run on the message thread.
+    bool saveSessionTo (const juce::File& sessionDir);   // writes session.json, returns true on success
+    void saveAsPrompt();                                 // 2-step: name + parent dir
+    void saveAsParentPrompt (const juce::String& sessionName);
+    bool loadSessionFromJson (const juce::File& sessionJson);
+    void openFromFilePrompt();                           // file picker for session.json
+    void newSessionPrompt();                             // dir picker + setSessionDirectory + immediate save
 
     Session session;
     AudioEngine engine { session };
 
     ADHDawLookAndFeel lookAndFeel;
 
-    juce::TextButton audioSettingsButton { "Audio settings..." };
-    juce::TextButton saveButton { "Save" };
-    juce::TextButton loadButton { "Load" };
+    // Menu bar at the very top. Replaces the prior row of TextButtons
+    // (Audio settings... / Save / Save As... / Open... / Mixdown / Bounce...)
+    // - the menu bar is much slimmer and reads as a normal app menu.
+    juce::MenuBarComponent menuBar;
+
+    // Stage selector - three big-button segmented control. Drives both
+    // engine.setStage() and which view the body shows.
+    juce::TextButton recordingStageBtn { "RECORDING" };
+    juce::TextButton mixingStageBtn    { "MIXING" };
+    juce::TextButton masteringStageBtn { "MASTERING" };
+
+    // Bank A / B buttons. Used when the window is too narrow to show all
+    // 16 channel strips at once - we show 8 at a time and the user toggles
+    // between bank A (1-8) and bank B (9-16). Lives here in MainComponent
+    // (rather than inside ConsoleView) so the row sits directly below the
+    // stage selector and the freed vertical space inside the console all
+    // goes to the channel strips' fader sections.
+    juce::TextButton bankAButton { "BANK A  (1-8)"  };
+    juce::TextButton bankBButton { "BANK B  (9-16)" };
+
+    std::unique_ptr<juce::FileChooser> bounceFileChooser;
+    std::unique_ptr<juce::FileChooser> sessionFileChooser;
+    std::unique_ptr<class MasteringView> masteringView;
+
+    // Track the audio settings DialogWindow so we can explicitly delete it
+    // in our destructor BEFORE AudioEngine destructs. Required because the
+    // dialog hosts an AudioDeviceSelectorComponent that's a change-listener
+    // on engine.deviceManager - if we let JUCE's ModalComponentManager clean
+    // it up at app exit (via ScopedJuceInitialiser_GUI's destructor, which
+    // runs AFTER us), the listener removal would dereference a freed
+    // AudioDeviceManager → SIGSEGV.
+    juce::Component::SafePointer<juce::DialogWindow> activeAudioDialog;
     juce::Label statusLabel;
     std::unique_ptr<ConsoleView> consoleView;
     std::unique_ptr<class TransportBar>     transportBar;

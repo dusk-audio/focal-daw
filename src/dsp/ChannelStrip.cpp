@@ -21,16 +21,21 @@ void ChannelStrip::prepare (double sampleRate, int blockSize)
 
     tempMono.assign ((size_t) juce::jmax (1, blockSize), 0.0f);
 
+    // Plugin slot - prepared at the same SR/BS so the audio thread never
+    // sees an unprepared instance. If the slot has no plugin loaded, this
+    // is essentially a no-op; if a plugin is loaded across a device-rate
+    // change, the slot re-preps it for the new config.
+    pluginSlot.prepareToPlay (sampleRate, juce::jmax (1, blockSize));
+
 #if ADHDAW_HAS_DUSK_DSP
     // BritishEQProcessor.prepare expects (sampleRate, blockSize, numChannels).
     eq.prepare (sampleRate, juce::jmax (1, blockSize), 1);
     eq.reset();
 
-    // UniversalCompressor: configure as 1-channel mono processor.
-    compressor.setPlayConfigDetails (1, 1, sampleRate, juce::jmax (1, blockSize));
-    compressor.prepareToPlay (sampleRate, juce::jmax (1, blockSize));
+    // ChannelComp: thin facade over UniversalCompressor with minimal-processing
+    // fast path enabled at construction. One instance per channel.
+    compressor.prepare (sampleRate, juce::jmax (1, blockSize), 1);
     compMonoBuffer.setSize (1, juce::jmax (1, blockSize), false, false, true);
-    compMidi.clear();
     bindCompParams();
 #endif
 }
@@ -40,7 +45,7 @@ void ChannelStrip::bindCompParams()
 {
     auto& apvts = compressor.getParameters();
     // getRawParameterValue() returns a pointer to the parameter's denormalised
-    // value atomic — the same atomic that UniversalCompressor's processBlock()
+    // value atomic - the same atomic that UniversalCompressor's processBlock()
     // reads. Writing here is lock-free and notification-free, suitable for the
     // audio thread. Stores hold SI-unit / index / 0-or-1 values.
     compModeAtom        = apvts.getRawParameterValue ("mode");
@@ -93,10 +98,15 @@ void ChannelStrip::updateEqParameters() noexcept
 {
 #if ADHDAW_HAS_DUSK_DSP
     if (paramsRef == nullptr) return;
-    BritishEQProcessor::Parameters p;
+    // Value-init so padding bytes are zero - paired with lastEqParams's {}
+    // initializer, this lets memcmp tell us reliably whether the params
+    // actually changed since last block. Skipping setParameters() when they
+    // haven't avoids a full BritishEQProcessor coefficient recompute (8-14
+    // biquads) on every silent block on every channel.
+    BritishEQProcessor::Parameters p {};
     p.hpfEnabled = paramsRef->hpfEnabled.load (std::memory_order_relaxed);
     p.hpfFreq    = paramsRef->hpfFreq.load    (std::memory_order_relaxed);
-    // LPF stays disabled at the per-channel level — the strip doesn't expose one.
+    // LPF stays disabled at the per-channel level - the strip doesn't expose one.
     p.lpfEnabled = false;
     p.lpfFreq    = 20000.0f;
     p.lfGain     = paramsRef->lfGainDb.load (std::memory_order_relaxed);
@@ -115,7 +125,11 @@ void ChannelStrip::updateEqParameters() noexcept
     p.saturation  = 0.0f;
     p.inputGain   = 0.0f;
     p.outputGain  = 0.0f;
-    eq.setParameters (p);
+    if (std::memcmp (&p, &lastEqParams, sizeof (p)) != 0)
+    {
+        eq.setParameters (p);
+        lastEqParams = p;
+    }
 #endif
 }
 
@@ -124,7 +138,7 @@ void ChannelStrip::updateCompParameters() noexcept
 #if ADHDAW_HAS_DUSK_DSP
     if (paramsRef == nullptr) return;
 
-    // Direct atomic stores — no lock, no message-thread notification, no
+    // Direct atomic stores - no lock, no message-thread notification, no
     // queue traffic. UniversalCompressor's processBlock() reads from the same
     // atomics. ~17 stores per channel × 16 channels per block, each ~4 ns.
     storeAtom (compBypassAtom,
@@ -205,31 +219,46 @@ void ChannelStrip::processAndAccumulate (const float* monoIn,
 
     std::memcpy (tempMono.data(), monoIn, sizeof (float) * (size_t) numSamples);
 
-    // Phase invert (Ø) — flip polarity before EQ/comp/fader so the rest of
-    // the chain sees the corrected-polarity signal.
+    // Phase invert (Ø) - flip polarity before EQ/comp/fader so the rest of
+    // the chain sees the corrected-polarity signal. SIMD'd negate via JUCE
+    // saves a per-sample scalar multiply when phase invert is engaged.
     if (paramsRef->phaseInvert.load (std::memory_order_relaxed))
-        for (int i = 0; i < numSamples; ++i)
-            tempMono[(size_t) i] = -tempMono[(size_t) i];
+        juce::FloatVectorOperations::negate (tempMono.data(), tempMono.data(), numSamples);
+
+    // Per-channel insert plugin (post-phase-invert, pre-EQ). No-op when no
+    // plugin loaded or slot bypassed; lock-free atomic read of the instance
+    // pointer otherwise.
+    pluginSlot.processMonoBlock (tempMono.data(), numSamples);
 
 #if ADHDAW_HAS_DUSK_DSP
     // Wrap our mono scratch buffer as a 1-channel juce::AudioBuffer<float>
-    // (no allocation — referenceTo points at the existing storage).
+    // (no allocation - referenceTo points at the existing storage).
     float* monoChannel[1] = { tempMono.data() };
     juce::AudioBuffer<float> monoBuf (monoChannel, 1, numSamples);
     eq.process (monoBuf);
 
-    // Compressor: copy into the comp's pre-allocated buffer (since
-    // UniversalCompressor::processBlock may resize/replace channels), process,
-    // then copy back into tempMono.
+    // Compressor: UniversalCompressor::processBlock only mutates internal
+    // sidechain/lookahead scratch - never the input buffer's size or channel
+    // pointers. So we wrap tempMono directly as a 1-channel AudioBuffer view
+    // and let the comp process in place, skipping the per-channel copy-in /
+    // copy-out that used to push 2 × numSamples × 4 B through cache for
+    // every active strip every callback.
+    //
+    // We still chunk by the prepared block size so a host-driven
+    // numSamples > preparedBlockSize can't overflow the comp's internally
+    // sized scratch buffers - the chunking loop below covers the oversized
+    // case correctly, so no jassert here.
     {
-        const int n = juce::jmin (numSamples, compMonoBuffer.getNumSamples());
-        compMonoBuffer.copyFrom (0, 0, tempMono.data(), n);
-        compMidi.clear();
-        compressor.processBlock (compMonoBuffer, compMidi);
-        std::memcpy (tempMono.data(), compMonoBuffer.getReadPointer (0),
-                     sizeof (float) * (size_t) n);
+        const int bufSize = compMonoBuffer.getNumSamples();
+        for (int offset = 0; offset < numSamples; offset += bufSize)
+        {
+            const int n = juce::jmin (bufSize, numSamples - offset);
+            float* monoView[1] = { tempMono.data() + offset };
+            juce::AudioBuffer<float> compBuf (monoView, 1, n);
+            compressor.processBlock (compBuf);
+        }
     }
-    currentGrDb.store (-compressor.getGainReduction(), std::memory_order_relaxed);
+    currentGrDb.store (-compressor.getGainReductionDb(), std::memory_order_relaxed);
 #endif
 
     // Expose the post-EQ/post-comp buffer for the recorder. Valid until the
@@ -239,7 +268,7 @@ void ChannelStrip::processAndAccumulate (const float* monoIn,
 
     if (! passByGate)
     {
-        // Strip is muted/soloed-out/IN-off — keep the smoothers ticking but
+        // Strip is muted/soloed-out/IN-off - keep the smoothers ticking but
         // don't accumulate to master/buses. The DSP STILL ran above, so a
         // recording-armed track with `printEffects` can still capture the
         // post-effects signal even when the engineer has IN off (direct
@@ -254,6 +283,36 @@ void ChannelStrip::processAndAccumulate (const float* monoIn,
         return;
     }
 
+    // Hoist the bus-active set out of the inner sample loop. The common
+    // case (and the only case for a bare-bones session) is "no bus
+    // assigned" - tracks pass straight to master. We branch once per
+    // block on whether any bus is active OR smoothing; if not we run a
+    // master-only fast path that skips the per-sample 4-bus scan and the
+    // (1 - maxBusG) crossfade math entirely. Bus smoothers must still
+    // tick to follow target so re-engaging a bus is click-free.
+    bool anyBusActive = false;
+    bool anyBusSmoothing = false;
+    for (int a = 0; a < kNumBuses; ++a)
+    {
+        if (busGain[(size_t) a].getCurrentValue() > 0.0f) anyBusActive = true;
+        if (busGain[(size_t) a].isSmoothing())            anyBusSmoothing = true;
+    }
+
+    if (! anyBusActive && ! anyBusSmoothing)
+    {
+        // Master-only fast path - no bus accumulation, no maxBusG gating.
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const float fg = faderGain.getNextValue();
+            const float gL = panGainL.getNextValue() * fg;
+            const float gR = panGainR.getNextValue() * fg;
+            const float sIn = tempMono[(size_t) i];
+            masterL[i] += sIn * gL;
+            masterR[i] += sIn * gR;
+        }
+        return;
+    }
+
     for (int i = 0; i < numSamples; ++i)
     {
         const float fg = faderGain.getNextValue();
@@ -263,16 +322,31 @@ void ChannelStrip::processAndAccumulate (const float* monoIn,
         const float wetL = sIn * gL;
         const float wetR = sIn * gR;
 
-        masterL[i] += wetL;
-        masterR[i] += wetR;
+        // Bus routing is EXCLUSIVE with master routing: a track assigned to
+        // any bus must not also hit the master direct, otherwise the signal
+        // would arrive at master twice (once direct, once via the bus's own
+        // sum-into-master in AudioEngine), producing a +3 dB doubling. We
+        // gate the master accumulation by (1 - maxBusGain) so a fully-on
+        // bus assignment fully removes the direct send, and a mid-ramp
+        // toggle produces a smooth crossfade between routes.
+        float perBusG[kNumBuses];
+        float maxBusG = 0.0f;
+        for (int a = 0; a < kNumBuses; ++a)
+        {
+            perBusG[a] = busGain[(size_t) a].getNextValue();
+            if (perBusG[a] > maxBusG) maxBusG = perBusG[a];
+        }
+        const float toMaster = juce::jmax (0.0f, 1.0f - maxBusG);
+
+        masterL[i] += wetL * toMaster;
+        masterR[i] += wetR * toMaster;
 
         for (int a = 0; a < kNumBuses; ++a)
         {
-            const float bg = busGain[(size_t) a].getNextValue();
-            if (bg > 0.0f)
+            if (perBusG[a] > 0.0f)
             {
-                busL[(size_t) a][i] += wetL * bg;
-                busR[(size_t) a][i] += wetR * bg;
+                busL[(size_t) a][i] += wetL * perBusG[a];
+                busR[(size_t) a][i] += wetR * perBusG[a];
             }
         }
     }

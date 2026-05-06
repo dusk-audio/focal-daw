@@ -1,14 +1,47 @@
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <array>
 
 namespace adhdaw
 {
+// Standard fader scale ticks - the dB values that get a horizontal mark on
+// every vertical fader's track and a numeric label in the strip's scale
+// column. Shared between the LookAndFeel's track drawing and the strip
+// paint() functions so the labels and ticks always line up.
+struct FaderTick { float db; const char* label; };
+inline constexpr std::array<FaderTick, 9> kFaderTicks {{
+    {  6.0f,  "6"  },
+    {  3.0f,  "3"  },
+    {  0.0f,  "0"  },
+    { -3.0f,  "3"  },
+    { -6.0f,  "6"  },
+    { -12.0f, "12" },
+    { -24.0f, "24" },
+    { -40.0f, "40" },
+    { -90.0f, "90" },
+}};
+
+// Y-coord (in the slider's local coords) for a given dB value, matching the
+// LookAndFeel's track-padding so labels in the parent's paint() align with
+// the LookAndFeel-drawn ticks. Uses the slider's NormalisableRange so the
+// skew (e.g. SkewFactorFromMidPoint(-12)) is respected.
+// Slider::valueToProportionOfLength is non-const in JUCE (mutable cache),
+// so the parameter is non-const here too even though we don't mutate it.
+inline float faderYForDb (juce::Slider& fader, float dB) noexcept
+{
+    const auto b = fader.getBounds();
+    const float prop = (float) fader.valueToProportionOfLength (dB);
+    // 6 px padding top + bottom matches drawLinearSlider's track rect.
+    return (float) b.getY() + (float) b.getHeight() - 6.0f
+            - prop * ((float) b.getHeight() - 12.0f);
+}
+
 // Console-style rotary knob look: dark grey body with a soft inner gradient
 // plus a colored "cap" indicator that points to the current value, modelled
 // on the SSL 4K / Harrison Mixbus knob aesthetic.
 //
-// Per-knob accent comes from the slider's `rotarySliderFillColourId` — set
+// Per-knob accent comes from the slider's `rotarySliderFillColourId` - set
 // that to the band/section color and the cap takes it.
 class ADHDawLookAndFeel final : public juce::LookAndFeel_V4
 {
@@ -42,7 +75,7 @@ public:
         const auto bounds = juce::Rectangle<int> (x, y, width, height).toFloat();
         const float cx = bounds.getCentreX();
 
-        // Track — thin vertical channel with a faint unity-gain mark.
+        // Track - thin vertical channel with a faint unity-gain mark.
         const float trackW = juce::jmin (4.0f, bounds.getWidth() * 0.18f);
         const auto trackRect = juce::Rectangle<float> (cx - trackW * 0.5f, bounds.getY() + 6.0f,
                                                         trackW, bounds.getHeight() - 12.0f);
@@ -51,12 +84,26 @@ public:
         g.setColour (juce::Colour (0xff2a2a2e));
         g.drawRoundedRectangle (trackRect, trackW * 0.5f, 0.6f);
 
-        // Subtle 0 dB / unity tick across the track.
+        // dB tick marks across the track. The 0 dB / unity mark gets a
+        // brighter, slightly longer line; the others are dim guides for
+        // setting levels by ear. Range-aware via NormalisableRange so the
+        // skew (e.g. SkewFactorFromMidPoint(-12)) places ticks correctly.
         const auto range = slider.getNormalisableRange();
-        const float zeroPos = (float) range.convertTo0to1 (0.0);
-        const float zeroY = bounds.getBottom() - 6.0f - zeroPos * (bounds.getHeight() - 12.0f);
-        g.setColour (juce::Colour (0x40ffffff));
-        g.drawLine (trackRect.getX() - 4.0f, zeroY, trackRect.getRight() + 4.0f, zeroY, 0.8f);
+        const float padTopBot = 6.0f;
+        const float trackH = bounds.getHeight() - padTopBot * 2.0f;
+        for (const auto& t : kFaderTicks)
+        {
+            // Skip ticks outside the slider's range (e.g. -90 on a 0..+12 slider).
+            if (t.db < range.start - 0.01f || t.db > range.end + 0.01f) continue;
+            const float prop = (float) range.convertTo0to1 (t.db);
+            const float y = bounds.getBottom() - padTopBot - prop * trackH;
+            const bool isZero = (std::abs (t.db) < 0.01f);
+            const float xOver = isZero ? 6.0f : 3.0f;
+            g.setColour (isZero ? juce::Colour (0x90ffffff) : juce::Colour (0x40ffffff));
+            g.drawLine (trackRect.getX() - xOver, y,
+                         trackRect.getRight() + xOver, y,
+                         isZero ? 1.2f : 0.7f);
+        }
 
         // Cap.
         const float capW = juce::jmin (bounds.getWidth() - 6.0f, 38.0f);
@@ -113,7 +160,7 @@ public:
             g.fillEllipse (cx - radius - 2.0f, cy - radius, (radius + 2.0f) * 2.0f, (radius + 2.0f) * 2.0f);
         }
 
-        // Body — fully coloured in the slider's accent (SSL-style).
+        // Body - fully coloured in the slider's accent (SSL-style).
         // Radial gradient: top-left highlight, bottom-right shadow.
         {
             juce::ColourGradient body (fill.brighter (0.15f), cx - radius * 0.55f, cy - radius * 0.55f,
@@ -130,7 +177,7 @@ public:
         g.setColour (juce::Colour (0xff0a0a0a));
         g.drawEllipse (cx - radius, cy - radius, radius * 2.0f, radius * 2.0f, 1.2f);
 
-        // Indicator — white line from inner radius to near the rim, plus a
+        // Indicator - white line from inner radius to near the rim, plus a
         // small white dot at the tip. Replaces the old coloured cap.
         const float dx = std::cos (angle - juce::MathConstants<float>::halfPi);
         const float dy = std::sin (angle - juce::MathConstants<float>::halfPi);
@@ -170,7 +217,7 @@ namespace fourKColors
     inline constexpr juce::uint32 kMasterTan = 0xffd0a060;
 }
 
-// SSL 9000J band colours — used only for the EQ knob bodies. Kept in a
+// SSL 9000J band colours - used only for the EQ knob bodies. Kept in a
 // separate namespace so the track colour-picker (driven by fourKColors) keeps
 // matching its labels (Red / Orange / Amber / Green).
 namespace sslEqColors

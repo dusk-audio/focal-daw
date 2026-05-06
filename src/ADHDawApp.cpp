@@ -1,6 +1,14 @@
 #include "ADHDawApp.h"
+#include "ui/AppConfig.h"
 #include "ui/ConsoleView.h"
 #include "ui/MainComponent.h"
+#include "ui/WindowState.h"
+#include "engine/AudioEngine.h"
+#include "engine/AudioPipelineSelfTest.h"
+#include "session/Session.h"
+
+#include <cstdio>
+#include <cstdlib>
 
 #if JUCE_LINUX
  #include <sys/mman.h>
@@ -24,18 +32,89 @@ public:
         // Min height keeps the console usable; the tape strip is collapsible
         // so we don't need to budget for it in the floor.
         setResizeLimits (ConsoleView::minimumContentWidth() + 24, 880, 32768, 32768);
-        centreWithSize (getWidth(), getHeight());
 
-        // Some tiling/Wayland WMs auto-maximize new windows. Explicitly opt
-        // out of full-screen so we open at the size MainComponent requested.
-        setFullScreen (false);
+        // Restore prior session's window geometry. JUCE's
+        // restoreWindowStateFromString rebuilds bounds + fullscreen state
+        // from the same string getWindowStateAsString() produced. We then
+        // sanity-check the restored bounds against connected displays -
+        // if the saved monitor is gone, undo the restore and centre at
+        // MainComponent's default size.
+        bool restored = false;
+        const auto savedState = WindowState::load();
+        if (savedState.isNotEmpty() && restoreWindowStateFromString (savedState))
+        {
+            // Validate using the WINDOWED bounds (so a fullscreen-on-an-
+            // unplugged-monitor case still falls back gracefully).
+            const auto checkRect = isFullScreen()
+                ? juce::Rectangle<int> (0, 0,
+                                          juce::jmax (getWidth(), 800),
+                                          juce::jmax (getHeight(), 600))
+                : getBounds();
+            if (WindowState::rectIsUsable (checkRect))
+                restored = true;
+        }
+
+        if (! restored)
+        {
+            // Some tiling/Wayland WMs auto-maximize new windows. Explicitly
+            // opt out of full-screen so we open at the size MainComponent
+            // requested.
+            setFullScreen (false);
+            centreWithSize (getWidth(), getHeight());
+        }
 
         setVisible (true);
     }
 
     void closeButtonPressed() override
     {
-        JUCEApplication::getInstance()->systemRequestedQuit();
+        // Always confirm on close, Ardour-style. Three options: cancel,
+        // discard, save+quit. We don't try to track a dirty flag - every
+        // close goes through the prompt so the user can never silently lose
+        // unsaved work.
+        auto* main = dynamic_cast<MainComponent*> (getContentComponent());
+
+        juce::MessageBoxOptions opts;
+        opts = opts.withIconType (juce::MessageBoxIconType::QuestionIcon)
+                   .withTitle ("Quit ADH DAW?")
+                   .withMessage ("Any unsaved changes will be lost.\n\n"
+                                  "What do you want to do?")
+                   .withButton ("Don't quit")
+                   .withButton ("Just quit")
+                   .withButton ("Save and quit");
+
+        juce::AlertWindow::showAsync (opts,
+            [main] (int picked)
+            {
+                // showAsync's callback gets the 0-based index of the button
+                // pressed. Buttons were added in order:
+                //   0 = Don't quit   (cancel)
+                //   1 = Just quit    (discard + close)
+                //   2 = Save and quit
+                // Any other return code is treated as cancel for safety.
+                if (picked == 1)
+                {
+                    JUCEApplication::getInstance()->systemRequestedQuit();
+                    return;
+                }
+                if (picked == 2)
+                {
+                    if (main == nullptr)
+                    {
+                        JUCEApplication::getInstance()->systemRequestedQuit();
+                        return;
+                    }
+                    main->saveSessionAndThen ([] (bool savedOk)
+                    {
+                        if (savedOk)
+                            JUCEApplication::getInstance()->systemRequestedQuit();
+                        // If save failed (chooser cancelled, write error), the
+                        // window stays open - user can retry or pick "Just quit".
+                    });
+                    return;
+                }
+                // picked == 0 (Don't quit) or anything else: do nothing.
+            });
     }
 };
 
@@ -48,25 +127,233 @@ static void primeRealtimeAudio()
     // Pin every page of the process in physical RAM so the audio thread
     // never blocks on a page fault during a callback. Ardour, Bitwig, and
     // every other low-latency Linux DAW does this. Requires `memlock` rlimit
-    // — typically `unlimited` for the audio group via /etc/security/limits.d.
+    // - typically `unlimited` for the audio group via /etc/security/limits.d.
     if (mlockall (MCL_CURRENT | MCL_FUTURE) != 0)
     {
         DBG ("mlockall failed (errno=" << errno
-             << ") — audio thread may suffer page-fault stalls under memory pressure");
+             << ") - audio thread may suffer page-fault stalls under memory pressure");
     }
 }
 #endif
+
+// Headless self-test entry: triggered by setting ADHDAW_RUN_SELFTEST=1 in
+// the environment before launching. Runs AudioPipelineSelfTest::runAll() at
+// startup, writes the formatted report to stdout, and quits. The MainWindow
+// (and the entire UI) is never created in this mode. Useful for automated
+// loops without a display server.
+static bool envFlagSet (const char* name)
+{
+    const char* v = std::getenv (name);
+    if (v == nullptr) return false;
+    const juce::String s (v);
+    return s.getIntValue() != 0
+        || s.equalsIgnoreCase ("true")
+        || s.equalsIgnoreCase ("yes");
+}
+
+// Headless tone-test probe: opens a chosen device at a chosen rate/buffer
+// and runs the same juce::AudioDeviceManager::playTestSound() that the GUI
+// "Test" button in AudioDeviceSelectorComponent calls. No AudioEngine is
+// attached - this isolates the JUCE backend + driver path from any engine
+// DSP. Useful for diagnosing distortion that appears when pressing the
+// Test button at low buffer sizes on ALSA + USB interfaces.
+//
+// Env vars (all optional, sensible defaults):
+//   ADHDAW_TONE_BACKEND     "ALSA" | "JACK"           (default "ALSA")
+//   ADHDAW_TONE_DEVICE      output device name        (default "" = backend default)
+//   ADHDAW_TONE_RATE        sample rate in Hz         (default 48000)
+//   ADHDAW_TONE_BUFFER      buffer size in samples    (default 128)
+//   ADHDAW_TONE_DURATION_MS playback duration (ms)    (default 2000)
+static void runHeadlessToneTest()
+{
+    auto env = [] (const char* name) -> juce::String {
+        if (const char* v = std::getenv (name)) return juce::String (v);
+        return {};
+    };
+    const juce::String backendName = env ("ADHDAW_TONE_BACKEND").isNotEmpty()
+                                     ? env ("ADHDAW_TONE_BACKEND") : juce::String ("ALSA");
+    const juce::String deviceName  = env ("ADHDAW_TONE_DEVICE");
+    const double       targetRate  = env ("ADHDAW_TONE_RATE").isNotEmpty()
+                                     ? env ("ADHDAW_TONE_RATE").getDoubleValue() : 48000.0;
+    const int          targetBuf   = env ("ADHDAW_TONE_BUFFER").isNotEmpty()
+                                     ? env ("ADHDAW_TONE_BUFFER").getIntValue()  : 128;
+    const int          durationMs  = env ("ADHDAW_TONE_DURATION_MS").isNotEmpty()
+                                     ? env ("ADHDAW_TONE_DURATION_MS").getIntValue() : 2000;
+
+    juce::AudioDeviceManager dm;
+
+    std::fprintf (stdout, "=== ADHDaw Headless Tone Test ===\n");
+    std::fprintf (stdout, "Requested: backend=%s device=\"%s\" rate=%.0f buf=%d duration=%dms\n",
+                  backendName.toRawUTF8(), deviceName.toRawUTF8(),
+                  targetRate, targetBuf, durationMs);
+
+    // Initialise with no channels - we don't care about input here. The
+    // backend-cycle logic in JUCE still enumerates and the type can be
+    // switched explicitly below.
+    if (const auto err = dm.initialiseWithDefaultDevices (0, 2); err.isNotEmpty())
+        std::fprintf (stdout, "init: %s\n", err.toRawUTF8());
+
+    dm.setCurrentAudioDeviceType (backendName, /*treatAsChosen*/ true);
+
+    auto setup = dm.getAudioDeviceSetup();
+    if (deviceName.isNotEmpty())
+        setup.outputDeviceName = deviceName;
+    setup.sampleRate            = targetRate;
+    setup.bufferSize            = targetBuf;
+    setup.useDefaultInputChannels  = true;
+    setup.useDefaultOutputChannels = true;
+
+    if (const auto err = dm.setAudioDeviceSetup (setup, /*treatAsChosen*/ true); err.isNotEmpty())
+        std::fprintf (stdout, "setAudioDeviceSetup: %s\n", err.toRawUTF8());
+
+    if (auto* dev = dm.getCurrentAudioDevice())
+    {
+        std::fprintf (stdout,
+                      "Opened: \"%s\" type=%s rate=%.0f buf=%d activeOut=%d activeIn=%d bitDepth=%d\n",
+                      dev->getName().toRawUTF8(),
+                      dm.getCurrentAudioDeviceType().toRawUTF8(),
+                      dev->getCurrentSampleRate(),
+                      dev->getCurrentBufferSizeSamples(),
+                      dev->getActiveOutputChannels().countNumberOfSetBits(),
+                      dev->getActiveInputChannels().countNumberOfSetBits(),
+                      dev->getCurrentBitDepth());
+        const int xrunBefore = dev->getXRunCount();
+
+        // Same call the GUI Test button makes. Plays a 440 Hz sine at -6 dB
+        // through the open device for ~1 s.
+        dm.playTestSound();
+        juce::Thread::sleep (durationMs);
+
+        const int xrunAfter = dev->getXRunCount();
+        std::fprintf (stdout, "Backend xrun count: before=%d after=%d delta=%d\n",
+                      xrunBefore, xrunAfter, xrunAfter - xrunBefore);
+    }
+    else
+    {
+        std::fprintf (stdout, "Open failed: getCurrentAudioDevice() returned nullptr\n");
+    }
+
+    std::fprintf (stdout, "=== End of Tone Test ===\n");
+    std::fflush (stdout);
+}
+
+static void runHeadlessSelfTest()
+{
+    // Heap-allocated so destruction order matches the GUI path: AudioEngine
+    // first, then Session, before this function returns and ADHDawApp::quit()
+    // tears down the message loop.
+    auto session = std::make_unique<Session>();
+    auto engine  = std::make_unique<AudioEngine> (*session);
+
+    // Poll for engine readiness instead of a fixed sleep. AudioEngine's
+    // constructor calls initialiseWithDefaultDevices(16, 2) and adds itself
+    // as an AudioDeviceCallback; the audio thread then fires
+    // audioDeviceAboutToStart, which sets currentSampleRate to a non-zero
+    // value as a side effect of preparing strip/aux/master state. So
+    // sampleRate > 0 is the load-bearing readiness signal.
+    //
+    // 5-second timeout so a stuck-or-failing device-open can't hang the
+    // headless test indefinitely (relevant on CI / slow boxes / contended
+    // PipeWire setups). If we time out, we still proceed - the synthetic
+    // tests don't strictly require a real device since they call
+    // prepareForSelfTest() with their own SR/BS.
+    constexpr int maxWaitMs       = 5000;
+    constexpr int pollIntervalMs  = 10;
+    int waited = 0;
+    while (engine->getCurrentSampleRate() <= 0.0 && waited < maxWaitMs)
+    {
+        juce::Thread::sleep (pollIntervalMs);
+        waited += pollIntervalMs;
+    }
+    if (engine->getCurrentSampleRate() <= 0.0)
+        std::fprintf (stderr,
+                      "[ADHDaw/selftest] WARNING: audio engine not ready after %d ms - "
+                      "synthetic tests will still run, backend tests may show degraded info\n",
+                      maxWaitMs);
+
+    AudioPipelineSelfTest test (*engine, engine->getDeviceManager(), *session);
+    const auto report = test.runAll();
+
+    std::fprintf (stdout, "%s\n", report.toRawUTF8());
+    std::fflush (stdout);
+}
 
 void ADHDawApp::initialise (const juce::String&)
 {
    #if JUCE_LINUX
     primeRealtimeAudio();
    #endif
+
+    if (envFlagSet ("ADHDAW_RUN_SELFTEST"))
+    {
+        runHeadlessSelfTest();
+        quit();
+        return;
+    }
+
+    if (envFlagSet ("ADHDAW_RUN_TONE_TEST"))
+    {
+        runHeadlessToneTest();
+        quit();
+        return;
+    }
+
+    if (envFlagSet ("ADHDAW_RUN_PERF_TEST"))
+    {
+        // Headless engine-CPU benchmark. Builds a Session+AudioEngine the
+        // same way the GUI path does, then drives many callbacks directly
+        // and reports per-callback wall-clock vs. buffer budget across a
+        // matrix of (sample rate, buffer size, channel load) configs.
+        auto session = std::make_unique<Session>();
+        auto engine  = std::make_unique<AudioEngine> (*session);
+
+        // Wait briefly for device init so engine's DSP graph is warm.
+        for (int waited = 0;
+             engine->getCurrentSampleRate() <= 0.0 && waited < 5000;
+             waited += 10)
+            juce::Thread::sleep (10);
+
+        AudioPipelineSelfTest test (*engine, engine->getDeviceManager(), *session);
+        const auto report = test.runPerfSuite();
+        std::fprintf (stdout, "%s\n", report.toRawUTF8());
+        std::fflush (stdout);
+
+        quit();
+        return;
+    }
+
+    // User UI-scale override. JUCE composes this with each display's own
+    // OS-reported DPI scale, so 1.0 here means "let the OS decide" and
+    // anything else is the user's manual zoom. Applied BEFORE creating
+    // the main window so its initial layout uses the right metrics.
+    juce::Desktop::getInstance().setGlobalScaleFactor (appconfig::getUiScaleOverride());
+
     mainWindow = std::make_unique<MainWindow> (getApplicationName());
 }
 
 void ADHDawApp::shutdown()
 {
+    // Persist window geometry before tearing down the window. Reading
+    // getWindowStateAsString() AFTER mainWindow.reset() would crash; doing
+    // it here captures the user's last visible position/size/fullscreen.
+    if (mainWindow != nullptr)
+        WindowState::save (mainWindow->getWindowStateAsString());
+
+    // Dismiss any still-open modal dialogs (e.g. the Audio Device selector)
+    // BEFORE destroying mainWindow. The selector's `AudioDeviceSelectorComponent`
+    // is registered as a change-listener on `AudioEngine::deviceManager`. If we
+    // skip this, `mainWindow.reset()` destroys MainComponent → AudioEngine →
+    // AudioDeviceManager, then ScopedJuceInitialiser_GUI's destructor (which
+    // runs AFTER us, in JUCEApplicationBase::main) destroys ModalComponentManager,
+    // which finally destroys the dialog - its destructor calls removeChangeListener
+    // on the freed AudioDeviceManager → SIGSEGV.
+    //
+    // The AudioSettingsPanel modal dialog is freed inside MainComponent's
+    // destructor (via a tracked Component::SafePointer) so the
+    // AudioDeviceSelectorComponent's listener-removal happens while
+    // AudioDeviceManager is still alive. cancelAllModalComponents() here
+    // is unhelpful - it only marks dialogs inactive and queues an async
+    // delete that never fires before main() returns.
     mainWindow.reset();
 }
 

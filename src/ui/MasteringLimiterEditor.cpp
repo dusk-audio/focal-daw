@@ -1,0 +1,495 @@
+#include "MasteringLimiterEditor.h"
+#include "../dsp/BrickwallLimiter.h"
+
+namespace adhdaw
+{
+namespace
+{
+constexpr float kThreshMinDb  = -20.0f;
+constexpr float kThreshMaxDb  =   0.0f;
+constexpr float kCeilingMinDb = -12.0f;
+constexpr float kCeilingMaxDb =   0.0f;
+constexpr float kAttenMaxDb   =  20.0f;   // GR axis max
+
+// Map a dB value to a y-coordinate inside a vertical meter, top = max dB.
+float dbToY (float db, float minDb, float maxDb, juce::Rectangle<float> bar)
+{
+    const float frac = juce::jlimit (0.0f, 1.0f, (db - minDb) / (maxDb - minDb));
+    return bar.getBottom() - 2.0f - frac * (bar.getHeight() - 4.0f);
+}
+
+float yToDb (int y, float minDb, float maxDb, juce::Rectangle<float> bar)
+{
+    const float relY = (float) (bar.getBottom() - 2 - y) / juce::jmax (1.0f, bar.getHeight() - 4.0f);
+    return juce::jlimit (minDb, maxDb,
+                          minDb + juce::jlimit (0.0f, 1.0f, relY) * (maxDb - minDb));
+}
+
+void styleKnob (juce::Slider& s, juce::Colour fill,
+                  double mn, double mx, double defaultVal,
+                  const juce::String& suffix, int decimals)
+{
+    s.setSliderStyle (juce::Slider::RotaryVerticalDrag);
+    s.setColour (juce::Slider::rotarySliderFillColourId, fill);
+    s.setColour (juce::Slider::rotarySliderOutlineColourId, juce::Colour (0xff404048));
+    s.setRange (mn, mx, 0.01);
+    s.setDoubleClickReturnValue (true, defaultVal);
+    s.setTextBoxStyle (juce::Slider::TextBoxBelow, true, 70, 16);
+    s.setColour (juce::Slider::textBoxTextColourId, juce::Colour (0xffd0d0d0));
+    s.setColour (juce::Slider::textBoxBackgroundColourId, juce::Colour (0));
+    s.setColour (juce::Slider::textBoxOutlineColourId,    juce::Colour (0));
+    s.setNumDecimalPlacesToDisplay (decimals);
+    s.setTextValueSuffix (suffix);
+}
+
+void drawSegmentDividers (juce::Graphics& g, juce::Rectangle<float> bar)
+{
+    const int segments = juce::jlimit (8, 30, (int) (bar.getHeight() / 4.0f));
+    const float segStep = bar.getHeight() / (float) segments;
+    g.setColour (juce::Colour (0xff020203));
+    for (int i = 1; i < segments; ++i)
+    {
+        const float yy = bar.getY() + i * segStep;
+        g.fillRect (juce::Rectangle<float> (bar.getX() + 1.0f, yy - 0.4f,
+                                              bar.getWidth() - 2.0f, 0.8f));
+    }
+}
+} // namespace
+
+MasteringLimiterEditor::MasteringLimiterEditor (MasteringParams& p,
+                                                  BrickwallLimiter& l)
+    : params (p), limiter (l)
+{
+    setOpaque (true);
+
+    titleLabel.setJustificationType (juce::Justification::centredLeft);
+    titleLabel.setFont (juce::Font (juce::FontOptions (13.0f, juce::Font::bold)));
+    titleLabel.setColour (juce::Label::textColourId, juce::Colour (0xffe0e0e8));
+    addAndMakeVisible (titleLabel);
+
+    enableToggle.setColour (juce::ToggleButton::textColourId, juce::Colour (0xffd0d0d0));
+    enableToggle.setToggleState (params.limiterEnabled.load (std::memory_order_relaxed),
+                                  juce::dontSendNotification);
+    enableToggle.onClick = [this]
+    {
+        params.limiterEnabled.store (enableToggle.getToggleState(), std::memory_order_relaxed);
+    };
+    addAndMakeVisible (enableToggle);
+
+    // Mode dropdown - single "Modern" mode for now; the dropdown is here so
+    // future limiter modes (Vintage / Aggressive / Glue) drop in without a
+    // layout change. Persisted state is the limiter-mode atomic on params,
+    // when one exists; for now it's purely cosmetic.
+    modeCaption.setJustificationType (juce::Justification::centredRight);
+    modeCaption.setFont (juce::Font (juce::FontOptions (10.5f, juce::Font::bold)));
+    modeCaption.setColour (juce::Label::textColourId, juce::Colour (0xffa0a0a8));
+    addAndMakeVisible (modeCaption);
+
+    modeCombo.addItem ("Modern", 1);
+    modeCombo.setSelectedId (1, juce::dontSendNotification);
+    modeCombo.setColour (juce::ComboBox::backgroundColourId, juce::Colour (0xff1a1a22));
+    modeCombo.setColour (juce::ComboBox::textColourId,       juce::Colour (0xffe0e0e8));
+    modeCombo.setColour (juce::ComboBox::outlineColourId,    juce::Colour (0xff404048));
+    addAndMakeVisible (modeCombo);
+
+    const auto accent = juce::Colour (0xff5a8ad0);
+    styleKnob (releaseKnob, accent, 10.0, 1000.0, 100.0, " ms", 0);
+    releaseKnob.setValue (params.limiterReleaseMs.load (std::memory_order_relaxed),
+                            juce::dontSendNotification);
+    releaseKnob.onValueChange = [this]
+    {
+        params.limiterReleaseMs.store ((float) releaseKnob.getValue(), std::memory_order_relaxed);
+    };
+    addAndMakeVisible (releaseKnob);
+
+    releaseLabel.setJustificationType (juce::Justification::centred);
+    releaseLabel.setFont (juce::Font (juce::FontOptions (10.5f, juce::Font::bold)));
+    releaseLabel.setColour (juce::Label::textColourId, juce::Colour (0xffa0a0a8));
+    addAndMakeVisible (releaseLabel);
+
+    stereoLinkToggle.setColour (juce::ToggleButton::textColourId, juce::Colour (0xffd0d0d0));
+    stereoLinkToggle.setToggleState (true, juce::dontSendNotification);
+    stereoLinkToggle.setTooltip ("When on, gain reduction is matched across L/R "
+                                  "to preserve the stereo image. (Always on for "
+                                  "this limiter implementation.)");
+    addAndMakeVisible (stereoLinkToggle);
+
+    startTimerHz (30);
+}
+
+MasteringLimiterEditor::~MasteringLimiterEditor() { stopTimer(); }
+
+float MasteringLimiterEditor::yToDriveDb (int y) const noexcept
+{
+    return yToDb (y, kThreshMinDb, kThreshMaxDb, threshMeterArea.toFloat());
+}
+
+float MasteringLimiterEditor::yToCeilingDb (int y) const noexcept
+{
+    return yToDb (y, kCeilingMinDb, kCeilingMaxDb, ceilingMeterArea.toFloat());
+}
+
+void MasteringLimiterEditor::timerCallback()
+{
+    const float gr = limiter.getCurrentGrDb();
+    if (gr < displayedGrDb) displayedGrDb = gr;
+    else                    displayedGrDb += (gr - displayedGrDb) * 0.18f;
+
+    // Pre / post limiter levels - approximated from the post-master meters
+    // on MasteringParams. The mastering chain writes those at the end of
+    // each block, so they're a reliable proxy for what the limiter is
+    // seeing/producing.
+    const float postL = params.meterPostMasterLDb.load (std::memory_order_relaxed);
+    const float postR = params.meterPostMasterRDb.load (std::memory_order_relaxed);
+    const float post  = juce::jmax (postL, postR);
+    if (post > displayedOutDb) displayedOutDb = post;
+    else                        displayedOutDb += (post - displayedOutDb) * 0.15f;
+
+    // Pre-limiter (input) approximation: post-limiter peak minus the GR
+    // (which the limiter pulled out). With 0 GR this just matches the post
+    // value; with active limiting the column shows the unbounded input.
+    const float drive  = params.limiterDriveDb.load (std::memory_order_relaxed);
+    const float preApprox = post - displayedGrDb + drive;
+    if (preApprox > displayedInDb) displayedInDb = preApprox;
+    else                            displayedInDb += (preApprox - displayedInDb) * 0.15f;
+
+    repaint();
+}
+
+void MasteringLimiterEditor::paint (juce::Graphics& g)
+{
+    g.fillAll (juce::Colour (0xff181820));
+    g.setColour (juce::Colour (0xff2a2a32));
+    g.drawRect (getLocalBounds(), 1);
+
+    auto drawMeterBg = [&] (juce::Rectangle<float> bar)
+    {
+        g.setColour (juce::Colour (0xff060608));
+        g.fillRoundedRectangle (bar, 2.0f);
+        g.setColour (juce::Colour (0xff2a2a30));
+        g.drawRoundedRectangle (bar, 2.0f, 0.6f);
+    };
+
+    auto drawCaption = [&] (juce::Rectangle<int> meter, const juce::String& caption)
+    {
+        g.setColour (juce::Colour (0xffa0a0a8));
+        g.setFont (juce::Font (juce::FontOptions (10.5f, juce::Font::bold)));
+        g.drawText (caption,
+                     juce::Rectangle<int> (meter.getX() - 14, meter.getY() - 18,
+                                            meter.getWidth() + 28, 14),
+                     juce::Justification::centred, false);
+    };
+
+    // ── Threshold meter (live signal fills it; handle = drive setting) ──
+    if (! threshMeterArea.isEmpty())
+    {
+        const auto bar = threshMeterArea.toFloat();
+        drawMeterBg (bar);
+
+        // Live fill - cyan gradient, fills upward.
+        const float frac = juce::jlimit (0.0f, 1.0f,
+            (juce::jlimit (kThreshMinDb, kThreshMaxDb, displayedInDb) - kThreshMinDb)
+              / (kThreshMaxDb - kThreshMinDb));
+        if (frac > 0.001f)
+        {
+            const float fillH = (bar.getHeight() - 4.0f) * frac;
+            auto fillRect = juce::Rectangle<float> (bar.getX() + 2.0f,
+                                                      bar.getBottom() - 2.0f - fillH,
+                                                      bar.getWidth() - 4.0f, fillH);
+            juce::ColourGradient grad (juce::Colour (0xffd06060), bar.getX(), bar.getY(),
+                                         juce::Colour (0xff5ac8e0), bar.getX(), bar.getBottom(),
+                                         false);
+            g.setGradientFill (grad);
+            g.fillRect (fillRect);
+        }
+        drawSegmentDividers (g, bar);
+
+        // Drive handle (drag triangle on left).
+        const float drive = params.limiterDriveDb.load (std::memory_order_relaxed);
+        const float handleY = dbToY (drive, kThreshMinDb, kThreshMaxDb, bar);
+
+        juce::Path tri;
+        const float baseX = bar.getX() - 6.0f;
+        tri.addTriangle (baseX, handleY - 5.0f,
+                         baseX, handleY + 5.0f,
+                         bar.getX(), handleY);
+        g.setColour (juce::Colour (0xffe0e0e8));
+        g.fillPath (tri);
+        g.setColour (juce::Colour (0xff0a0a0a));
+        g.strokePath (tri, juce::PathStrokeType (0.6f));
+        g.setColour (juce::Colour (0xff80b0e0).withAlpha (0.7f));
+        g.drawLine (bar.getX(), handleY, bar.getRight(), handleY, 0.8f);
+
+        drawCaption (threshMeterArea, "Threshold");
+
+        // Drive value box just below the handle.
+        g.setColour (juce::Colour (0xff181820));
+        const auto valBox = juce::Rectangle<float> (bar.getX() + 2.0f, handleY + 6.0f,
+                                                       bar.getWidth() - 4.0f, 14.0f);
+        g.setColour (juce::Colour (0xff181820));
+        g.fillRoundedRectangle (valBox, 2.0f);
+        g.setColour (juce::Colour (0xff5a8ad0));
+        g.drawRoundedRectangle (valBox, 2.0f, 0.6f);
+        g.setColour (juce::Colour (0xff80b0e0));
+        g.setFont (juce::Font (juce::FontOptions (9.5f, juce::Font::bold)));
+        g.drawText (juce::String::formatted ("%.2f", drive),
+                     valBox, juce::Justification::centred, false);
+    }
+
+    // ── Ceiling meter ──
+    if (! ceilingMeterArea.isEmpty())
+    {
+        const auto bar = ceilingMeterArea.toFloat();
+        drawMeterBg (bar);
+
+        const float frac = juce::jlimit (0.0f, 1.0f,
+            (juce::jlimit (kCeilingMinDb, kCeilingMaxDb, displayedOutDb) - kCeilingMinDb)
+              / (kCeilingMaxDb - kCeilingMinDb));
+        if (frac > 0.001f)
+        {
+            const float fillH = (bar.getHeight() - 4.0f) * frac;
+            auto fillRect = juce::Rectangle<float> (bar.getX() + 2.0f,
+                                                      bar.getBottom() - 2.0f - fillH,
+                                                      bar.getWidth() - 4.0f, fillH);
+            juce::ColourGradient grad (juce::Colour (0xffd05050), bar.getX(), bar.getY(),
+                                         juce::Colour (0xff5ac8e0), bar.getX(), bar.getBottom(),
+                                         false);
+            g.setGradientFill (grad);
+            g.fillRect (fillRect);
+        }
+        drawSegmentDividers (g, bar);
+
+        const float ceiling = params.limiterCeilingDb.load (std::memory_order_relaxed);
+        const float handleY = dbToY (ceiling, kCeilingMinDb, kCeilingMaxDb, bar);
+
+        juce::Path tri;
+        const float baseX = bar.getX() - 6.0f;
+        tri.addTriangle (baseX, handleY - 5.0f,
+                         baseX, handleY + 5.0f,
+                         bar.getX(), handleY);
+        g.setColour (juce::Colour (0xffe05050));
+        g.fillPath (tri);
+        g.setColour (juce::Colour (0xff0a0a0a));
+        g.strokePath (tri, juce::PathStrokeType (0.6f));
+        g.setColour (juce::Colour (0xffe05050).withAlpha (0.8f));
+        g.drawLine (bar.getX(), handleY, bar.getRight(), handleY, 0.8f);
+
+        drawCaption (ceilingMeterArea, "Ceiling");
+
+        // Ceiling value box on top.
+        const auto valBox = juce::Rectangle<float> (bar.getX() + 2.0f, handleY - 18.0f,
+                                                       bar.getWidth() - 4.0f, 14.0f);
+        g.setColour (juce::Colour (0xff181820));
+        g.fillRoundedRectangle (valBox, 2.0f);
+        g.setColour (juce::Colour (0xffe05050));
+        g.drawRoundedRectangle (valBox, 2.0f, 0.6f);
+        g.setColour (juce::Colour (0xffff8080));
+        g.setFont (juce::Font (juce::FontOptions (9.5f, juce::Font::bold)));
+        g.drawText (juce::String::formatted ("%.2f", ceiling),
+                     valBox, juce::Justification::centred, false);
+    }
+
+    // ── Atten meter (live GR; fills downward from top) ──
+    if (! attenMeterArea.isEmpty())
+    {
+        const auto bar = attenMeterArea.toFloat();
+        drawMeterBg (bar);
+
+        const float grAbs = juce::jlimit (0.0f, kAttenMaxDb, std::abs (displayedGrDb));
+        const float frac = grAbs / kAttenMaxDb;
+        if (frac > 0.001f)
+        {
+            const float fillH = (bar.getHeight() - 4.0f) * frac;
+            auto fillRect = juce::Rectangle<float> (bar.getX() + 2.0f,
+                                                      bar.getY() + 2.0f,
+                                                      bar.getWidth() - 4.0f, fillH);
+            juce::ColourGradient grad (juce::Colour (0xffe04040), bar.getX(), bar.getY(),
+                                         juce::Colour (0xffe0c050), bar.getX(), bar.getBottom(),
+                                         false);
+            g.setGradientFill (grad);
+            g.fillRect (fillRect);
+        }
+        drawSegmentDividers (g, bar);
+        drawCaption (attenMeterArea, "Atten");
+
+        // GR scale ticks on the right (small vertical strip).
+        g.setColour (juce::Colour (0xff707074));
+        g.setFont (juce::Font (juce::FontOptions (8.5f)));
+        for (auto entry : { std::pair<float, const char*> { 3.0f,  "3"  },
+                            std::pair<float, const char*> { 6.0f,  "6"  },
+                            std::pair<float, const char*> { 12.0f, "12" } })
+        {
+            const float frac01 = entry.first / kAttenMaxDb;
+            const float y = bar.getY() + 2.0f + frac01 * (bar.getHeight() - 4.0f);
+            g.drawText (entry.second,
+                          juce::Rectangle<float> (bar.getRight() + 2.0f, y - 5.0f, 18.0f, 10.0f),
+                          juce::Justification::centredLeft, false);
+        }
+
+        // GR value below the meter.
+        g.setColour (juce::Colour (0xfff09060));
+        g.setFont (juce::Font (juce::FontOptions (9.5f, juce::Font::bold)));
+        g.drawText (juce::String::formatted ("%.1f", displayedGrDb),
+                     juce::Rectangle<int> (attenMeterArea.getX(), attenMeterArea.getBottom() + 2,
+                                            attenMeterArea.getWidth(), 12),
+                     juce::Justification::centred, false);
+    }
+
+    // ── LUFS readout box ──
+    if (! lufsBoxArea.isEmpty())
+    {
+        const auto box = lufsBoxArea.toFloat().reduced (1.0f);
+        g.setColour (juce::Colour (0xff0d1218));
+        g.fillRoundedRectangle (box, 3.0f);
+        g.setColour (juce::Colour (0xff5ac8e0));
+        g.drawRoundedRectangle (box, 3.0f, 0.8f);
+
+        g.setColour (juce::Colour (0xff80c0d0));
+        g.setFont (juce::Font (juce::FontOptions (10.0f, juce::Font::bold)));
+        g.drawText ("LUFS Long",
+                     box.withHeight (16.0f).withTrimmedTop (4.0f),
+                     juce::Justification::centred, false);
+
+        const float iLufs = params.meterIntegratedLufs.load (std::memory_order_relaxed);
+        g.setColour (juce::Colour (0xfff0f0f0));
+        g.setFont (juce::Font (juce::FontOptions (juce::Font::getDefaultMonospacedFontName(),
+                                                    24.0f, juce::Font::bold)));
+        const auto valArea = box.withTrimmedTop (20.0f).withTrimmedBottom (20.0f);
+        g.drawText (iLufs <= -99.0f ? juce::String ("--") : juce::String::formatted ("%.1f", iLufs),
+                     valArea, juce::Justification::centred, false);
+
+        // Bottom subtitles - dBTP + Short.
+        const float tp = params.meterTruePeakDb.load (std::memory_order_relaxed);
+        const float sLufs = params.meterShortTermLufs.load (std::memory_order_relaxed);
+        g.setColour (juce::Colour (0xff909094));
+        g.setFont (juce::Font (juce::FontOptions (8.5f)));
+        const auto subArea = box.withTrimmedTop (box.getHeight() - 18.0f);
+        g.drawText (tp <= -99.0f ? juce::String ("dBTP --")
+                                  : juce::String::formatted ("dBTP %.1f", tp),
+                     subArea.withWidth (subArea.getWidth() * 0.5f),
+                     juce::Justification::centred, false);
+        g.drawText (sLufs <= -99.0f ? juce::String ("Short --")
+                                     : juce::String::formatted ("Short %.1f", sLufs),
+                     subArea.withTrimmedLeft (subArea.getWidth() * 0.5f),
+                     juce::Justification::centred, false);
+    }
+}
+
+void MasteringLimiterEditor::resized()
+{
+    auto area = getLocalBounds().reduced (8);
+
+    auto header = area.removeFromTop (22);
+    titleLabel.setBounds (header.removeFromLeft (header.getWidth() - 56));
+    enableToggle.setBounds (header.removeFromRight (56));
+    area.removeFromTop (8);
+
+    // Right column: Mode selector at top, Release knob, Stereo-link toggle.
+    constexpr int kRightColW = 110;
+    auto rightCol = area.removeFromRight (kRightColW);
+    area.removeFromRight (8);
+    {
+        auto col = rightCol.reduced (4, 0);
+        modeCaption.setBounds (col.removeFromTop (14));
+        col.removeFromTop (2);
+        modeCombo.setBounds   (col.removeFromTop (24));
+        col.removeFromTop (12);
+
+        const int kRelKnobH = 70;
+        releaseLabel.setBounds (col.removeFromTop (14));
+        const int knobY = col.getY();
+        const int knobW = juce::jmin (col.getWidth(), kRelKnobH);
+        const int knobX = col.getX() + (col.getWidth() - knobW) / 2;
+        releaseKnob.setBounds (knobX, knobY, knobW, kRelKnobH);
+        col.removeFromTop (kRelKnobH + 2);
+
+        col.removeFromTop (8);
+        stereoLinkToggle.setBounds (col.removeFromTop (22));
+    }
+
+    // LUFS readout sits at the bottom-right of the meter area, above the
+    // Atten meter is the live LUFS box. Reserve a fixed-height block.
+    constexpr int kLufsBoxH = 80;
+    auto lufsRow = area.removeFromBottom (kLufsBoxH);
+    area.removeFromBottom (4);
+
+    // Three meter columns - Threshold, Ceiling, Atten. Equal widths with
+    // small gaps; reserve top padding for "Threshold/Ceiling/Atten" caption
+    // and bottom padding for the GR numeric readout.
+    constexpr int kMeterTopPad    = 22;
+    constexpr int kMeterBottomPad = 18;
+    auto meters = area;
+    meters.removeFromTop (kMeterTopPad);
+    meters.removeFromBottom (kMeterBottomPad);
+
+    constexpr int kMeterGap = 8;
+    constexpr int kAttenW   = 18;   // narrower than threshold / ceiling
+    constexpr int kHandlePad = 8;   // room on left for triangle handle
+    const int twoColW = (meters.getWidth() - kAttenW - 2 * kMeterGap - kHandlePad * 2);
+    const int colW = juce::jmax (12, twoColW / 2);
+
+    meters.removeFromLeft (kHandlePad);
+    threshMeterArea  = meters.removeFromLeft (colW);
+    meters.removeFromLeft (kMeterGap + kHandlePad);
+    ceilingMeterArea = meters.removeFromLeft (colW);
+    meters.removeFromLeft (kMeterGap);
+    attenMeterArea   = meters.removeFromLeft (kAttenW);
+
+    // LUFS box centred under the meters.
+    const int lufsBoxW = juce::jmin (180, lufsRow.getWidth());
+    const int lufsX = lufsRow.getX() + (lufsRow.getWidth() - lufsBoxW) / 2;
+    lufsBoxArea = juce::Rectangle<int> (lufsX, lufsRow.getY(), lufsBoxW, kLufsBoxH);
+}
+
+void MasteringLimiterEditor::mouseDown (const juce::MouseEvent& e)
+{
+    const auto p = e.getPosition();
+    if (threshMeterArea.expanded (10, 4).contains (p))
+    {
+        currentDrag = DragMode::Threshold;
+        params.limiterDriveDb.store (yToDriveDb (e.y), std::memory_order_relaxed);
+        repaint();
+    }
+    else if (ceilingMeterArea.expanded (10, 4).contains (p))
+    {
+        currentDrag = DragMode::Ceiling;
+        params.limiterCeilingDb.store (yToCeilingDb (e.y), std::memory_order_relaxed);
+        repaint();
+    }
+    else
+    {
+        currentDrag = DragMode::None;
+    }
+}
+
+void MasteringLimiterEditor::mouseDrag (const juce::MouseEvent& e)
+{
+    switch (currentDrag)
+    {
+        case DragMode::Threshold:
+            params.limiterDriveDb.store (yToDriveDb (e.y), std::memory_order_relaxed);
+            repaint();
+            break;
+        case DragMode::Ceiling:
+            params.limiterCeilingDb.store (yToCeilingDb (e.y), std::memory_order_relaxed);
+            repaint();
+            break;
+        case DragMode::None:
+            break;
+    }
+}
+
+void MasteringLimiterEditor::mouseUp (const juce::MouseEvent&)
+{
+    currentDrag = DragMode::None;
+}
+
+void MasteringLimiterEditor::mouseDoubleClick (const juce::MouseEvent& e)
+{
+    if (threshMeterArea.expanded (10, 4).contains (e.getPosition()))
+        params.limiterDriveDb.store (0.0f, std::memory_order_relaxed);
+    else if (ceilingMeterArea.expanded (10, 4).contains (e.getPosition()))
+        params.limiterCeilingDb.store (-0.3f, std::memory_order_relaxed);
+    repaint();
+}
+} // namespace adhdaw

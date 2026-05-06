@@ -3,13 +3,135 @@
 
 namespace adhdaw
 {
-AuxBusComponent::AuxBusComponent (AuxBus& a) : aux (a)
+namespace
+{
+void styleSmallKnob (juce::Slider& s, double minV, double maxV, double midPt,
+                      double initialV, juce::Colour col, const juce::String& suffix,
+                      int decimals)
+{
+    s.setRange (minV, maxV, 0.01);
+    if (midPt > minV && midPt < maxV)
+        s.setSkewFactorFromMidPoint (midPt);
+    s.setValue (initialV, juce::dontSendNotification);
+    s.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 38, 14);
+    s.setColour (juce::Slider::rotarySliderFillColourId, col);
+    s.setColour (juce::Slider::rotarySliderOutlineColourId, juce::Colour (0xff2a2a2e));
+    s.setColour (juce::Slider::thumbColourId, col.brighter (0.3f));
+    s.setColour (juce::Slider::textBoxTextColourId, juce::Colour (0xffd0d0d0));
+    s.setColour (juce::Slider::textBoxBackgroundColourId, juce::Colour (0xff181820));
+    s.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
+    s.setNumDecimalPlacesToDisplay (decimals);
+    s.setTextValueSuffix (suffix);
+}
+
+void styleSmallLabel (juce::Label& lbl, const juce::String& text, juce::Colour col)
+{
+    lbl.setText (text, juce::dontSendNotification);
+    lbl.setJustificationType (juce::Justification::centred);
+    lbl.setColour (juce::Label::textColourId, col);
+    lbl.setFont (juce::Font (juce::FontOptions (8.5f, juce::Font::bold)));
+}
+
+void styleToggle (juce::TextButton& b, juce::Colour onColour)
+{
+    b.setClickingTogglesState (true);
+    b.setColour (juce::TextButton::buttonColourId,   juce::Colour (0xff202024));
+    b.setColour (juce::TextButton::buttonOnColourId, onColour);
+    b.setColour (juce::TextButton::textColourOffId,  juce::Colour (0xffb0a080));
+    b.setColour (juce::TextButton::textColourOnId,   juce::Colour (0xff121214));
+}
+} // namespace
+
+AuxBusComponent::AuxBusComponent (AuxBus& a, Session& s, int idx)
+    : aux (a), sessionRef (s), auxIndex (idx)
 {
     nameLabel.setText (aux.name, juce::dontSendNotification);
     nameLabel.setJustificationType (juce::Justification::centred);
     nameLabel.setColour (juce::Label::textColourId, juce::Colours::white);
     nameLabel.setFont (juce::Font (juce::FontOptions (12.0f, juce::Font::bold)));
+    nameLabel.setEditable (false, true, false);
+    nameLabel.setColour (juce::Label::backgroundWhenEditingColourId, juce::Colour (0xff202024));
+    nameLabel.setColour (juce::Label::textWhenEditingColourId,       juce::Colours::white);
+    nameLabel.setTooltip ("Double-click to rename this bus.");
+    nameLabel.onTextChange = [this]
+    {
+        const auto txt = nameLabel.getText().trim();
+        if (txt.isEmpty()) nameLabel.setText (aux.name, juce::dontSendNotification);
+        else aux.name = txt;
+    };
     addAndMakeVisible (nameLabel);
+
+    const auto eqGreen = juce::Colour (0xff80c090);
+    const auto compGold = juce::Colour (0xffe0c050);
+    // Pan red - matches the channel-strip pan colour (0xffc04040) so the
+    // pan-control language is consistent across channels and buses.
+    const auto panRed   = juce::Colour (0xffc04040);
+
+    // EQ section.
+    styleToggle (eqButton, eqGreen);
+    eqButton.setToggleState (aux.strip.eqEnabled.load (std::memory_order_relaxed),
+                              juce::dontSendNotification);
+    eqButton.setTooltip ("3-band British-style EQ on/off");
+    eqButton.onClick = [this]
+    {
+        aux.strip.eqEnabled.store (eqButton.getToggleState(), std::memory_order_relaxed);
+    };
+    addAndMakeVisible (eqButton);
+
+    // Suffixes empty - same rationale as master: 38-px textbox can't fit
+    // " dB"/" ms" without truncating, and the L/M/H labels already imply dB.
+    styleSmallKnob (eqLfGain,  -15.0, 15.0, 0.0, aux.strip.eqLfGainDb.load(),  eqGreen, "", 1);
+    styleSmallKnob (eqMidGain, -15.0, 15.0, 0.0, aux.strip.eqMidGainDb.load(), eqGreen, "", 1);
+    styleSmallKnob (eqHfGain,  -15.0, 15.0, 0.0, aux.strip.eqHfGainDb.load(),  eqGreen, "", 1);
+    eqLfGain .onValueChange = [this] { aux.strip.eqLfGainDb .store ((float) eqLfGain .getValue(), std::memory_order_relaxed); };
+    eqMidGain.onValueChange = [this] { aux.strip.eqMidGainDb.store ((float) eqMidGain.getValue(), std::memory_order_relaxed); };
+    eqHfGain .onValueChange = [this] { aux.strip.eqHfGainDb .store ((float) eqHfGain .getValue(), std::memory_order_relaxed); };
+    addAndMakeVisible (eqLfGain); addAndMakeVisible (eqMidGain); addAndMakeVisible (eqHfGain);
+    // L = low shelf, M = bell, H = high shelf - standard 3-band EQ labelling.
+    styleSmallLabel (eqLfLbl,  "L", eqGreen);
+    styleSmallLabel (eqMidLbl, "M", eqGreen);
+    styleSmallLabel (eqHfLbl,  "H", eqGreen);
+    addAndMakeVisible (eqLfLbl); addAndMakeVisible (eqMidLbl); addAndMakeVisible (eqHfLbl);
+
+    // Comp section.
+    styleToggle (compButton, compGold);
+    compButton.setToggleState (aux.strip.compEnabled.load (std::memory_order_relaxed),
+                                juce::dontSendNotification);
+    compButton.setTooltip ("Bus compressor on/off (UniversalCompressor in Bus mode)");
+    compButton.onClick = [this]
+    {
+        aux.strip.compEnabled.store (compButton.getToggleState(), std::memory_order_relaxed);
+    };
+    addAndMakeVisible (compButton);
+
+    styleSmallKnob (compThresh,  -30.0,    0.0,  -10.0, aux.strip.compThreshDb.load(),  compGold, "",   1);
+    styleSmallKnob (compRatio,     1.0,   10.0,    4.0, aux.strip.compRatio.load(),     compGold, ":1", 1);
+    styleSmallKnob (compAttack,    0.1,   50.0,    5.0, aux.strip.compAttackMs.load(),  compGold, "",   1);
+    styleSmallKnob (compRelease,  50.0, 1000.0,  200.0, aux.strip.compReleaseMs.load(), compGold, "",   0);
+    styleSmallKnob (compMakeup,  -10.0,   20.0,    0.0, aux.strip.compMakeupDb.load(),  compGold, "",   1);
+    compThresh .onValueChange = [this] { aux.strip.compThreshDb .store ((float) compThresh .getValue(), std::memory_order_relaxed); };
+    compRatio  .onValueChange = [this] { aux.strip.compRatio    .store ((float) compRatio  .getValue(), std::memory_order_relaxed); };
+    compAttack .onValueChange = [this] { aux.strip.compAttackMs .store ((float) compAttack .getValue(), std::memory_order_relaxed); };
+    compRelease.onValueChange = [this] { aux.strip.compReleaseMs.store ((float) compRelease.getValue(), std::memory_order_relaxed); };
+    compMakeup .onValueChange = [this] { aux.strip.compMakeupDb .store ((float) compMakeup .getValue(), std::memory_order_relaxed); };
+    addAndMakeVisible (compThresh); addAndMakeVisible (compRatio);
+    addAndMakeVisible (compAttack); addAndMakeVisible (compRelease);
+    addAndMakeVisible (compMakeup);
+    styleSmallLabel (compThrLbl, "THR", compGold);
+    styleSmallLabel (compRatLbl, "RAT", compGold);
+    styleSmallLabel (compAtkLbl, "ATK", compGold);
+    styleSmallLabel (compRelLbl, "REL", compGold);
+    styleSmallLabel (compMakLbl, "MAK", compGold);
+    addAndMakeVisible (compThrLbl); addAndMakeVisible (compRatLbl);
+    addAndMakeVisible (compAtkLbl); addAndMakeVisible (compRelLbl);
+    addAndMakeVisible (compMakLbl);
+
+    // Pan.
+    styleSmallKnob (panKnob, -1.0, 1.0, 0.0, aux.strip.pan.load(), panRed, "", 2);
+    panKnob.onValueChange = [this] { aux.strip.pan.store ((float) panKnob.getValue(), std::memory_order_relaxed); };
+    addAndMakeVisible (panKnob);
+    styleSmallLabel (panLbl, "PAN", panRed);
+    addAndMakeVisible (panLbl);
 
     faderSlider.setRange (ChannelStripParams::kFaderMinDb, ChannelStripParams::kFaderMaxDb, 0.1);
     faderSlider.setSkewFactorFromMidPoint (-12.0);
@@ -26,10 +148,7 @@ AuxBusComponent::AuxBusComponent (AuxBus& a) : aux (a)
     muteButton.setClickingTogglesState (true);
     muteButton.setColour (juce::TextButton::buttonOnColourId, juce::Colours::orangered);
     muteButton.setToggleState (aux.strip.mute.load (std::memory_order_relaxed), juce::dontSendNotification);
-    muteButton.onClick = [this]
-    {
-        aux.strip.mute.store (muteButton.getToggleState(), std::memory_order_relaxed);
-    };
+    muteButton.onClick = [this] { aux.strip.mute.store (muteButton.getToggleState(), std::memory_order_relaxed); };
     addAndMakeVisible (muteButton);
 
     soloButton.setClickingTogglesState (true);
@@ -37,25 +156,85 @@ AuxBusComponent::AuxBusComponent (AuxBus& a) : aux (a)
     soloButton.setToggleState (aux.strip.solo.load (std::memory_order_relaxed), juce::dontSendNotification);
     soloButton.onClick = [this]
     {
-        aux.strip.solo.store (soloButton.getToggleState(), std::memory_order_relaxed);
+        // Counter-aware so anyAuxSoloed() stays O(1) on the audio thread.
+        sessionRef.setAuxSoloed (auxIndex, soloButton.getToggleState());
     };
     addAndMakeVisible (soloButton);
+
+    auto styleReadout = [] (juce::Label& lbl, juce::Colour col)
+    {
+        lbl.setJustificationType (juce::Justification::centred);
+        lbl.setColour (juce::Label::textColourId,        col);
+        lbl.setColour (juce::Label::backgroundColourId,  juce::Colour (0xff0a0a0c));
+        // No outline - same rationale as the channel strip: the 1 px border
+        // drew on top of the adjacent fader textbox edge and looked like overlap.
+        lbl.setColour (juce::Label::outlineColourId,     juce::Colours::transparentBlack);
+        lbl.setFont (juce::Font (juce::FontOptions (juce::Font::getDefaultMonospacedFontName(),
+                                                      10.0f, juce::Font::bold)));
+    };
+    outputPeakLabel.setText ("-inf", juce::dontSendNotification);
+    styleReadout (outputPeakLabel, juce::Colour (0xffd0d0d0));
+    addAndMakeVisible (outputPeakLabel);
+    grPeakLabel.setText ("0.0", juce::dontSendNotification);
+    styleReadout (grPeakLabel, juce::Colour (0xff606064));
+    addAndMakeVisible (grPeakLabel);
+
+    startTimerHz (30);
+}
+
+AuxBusComponent::~AuxBusComponent() = default;
+
+void AuxBusComponent::timerCallback()
+{
+    auto smoothChannel = [] (float& displayed, float& peakHold, int& peakFrames, float src)
+    {
+        if (src > displayed) displayed = src;
+        else                  displayed += (src - displayed) * 0.15f;
+
+        if (src >= peakHold) { peakHold = src; peakFrames = 18; }
+        else if (peakFrames > 0) --peakFrames;
+        else peakHold = juce::jmax (-100.0f, peakHold - 1.5f);
+    };
+    const float outL = aux.strip.meterPostBusLDb.load (std::memory_order_relaxed);
+    const float outR = aux.strip.meterPostBusRDb.load (std::memory_order_relaxed);
+    smoothChannel (displayedOutputLDb, outputPeakHoldLDb, outputPeakHoldFramesL, outL);
+    smoothChannel (displayedOutputRDb, outputPeakHoldRDb, outputPeakHoldFramesR, outR);
+
+    const float maxHold = juce::jmax (outputPeakHoldLDb, outputPeakHoldRDb);
+    if (maxHold <= -60.0f)
+        outputPeakLabel.setText ("-inf", juce::dontSendNotification);
+    else
+        outputPeakLabel.setText (juce::String (maxHold, 1), juce::dontSendNotification);
+    outputPeakLabel.setColour (juce::Label::textColourId,
+        maxHold >= -3.0f  ? juce::Colour (0xffff5050) :
+        maxHold >= -12.0f ? juce::Colour (0xffe0c050) :
+                             juce::Colour (0xffd0d0d0));
+
+    const float gr = aux.strip.meterGrDb.load (std::memory_order_relaxed);
+    if (gr < displayedGrDb) displayedGrDb = gr;
+    else                    displayedGrDb += (gr - displayedGrDb) * 0.18f;
+
+    if (displayedGrDb <= -0.05f)
+    {
+        grPeakLabel.setText (juce::String (displayedGrDb, 1), juce::dontSendNotification);
+        grPeakLabel.setColour (juce::Label::textColourId, juce::Colour (0xffe0c050));
+    }
+    else
+    {
+        grPeakLabel.setText ("0.0", juce::dontSendNotification);
+        grPeakLabel.setColour (juce::Label::textColourId, juce::Colour (0xff606064));
+    }
+
+    if (! meterArea.isEmpty())   repaint (meterArea);
+    if (! grMeterArea.isEmpty()) repaint (grMeterArea.expanded (2, 10));  // include "GR" caption
 }
 
 void AuxBusComponent::mouseDown (const juce::MouseEvent& e)
 {
-    if (e.mods.isPopupMenu())
-        showColourMenu();
+    if (e.mods.isPopupMenu()) showColourMenu();
 }
 
-void AuxBusComponent::applyAuxColour (juce::Colour c)
-{
-    aux.colour = c;
-    repaint();
-    // Channel-strip bus buttons poll for aux colour changes in their timer
-    // callback (see ChannelStripComponent::timerCallback) and re-skin from
-    // there, so changing the aux colour here automatically propagates.
-}
+void AuxBusComponent::applyAuxColour (juce::Colour c) { aux.colour = c; repaint(); }
 
 void AuxBusComponent::showColourMenu()
 {
@@ -69,7 +248,6 @@ void AuxBusComponent::showColourMenu()
         { "Purple",     fourKColors::kSendPurple},
         { "Tan",        fourKColors::kMasterTan },
     };
-
     juce::PopupMenu menu;
     menu.addSectionHeader ("Bus colour");
     for (size_t i = 0; i < std::size (presets); ++i)
@@ -80,12 +258,10 @@ void AuxBusComponent::showColourMenu()
         item.colour = juce::Colour (presets[i].second);
         menu.addItem (item);
     }
-
     juce::Component::SafePointer<AuxBusComponent> safe (this);
     std::vector<std::pair<juce::String, juce::uint32>> presetCopy;
     presetCopy.reserve (std::size (presets));
     for (auto& p : presets) presetCopy.emplace_back (juce::String (p.first), p.second);
-
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this),
         [safe, presetCopy] (int result)
         {
@@ -98,19 +274,6 @@ void AuxBusComponent::showColourMenu()
         });
 }
 
-static void drawSectionPlaceholder (juce::Graphics& g, juce::Rectangle<int> r,
-                                    const juce::String& label, juce::Colour accent)
-{
-    if (r.isEmpty()) return;
-    g.setColour (juce::Colour (0xff222226));
-    g.fillRoundedRectangle (r.toFloat(), 3.0f);
-    g.setColour (accent.withAlpha (0.45f));
-    g.drawRoundedRectangle (r.toFloat().reduced (0.5f), 3.0f, 0.8f);
-    g.setColour (accent.withAlpha (0.85f));
-    g.setFont (juce::Font (juce::FontOptions (9.0f, juce::Font::bold)));
-    g.drawText (label, r.reduced (3, 2), juce::Justification::centredTop, false);
-}
-
 void AuxBusComponent::paint (juce::Graphics& g)
 {
     auto r = getLocalBounds().toFloat().reduced (1.5f);
@@ -121,9 +284,115 @@ void AuxBusComponent::paint (juce::Graphics& g)
     g.setColour (juce::Colour (0xff2a2a2e));
     g.drawRoundedRectangle (getLocalBounds().toFloat().reduced (1.5f), 4.0f, 1.0f);
 
-    drawSectionPlaceholder (g, fxArea,   "FX",   juce::Colour (0xff9080c0));
-    drawSectionPlaceholder (g, eqArea,   "EQ",   juce::Colour (0xff80c090));
-    drawSectionPlaceholder (g, compArea, "COMP", juce::Colour (0xffd09060));
+    if (! fxArea.isEmpty())
+    {
+        g.setColour (juce::Colour (0xff222226));
+        g.fillRoundedRectangle (fxArea.toFloat(), 3.0f);
+        g.setColour (juce::Colour (0xff9080c0).withAlpha (0.45f));
+        g.drawRoundedRectangle (fxArea.toFloat().reduced (0.5f), 3.0f, 0.8f);
+        g.setColour (juce::Colour (0xff9080c0).withAlpha (0.85f));
+        g.setFont (juce::Font (juce::FontOptions (9.0f, juce::Font::bold)));
+        g.drawText ("FX", fxArea.reduced (3, 2), juce::Justification::centredTop, false);
+    }
+
+    // Stereo LED meter - two columns side by side inside meterArea.
+    if (! meterArea.isEmpty())
+    {
+        constexpr float kMinDb = -60.0f, kMaxDb = 6.0f;
+        constexpr float kBarGap = 1.0f;
+
+        auto drawColumn = [&] (juce::Rectangle<float> bar, float displayedDb)
+        {
+            g.setColour (juce::Colour (0xff0c0c0e));
+            g.fillRoundedRectangle (bar, 1.5f);
+            g.setColour (juce::Colour (0xff2a2a2e));
+            g.drawRoundedRectangle (bar, 1.5f, 0.6f);
+
+            const float frac = juce::jlimit (0.0f, 1.0f,
+                (displayedDb - kMinDb) / (kMaxDb - kMinDb));
+            const float fillH = (bar.getHeight() - 4.0f) * frac;
+            if (fillH > 0.5f)
+            {
+                auto fillRect = juce::Rectangle<float> (bar.getX() + 1.5f,
+                                                         bar.getBottom() - 2.0f - fillH,
+                                                         bar.getWidth() - 3.0f, fillH);
+                juce::ColourGradient grad (juce::Colour (0xff70c060),
+                                            fillRect.getX(), fillRect.getBottom(),
+                                            juce::Colour (0xffff5050),
+                                            fillRect.getX(), bar.getY(), false);
+                grad.addColour (0.65, juce::Colour (0xffe0c050));
+                g.setGradientFill (grad);
+                g.fillRoundedRectangle (fillRect, 1.0f);
+            }
+        };
+
+        const auto fullBar = meterArea.toFloat();
+        const float colW   = (fullBar.getWidth() - kBarGap) * 0.5f;
+        drawColumn (juce::Rectangle<float> (fullBar.getX(), fullBar.getY(),
+                                              colW, fullBar.getHeight()),
+                     displayedOutputLDb);
+        drawColumn (juce::Rectangle<float> (fullBar.getX() + colW + kBarGap, fullBar.getY(),
+                                              colW, fullBar.getHeight()),
+                     displayedOutputRDb);
+    }
+
+    // Bus-comp GR meter - fills DOWN from top as compression bites. Same
+    // colour story as the channel strip's GR bar so the visual language is
+    // consistent across the mixer.
+    if (! grMeterArea.isEmpty())
+    {
+        const auto bar = grMeterArea.toFloat();
+        g.setColour (juce::Colour (0xff0c0c0e));
+        g.fillRoundedRectangle (bar, 1.5f);
+        g.setColour (juce::Colour (0xff2a2a2e));
+        g.drawRoundedRectangle (bar, 1.5f, 0.5f);
+
+        constexpr float kGrFloorDb = 20.0f;
+        const float grAbs = juce::jlimit (0.0f, kGrFloorDb, std::abs (displayedGrDb));
+        if (grAbs > 0.05f)
+        {
+            const float frac = grAbs / kGrFloorDb;
+            const float fillH = (bar.getHeight() - 4.0f) * frac;
+            auto fillRect = juce::Rectangle<float> (bar.getX() + 1.5f,
+                                                      bar.getY() + 2.0f,
+                                                      bar.getWidth() - 3.0f, fillH);
+            juce::ColourGradient grad (juce::Colour (0xffe0c050).brighter (0.2f),
+                                         bar.getX(), bar.getY(),
+                                         juce::Colour (0xffe05050).brighter (0.1f),
+                                         bar.getX(), bar.getBottom(), false);
+            g.setGradientFill (grad);
+            g.fillRoundedRectangle (fillRect, 1.0f);
+        }
+
+        // Tiny "GR" caption above the bar so the user knows what it is.
+        g.setColour (juce::Colour (0xff909094));
+        g.setFont (juce::Font (juce::FontOptions (7.0f, juce::Font::bold)));
+        g.drawText ("GR",
+                     juce::Rectangle<float> (bar.getX() - 2.0f, bar.getY() - 9.0f,
+                                              bar.getWidth() + 4.0f, 8.0f),
+                     juce::Justification::centred, false);
+    }
+
+    // Fader dB scale labels - aligned with the tick marks the LookAndFeel
+    // paints on the fader track. Same kFaderTicks set used by the channel
+    // strips so all faders read identically.
+    if (! faderScaleArea.isEmpty())
+    {
+        const auto& range = faderSlider.getNormalisableRange();
+        for (const auto& t : kFaderTicks)
+        {
+            if (t.db < range.start - 0.01f || t.db > range.end + 0.01f) continue;
+            const float y = faderYForDb (faderSlider, t.db);
+            const bool isZero = (std::abs (t.db) < 0.01f);
+            g.setColour (isZero ? juce::Colour (0xffe0e0e0) : juce::Colour (0xff909094));
+            g.setFont (juce::Font (juce::FontOptions (isZero ? 9.5f : 8.5f,
+                                                        isZero ? juce::Font::bold
+                                                                : juce::Font::plain)));
+            const auto rect = juce::Rectangle<float> ((float) faderScaleArea.getX(), y - 5.0f,
+                                                        (float) faderScaleArea.getWidth(), 10.0f);
+            g.drawText (t.label, rect, juce::Justification::centredRight, false);
+        }
+    }
 }
 
 void AuxBusComponent::resized()
@@ -131,20 +400,111 @@ void AuxBusComponent::resized()
     auto area = getLocalBounds().reduced (4);
     area.removeFromTop (6);
     nameLabel.setBounds (area.removeFromTop (20));
+    area.removeFromTop (3);
+
+    // FX placeholder for the future plugin slot.
+    fxArea = area.removeFromTop (32);
+    area.removeFromTop (3);
+
+    // 26 px rotary + 14 px textbox. Block width is 40 - wider than the
+    // initial 28 to keep value readouts ("4.0:1", "1100", etc.) un-truncated
+    // and label text above readable.
+    constexpr int kKnobDia    = 26;
+    constexpr int kTextBoxH   = 14;
+    constexpr int kKnobBlockH = kKnobDia + kTextBoxH + 2;   // 42
+    constexpr int kKnobBlockW = 40;
+
+    auto layKnobRow = [] (juce::Rectangle<int>& parent, int n)
+                       -> std::pair<juce::Rectangle<int>, juce::Rectangle<int>>
+    {
+        auto labelRow = parent.removeFromTop (10);
+        auto knobRow  = parent.removeFromTop (kKnobBlockH);
+        const int totalW = n * kKnobBlockW;
+        const int leftPad = juce::jmax (0, (labelRow.getWidth() - totalW) / 2);
+        labelRow.removeFromLeft (leftPad);
+        knobRow .removeFromLeft (leftPad);
+        return { labelRow, knobRow };
+    };
+
+    // EQ section.
+    eqButton.setBounds (area.removeFromTop (16).reduced (4, 0));
+    area.removeFromTop (1);
+    {
+        auto rows = layKnobRow (area, 3);
+        auto& lblRow  = rows.first;
+        auto& knobRow = rows.second;
+        eqLfLbl .setBounds (lblRow .removeFromLeft (kKnobBlockW));
+        eqMidLbl.setBounds (lblRow .removeFromLeft (kKnobBlockW));
+        eqHfLbl .setBounds (lblRow .removeFromLeft (kKnobBlockW));
+        eqLfGain .setBounds (knobRow.removeFromLeft (kKnobBlockW));
+        eqMidGain.setBounds (knobRow.removeFromLeft (kKnobBlockW));
+        eqHfGain .setBounds (knobRow.removeFromLeft (kKnobBlockW));
+    }
+    area.removeFromTop (3);
+
+    // Comp: 3 + 2 knobs across two rows.
+    compButton.setBounds (area.removeFromTop (16).reduced (4, 0));
+    area.removeFromTop (1);
+    {
+        auto rows = layKnobRow (area, 3);
+        auto& lblRow  = rows.first;
+        auto& knobRow = rows.second;
+        compThrLbl.setBounds (lblRow .removeFromLeft (kKnobBlockW));
+        compRatLbl.setBounds (lblRow .removeFromLeft (kKnobBlockW));
+        compAtkLbl.setBounds (lblRow .removeFromLeft (kKnobBlockW));
+        compThresh.setBounds (knobRow.removeFromLeft (kKnobBlockW));
+        compRatio .setBounds (knobRow.removeFromLeft (kKnobBlockW));
+        compAttack.setBounds (knobRow.removeFromLeft (kKnobBlockW));
+    }
+    area.removeFromTop (1);
+    {
+        auto rows = layKnobRow (area, 2);
+        auto& lblRow  = rows.first;
+        auto& knobRow = rows.second;
+        compRelLbl .setBounds (lblRow .removeFromLeft (kKnobBlockW));
+        compMakLbl .setBounds (lblRow .removeFromLeft (kKnobBlockW));
+        compRelease.setBounds (knobRow.removeFromLeft (kKnobBlockW));
+        compMakeup .setBounds (knobRow.removeFromLeft (kKnobBlockW));
+    }
+    area.removeFromTop (3);
+
+    // Pan (single knob, centred).
+    {
+        auto rows = layKnobRow (area, 1);
+        auto& lblRow  = rows.first;
+        auto& knobRow = rows.second;
+        panLbl .setBounds (lblRow .removeFromLeft (kKnobBlockW));
+        panKnob.setBounds (knobRow.removeFromLeft (kKnobBlockW));
+    }
     area.removeFromTop (4);
 
-    fxArea   = area.removeFromTop (40);
-    area.removeFromTop (3);
-    eqArea   = area.removeFromTop (66);
-    area.removeFromTop (3);
-    compArea = area.removeFromTop (52);
-    area.removeFromTop (6);
-
+    // Mute / solo at the bottom.
     auto buttons = area.removeFromBottom (24);
     muteButton.setBounds (buttons.removeFromLeft (buttons.getWidth() / 2).reduced (2));
     soloButton.setBounds (buttons.reduced (2));
-    area.removeFromBottom (4);
+    area.removeFromBottom (2);
 
+    // Peak/GR readouts above the meter+fader pair.
+    auto peakRow = area.removeFromBottom (14);
+    const int prW = peakRow.getWidth() / 2;
+    outputPeakLabel.setBounds (peakRow.removeFromLeft (prW));
+    grPeakLabel    .setBounds (peakRow);
+    area.removeFromBottom (2);
+
+    // Right-side stack: stereo LED meter | small GR meter | fader scale
+    // labels | fader. The scale column shows fader dB labels aligned with
+    // the LookAndFeel-drawn ticks across the fader's track.
+    constexpr int kMeterW       = 14;   // 2 × ~6 px columns + 1 px gap
+    constexpr int kGrMeterW     = 8;
+    constexpr int kGrGap        = 2;
+    constexpr int kFaderScaleW  = 14;
+    constexpr int kFaderScaleGap = 2;
+    meterArea   = area.removeFromRight (kMeterW);
+    area.removeFromRight (kGrGap);
+    grMeterArea = area.removeFromRight (kGrMeterW);
+    area.removeFromRight (kFaderScaleGap);
+    faderScaleArea = area.removeFromRight (kFaderScaleW);
+    area.removeFromRight (3);
     faderSlider.setBounds (area);
 }
 } // namespace adhdaw

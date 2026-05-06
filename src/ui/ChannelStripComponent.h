@@ -11,12 +11,28 @@ namespace adhdaw
 class ChannelStripComponent final : public juce::Component, private juce::Timer
 {
 public:
-    ChannelStripComponent (int trackIndex, Track& trackRef, Session& sessionRef);
+    ChannelStripComponent (int trackIndex, Track& trackRef, Session& sessionRef,
+                            class PluginSlot& slotRef);
     ~ChannelStripComponent() override;
 
     void paint (juce::Graphics&) override;
     void resized() override;
     void mouseDown (const juce::MouseEvent& e) override;
+
+    // Compact mode hides the inline EQ + COMP controls and replaces each
+    // section with a single small button that opens the corresponding
+    // editor as a modal popup. Used when the SUMMARY (tape-strip) view is
+    // expanded, so the fader / bus assigns / meters / M-S-Ø stay visible
+    // even on a screen the SUMMARY ate half of.
+    void setCompactMode (bool compact);
+    bool isCompactMode() const noexcept { return compactMode; }
+
+    // Mixing-stage flag - swaps the input/IN/ARM/PRINT block at the top of
+    // the strip for a row of 4 AUX send knobs (one per aux bus). The aux
+    // strips host reverb / delay / etc. plugin chains; these knobs are how
+    // each channel feeds them.
+    void setMixingMode (bool mixing);
+    bool isMixingMode() const noexcept { return mixingMode; }
 
 private:
     void timerCallback() override;
@@ -24,13 +40,40 @@ private:
     int trackIndex;
     Track& track;
     Session& session;
+    class PluginSlot& pluginSlot;  // owned by the AudioEngine's ChannelStrip
     std::array<juce::uint32, ChannelStripParams::kNumBuses> lastBusColours {};  // for change detection in timerCallback
     float displayedGrDb = 0.0f;     // smoothed GR for the comp meter
-    float displayedInputDb = -100.0f; // smoothed input level for the level meter
-    float inputPeakHoldDb = -100.0f;  // brief peak hold marker
+    float displayedInputDb = -100.0f; // smoothed input level (L) for the level meter
+    float inputPeakHoldDb = -100.0f;  // brief peak hold marker (L)
     int   inputPeakHoldFrames = 0;
+    float displayedInputRDb = -100.0f;   // R-channel smoothed level (stereo mode)
+    float inputPeakHoldRDb  = -100.0f;
+    int   inputPeakHoldRFrames = 0;
 
     juce::Label nameLabel;
+
+    // Per-channel insert plugin slot. Sits between the input row and the
+    // EQ section. Click-left to load (or replace) a plugin via file chooser;
+    // click-right to unload. Plugin name is shown on the button when loaded.
+    // Custom subclass that adds a right-click context menu so the user can
+    // change/remove the loaded plugin without having to right-click the
+    // strip body (which used to be the only path - undiscoverable).
+    struct PluginSlotButton final : public juce::TextButton
+    {
+        using juce::TextButton::TextButton;
+        std::function<void(const juce::MouseEvent&)> onRightClick;
+        void mouseDown (const juce::MouseEvent& e) override
+        {
+            if (e.mods.isPopupMenu() && onRightClick)
+            {
+                onRightClick (e);
+                return;   // do NOT pass to base - we don't want a stuck "down" state
+            }
+            juce::TextButton::mouseDown (e);
+        }
+    };
+    PluginSlotButton pluginSlotButton { "+ Plugin" };
+    juce::String     lastSlotName;          // for change detection in timerCallback
 
     juce::Rectangle<int> eqArea, compArea;
 
@@ -90,21 +133,76 @@ private:
     juce::Rectangle<int> inputMeterArea;
     juce::Rectangle<int> meterScaleArea;
     juce::Label inputPeakLabel;
+    juce::Label grPeakLabel;       // GR readout (dB), sits to the right of inputPeakLabel
     juce::Label threshMeterLabel;  // "THR" header above CompMeterStrip's drag handle
     juce::TextButton muteButton    { "M" };
     juce::TextButton soloButton    { "S" };
-    juce::TextButton phaseButton   { juce::CharPointer_UTF8 ("\xc3\x98") };  // Ø — phase invert
+    juce::TextButton phaseButton   { juce::CharPointer_UTF8 ("\xc3\x98") };  // Ø - phase invert
     juce::TextButton armButton     { "ARM" };
     juce::TextButton monitorButton { "IN"  };
     juce::TextButton printButton   { "PRINT" };  // print EQ/comp to recording
-    juce::ComboBox   inputSelector;
+    juce::ComboBox   modeSelector;          // Mono / Stereo / MIDI
+    juce::ComboBox   inputSelector;         // mono / stereo-L / (hidden in MIDI)
+    juce::ComboBox   inputSelectorR;        // stereo-R (visible only in stereo mode)
+    juce::ComboBox   midiInputSelector;     // MIDI input port (visible only in MIDI mode)
+
+    // Aux send knobs (visible only in Mixing stage). Each sends a copy of
+    // the channel signal into the matching AUX strip's plugin chain. The
+    // PRE/POST tap point is per-channel-per-aux (auxSendPreFader[i]) and
+    // gets its UI in Phase D.
+    juce::Label  auxRowLabel;
+    std::array<std::unique_ptr<juce::Slider>, ChannelStripParams::kNumAuxSends> auxKnobs;
+    std::array<juce::Label,                  ChannelStripParams::kNumAuxSends> auxKnobLabels;
+    bool mixingMode = false;
+    juce::Rectangle<int> auxRowArea;
 
     void onHpfKnobChanged();
     void onInputSelectorChanged();
+    void onTrackModeChanged();
+    void refreshInputSelectorVisibility();
     void showColourMenu();
     void applyTrackColour (juce::Colour c);
     void refreshEqTypeButton();
     void setCompMode (int modeIndex);
     void refreshCompModeButtons();
+
+    // Plugin slot UX. openPluginPicker is the main entry point - shows a
+    // PopupMenu of installed plugins (from the scanned KnownPluginList) +
+    // "Scan plugins" + "Browse for file...". The file-chooser path is the
+    // fallback for unscanned formats / .vst3 bundles outside default paths.
+    void openPluginPicker();
+    void runPluginScanModal();
+    void openPluginFileChooser();
+    void unloadPluginSlot();
+    void refreshPluginSlotButton();
+    // Right-click context menu for the plugin slot button. Mirrors the
+    // plugin items inside showColourMenu() but is reachable directly from
+    // the slot button so users don't have to discover the strip-body
+    // right-click. Shown by PluginSlotButton::onRightClick.
+    void showPluginSlotMenu();
+    void togglePluginEditor();              // open if closed, close if open
+    void openPluginEditor();
+    void closePluginEditor();
+    std::unique_ptr<juce::FileChooser> activePluginChooser;
+    juce::Component::SafePointer<juce::DialogWindow> activePluginEditorDialog;
+
+    // Compact-mode plumbing.
+    bool compactMode = false;
+    juce::TextButton eqCompactButton   { "EQ" };
+    juce::TextButton compCompactButton { "COMP" };
+    // EQ + Comp use CallOutBox (in-window overlay, click-outside-to-dismiss
+    // with the click consumed so the trigger button doesn't bounce-reopen).
+    // Plugin editor stays as a top-level DialogWindow because plugin GUIs
+    // can be very large and benefit from being a separate OS window.
+    juce::Component::SafePointer<juce::CallOutBox> activeEqBox;
+    juce::Component::SafePointer<juce::CallOutBox> activeCompBox;
+    void openEqEditorPopup();
+    void openCompEditorPopup();
+
+    // Apply visibility to every EQ child / every COMP child in one shot -
+    // the strip has a lot of controls split across the two sections so we
+    // gather them here rather than scattering setVisible calls.
+    void setEqSectionVisible (bool visible);
+    void setCompSectionVisible (bool visible);
 };
 } // namespace adhdaw

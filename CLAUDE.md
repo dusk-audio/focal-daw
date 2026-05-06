@@ -39,3 +39,7 @@ Phase 1a (current): live mixer, no recording, no plugin hosting. Phases 1b → 5
 - Prefer JUCE primitives (`juce::AudioBuffer<float>`, `juce::dsp::*`, `SmoothedValue`) over hand-rolled DSP plumbing.
 - Default to writing no comments; only comment the *why* when it's non-obvious.
 - Don't add features, validation, or abstractions beyond what the task at hand needs.
+
+## Git
+
+- Never add a `Co-Authored-By: Claude` (or any Claude/Anthropic) trailer to commits. Commits are authored by the user only.

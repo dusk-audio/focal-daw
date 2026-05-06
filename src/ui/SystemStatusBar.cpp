@@ -16,7 +16,8 @@ void SystemStatusBar::timerCallback()
     const double sr = engine.getCurrentSampleRate();
     const int    bs = engine.getCurrentBlockSize();
     const double cpu = engine.getDeviceManager().getCpuUsage();
-    const int    xruns = engine.getXRunCount();
+    const int    engineXruns  = engine.getXRunCount();
+    const int    backendXruns = engine.getBackendXRunCount();
 
     if (sr > 0.0 && bs > 0)
     {
@@ -30,11 +31,21 @@ void SystemStatusBar::timerCallback()
     }
     else
     {
-        audioInfo = "Audio: —";
+        audioInfo = "Audio: -";
     }
 
+    // Override with a loud warning when the open device has 0 outputs -
+    // engine is silent in that state, and we'd rather the user see this than
+    // chase a "broken" engine. Replaces the rate/latency string entirely so
+    // the warning isn't lost next to normal-looking telemetry.
+    if (! engine.hasUsableOutputs() && sr > 0.0)
+        audioInfo = "Audio: NO OUTPUTS - pick another device";
+
+    // Two xrun counts: engine-self-detected (callback overrun) / backend
+    // (driver EPIPE on ALSA, JACK xrun callback). They have different fixes
+    // - surfacing both lets a glitchy session be diagnosed at a glance.
     dspInfo = "DSP: " + juce::String ((int) std::round (cpu * 100.0)) + "%"
-            + " (" + juce::String (xruns) + ")";
+            + " (" + juce::String (engineXruns) + "/" + juce::String (backendXruns) + ")";
 
     repaint();
 }
@@ -49,18 +60,21 @@ void SystemStatusBar::paint (juce::Graphics& g)
     g.setFont (juce::Font (juce::FontOptions (juce::Font::getDefaultMonospacedFontName(),
                                                 12.0f, juce::Font::plain)));
 
-    // Color the DSP segment red when CPU is high or xruns have happened.
+    // Color the DSP segment red when CPU is high or either xrun counter
+    // moved off zero (engine-side OR backend-side).
     const double cpu   = engine.getDeviceManager().getCpuUsage();
-    const int    xruns = engine.getXRunCount();
+    const int    xruns = engine.getXRunCount() + engine.getBackendXRunCount();
     const bool   warn  = cpu > 0.85 || xruns > 0;
 
-    // DSP info is short ("DSP: 100% (99)" worst case ≈ 100 px) — give it
-    // exactly what it needs on the right and let audioInfo use the rest of
-    // the bar so "ms" doesn't get clipped at typical status-bar widths.
-    auto dspBounds = bounds.removeFromRight (110);
+    // DSP info now reads "DSP: 12% (3/0)" at worst - engine/backend xrun
+    // pair widens the right column slightly.
+    auto dspBounds = bounds.removeFromRight (140);
     bounds.removeFromRight (8);  // small gap
 
-    g.setColour (juce::Colour (0xffb0b0b8));
+    // Audio segment goes red when the device opened with no outputs -
+    // matches the "NO OUTPUTS" text override applied in timerCallback.
+    const bool audioWarn = ! engine.hasUsableOutputs() && engine.getCurrentSampleRate() > 0.0;
+    g.setColour (audioWarn ? juce::Colour (0xffe05050) : juce::Colour (0xffb0b0b8));
     g.drawText (audioInfo, bounds, juce::Justification::centredLeft, false);
 
     g.setColour (warn ? juce::Colour (0xffe05050) : juce::Colour (0xffb0b0b8));

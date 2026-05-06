@@ -4,10 +4,19 @@
 #include <array>
 #include <vector>
 #include "../session/Session.h"
+#include "../engine/PluginSlot.h"
 
 #if ADHDAW_HAS_DUSK_DSP
   #include "BritishEQProcessor.h"   // multi-q
-  #include "UniversalCompressor.h"  // multi-comp (juce::AudioProcessor)
+  // ChannelComp is a thin facade over UniversalCompressor with the donor's
+  // minimal-processing fast path enabled. Same Opto/FET/VCA per-sample DSP,
+  // but no internal oversampling, no sidechain HP/EQ, no true-peak detector,
+  // no transient shaper, no global lookahead, no mix wet/dry, no auto-makeup,
+  // no bypass-fade crossfader, no stereo linking - all of which would run
+  // unconditionally per-block in the standard path and dominate per-channel
+  // CPU when 16 strips are active. Master + aux buses still use the bare
+  // UniversalCompressor (Bus mode + the extras earn their keep there).
+  #include "ChannelComp.h"          // shared/channel-comp/ - header-only
 #endif
 
 namespace adhdaw
@@ -22,6 +31,14 @@ public:
 
     void prepare (double sampleRate, int blockSize);
     void bind (const ChannelStripParams& params) noexcept { paramsRef = &params; }
+
+    // Bind the per-app PluginManager so this strip's PluginSlot can resolve
+    // file paths to plugin instances. Called once at engine construction
+    // after AudioEngine builds its PluginManager. The slot is dormant until
+    // a plugin is loaded - strips with no plugin pay zero RT cost.
+    void bindPluginManager (PluginManager& mgr) noexcept { pluginSlot.setManager (mgr); }
+    PluginSlot&       getPluginSlot()       noexcept { return pluginSlot; }
+    const PluginSlot& getPluginSlot() const noexcept { return pluginSlot; }
 
     // Engine sets this to true when the recorder is going to read
     // getLastProcessedMono() this block (i.e. armed && recording && printEffects).
@@ -45,7 +62,7 @@ public:
     // Reads `numSamples` of mono audio from `monoIn`. Internal: HPF + 4-band EQ
     // (single source from dsp-cores), then accumulates the post-fader stereo
     // signal into masterL/masterR and into busL[N]/busR[N] for each assigned
-    // bus (binary on/off — each bus receives the channel signal at unity).
+    // bus (binary on/off - each bus receives the channel signal at unity).
     void processAndAccumulate (const float* monoIn,
                                float* masterL, float* masterR,
                                const std::array<float*, kNumBuses>& busL,
@@ -58,28 +75,39 @@ private:
     juce::SmoothedValue<float> faderGain  { 0.0f };
     juce::SmoothedValue<float> panGainL   { 0.7071f };
     juce::SmoothedValue<float> panGainR   { 0.7071f };
-    // Binary bus routing — smoothed 0..1 to avoid clicks on toggle.
+    // Binary bus routing - smoothed 0..1 to avoid clicks on toggle.
     std::array<juce::SmoothedValue<float>, kNumBuses> busGain;
 
     std::vector<float> tempMono;  // pre-fader scratch buffer (post-EQ)
     juce::AudioBuffer<float> eqMonoBuffer;  // wraps tempMono for BritishEQProcessor::process
 
+    // Per-channel insert plugin. Sits between phase invert and the EQ stage
+    // so the user can drop a guitar amp / synth / character processor in
+    // the signal path before the channel's EQ + comp shape it.
+    PluginSlot pluginSlot;
+
 #if ADHDAW_HAS_DUSK_DSP
     BritishEQProcessor eq;
+    // Cache of the most recent Parameters we pushed to `eq`. updateEqParameters
+    // memcmp's the freshly-built Parameters against this and only calls
+    // setParameters() when the bytes differ - this skips the full coefficient
+    // recompute (8-14 biquads) on every block when the user isn't currently
+    // turning a knob. Value-init {} so padding bytes are zeroed and the
+    // memcmp doesn't false-positive on garbage padding.
+    BritishEQProcessor::Parameters lastEqParams {};
 
-    // UniversalCompressor is a juce::AudioProcessor. We treat it as an
-    // embedded plugin: prepareToPlay → set APVTS params → processBlock per
-    // audio block. One instance per channel. Per-mode parameter pointers
-    // are cached in `bind()` to avoid string lookups on the audio thread.
-    UniversalCompressor compressor;
-    juce::MidiBuffer    compMidi;        // unused but required by processBlock
-    juce::AudioBuffer<float> compMonoBuffer;  // pre-allocated in prepare()
+    // Per-channel comp - facade over UniversalCompressor with the minimal
+    // processing fast path active. One instance per channel. Per-mode
+    // parameter pointers are cached in bindCompParams() to avoid string
+    // lookups on the audio thread.
+    dusk::ChannelComp compressor;
+    juce::AudioBuffer<float> compMonoBuffer;  // sized in prepare(); used only as a chunking fence
 
-    // Cached APVTS raw atomic value pointers — set once in bindCompParams().
+    // Cached APVTS raw atomic value pointers - set once in bindCompParams().
     // These point at the SAME std::atomic<float> that UniversalCompressor's
     // processBlock() reads via getRawParameterValue(); writing here is the
     // direct, lock-free path. Stores hold DENORMALISED (SI-unit / index /
-    // 0-or-1) values — no normalisation step needed.
+    // 0-or-1) values - no normalisation step needed.
     std::atomic<float>* compModeAtom        = nullptr;
     std::atomic<float>* compBypassAtom      = nullptr;
     std::atomic<float>* compMixAtom         = nullptr;

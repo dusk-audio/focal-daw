@@ -53,22 +53,45 @@ target_sources(ADHDaw PRIVATE
     src/Main.cpp
     src/ADHDawApp.cpp
     src/engine/AudioEngine.cpp
+    src/engine/BounceEngine.cpp
+    src/engine/MasteringPlayer.cpp
     src/engine/PlaybackEngine.cpp
+    src/engine/PluginManager.cpp
+    src/engine/PluginSlot.cpp
     src/engine/RecordManager.cpp
     src/dsp/AuxBusStrip.cpp
+    src/dsp/BrickwallLimiter.cpp
     src/dsp/ChannelStrip.cpp
+    src/dsp/LoudnessMeter.cpp
     src/dsp/MasterBus.cpp
+    src/dsp/MasteringChain.cpp
+    src/dsp/MasteringDigitalEq.cpp
+    src/dsp/Metronome.cpp
+    src/session/RecentSessions.cpp
+    src/session/RegionEditActions.cpp
     src/session/Session.cpp
     src/session/SessionSerializer.cpp
+    src/ui/AppConfig.cpp
+    src/ui/AudioSettingsPanel.cpp
     src/ui/AuxBusComponent.cpp
+    src/ui/BounceDialog.cpp
+    src/ui/ChannelCompEditor.cpp
+    src/ui/ChannelEqEditor.cpp
     src/ui/ChannelStripComponent.cpp
     src/ui/CompMeterStrip.cpp
+    src/ui/SelfTestPanel.cpp
+    src/ui/StartupDialog.cpp
+    src/engine/AudioPipelineSelfTest.cpp
     src/ui/ConsoleView.cpp
     src/ui/MainComponent.cpp
+    src/ui/MasteringEqEditor.cpp
+    src/ui/MasteringLimiterEditor.cpp
+    src/ui/MasteringView.cpp
     src/ui/MasterStripComponent.cpp
     src/ui/SystemStatusBar.cpp
     src/ui/TapeStrip.cpp
-    src/ui/TransportBar.cpp)
+    src/ui/TransportBar.cpp
+    src/ui/WindowState.cpp)
 
 target_include_directories(ADHDaw PRIVATE
     src
@@ -86,6 +109,7 @@ if(DEFINED DUSK_PLUGINS_PATH)
     target_include_directories(ADHDaw PRIVATE
         "${DUSK_PLUGINS_PATH}/plugins/shared"
         "${DUSK_PLUGINS_PATH}/plugins/shared/AnalogEmulation"
+        "${DUSK_PLUGINS_PATH}/plugins/shared/channel-comp"
         "${DUSK_PLUGINS_PATH}/plugins/multi-q"
         "${DUSK_PLUGINS_PATH}/plugins/multi-comp"
         "${DUSK_PLUGINS_PATH}/plugins/multi-comp/HardwareEmulation"
@@ -111,6 +135,13 @@ target_compile_definitions(ADHDaw PRIVATE
     JUCE_APPLICATION_VERSION_STRING="$<TARGET_PROPERTY:ADHDaw,JUCE_VERSION>"
     JUCE_JACK=1
     JUCE_ALSA=1
+    # Plugin host formats. Default JUCE setting is OFF; turn on the two
+    # formats we actually scan + load (VST3 and LV2 - both popular on Linux
+    # via yabridge / native ports). Without these, addDefaultFormats()
+    # registers nothing and every plugin load fails with "No compatible
+    # plug-in format exists for this plug-in".
+    JUCE_PLUGINHOST_VST3=1
+    JUCE_PLUGINHOST_LV2=1
     # Projucer-style macros that vendored multi-comp sources expect.
     JucePlugin_VersionString="${PROJECT_VERSION}"
     JucePlugin_Name="ADHDaw_Comp"

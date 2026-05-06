@@ -7,7 +7,7 @@ namespace adhdaw
 {
 // Mixbus-style compressor metering: two vertical LED bars side by side
 // (input level on the left, gain reduction on the right) plus a draggable
-// threshold marker on the input meter. Replaces the THR knob — drag the
+// threshold marker on the input meter. Replaces the THR knob - drag the
 // triangle handle up/down on the input meter to set the threshold relative
 // to the live input signal.
 class CompMeterStrip final : public juce::Component, private juce::Timer
@@ -40,7 +40,7 @@ private:
 
     Track& track;
 
-    // Smoothed display values — updated from the Timer callback so the meter
+    // Smoothed display values - updated from the Timer callback so the meter
     // breathes naturally with fast-attack / slow-decay envelopes.
     float displayedInputDb   = -100.0f;
     float inputPeakHoldDb    = -100.0f;

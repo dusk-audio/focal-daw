@@ -7,7 +7,7 @@ namespace adhdaw
 {
 // Serialise / restore a Session to/from JSON on disk. Save uses an atomic
 // write pattern (write to .tmp, move into place) so a crash mid-save never
-// produces a partial session.json. Load is best-effort — missing fields fall
+// produces a partial session.json. Load is best-effort - missing fields fall
 // back to the Session's defaults so older session files still open.
 class SessionSerializer
 {

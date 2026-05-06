@@ -1,0 +1,59 @@
+#pragma once
+
+#include <juce_audio_basics/juce_audio_basics.h>
+#include <juce_audio_formats/juce_audio_formats.h>
+#include <juce_core/juce_core.h>
+#include <atomic>
+#include <memory>
+
+namespace adhdaw
+{
+// Stereo file player used by the Mastering stage. Loads a WAV/AIFF on the
+// message thread; on the audio thread, fills a stereo block from the file
+// at the current playhead and advances. EOF returns silence (the player
+// stops itself so the UI can re-enable Play). Mono files are duplicated
+// to L+R; >2-channel files use the first two channels only.
+//
+// This is a deliberate sibling of PlaybackEngine rather than a reuse -
+// PlaybackEngine is per-track mono with multi-region playback, and
+// retrofitting it for stereo single-source playback would muddy the
+// per-track contract.
+class MasteringPlayer
+{
+public:
+    MasteringPlayer();
+
+    // Message thread.
+    void prepare (int maxBlockSize);
+    bool loadFile (const juce::File& file);
+    void unloadFile();
+
+    bool        isLoaded() const noexcept    { return reader != nullptr; }
+    juce::File  getLoadedFile() const         { return loadedFile; }
+    juce::int64 getLengthSamples() const noexcept;
+    double      getSourceSampleRate() const noexcept;
+
+    // Transport.
+    void play() noexcept    { playing.store (true, std::memory_order_relaxed); }
+    void stop() noexcept    { playing.store (false, std::memory_order_relaxed); }
+    bool isPlaying() const noexcept { return playing.load (std::memory_order_relaxed); }
+
+    juce::int64 getPlayhead() const noexcept     { return playhead.load (std::memory_order_relaxed); }
+    void setPlayhead (juce::int64 p) noexcept    { playhead.store (p, std::memory_order_relaxed); }
+
+    // Audio thread. Writes `numSamples` of stereo audio to L/R. Both must
+    // be valid pointers. Output is silence when not playing or when the
+    // playhead is past the file length.
+    void process (float* L, float* R, int numSamples) noexcept;
+
+private:
+    juce::AudioFormatManager formatManager;
+    std::unique_ptr<juce::AudioFormatReader> reader;
+    juce::File loadedFile;
+
+    juce::AudioBuffer<float> readScratch;  // 2 ch × maxBlockSize, pre-allocated
+
+    std::atomic<bool>        playing  { false };
+    std::atomic<juce::int64> playhead { 0 };
+};
+} // namespace adhdaw

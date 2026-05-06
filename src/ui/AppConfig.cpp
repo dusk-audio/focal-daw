@@ -1,0 +1,81 @@
+#include "AppConfig.h"
+
+namespace adhdaw::appconfig
+{
+namespace
+{
+constexpr const char* kKeyUiScale = "ui_scale";
+
+juce::File getStorePath()
+{
+    auto cfgDir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+                      .getChildFile ("ADH DAW");
+    if (! cfgDir.exists()) cfgDir.createDirectory();
+    return cfgDir.getChildFile ("app-config.properties");
+}
+
+// Tiny key=value parser. The data is one or two scalar entries - a real
+// PropertiesFile is overkill, and JUCE's PropertiesFile doesn't honour
+// XDG paths on Linux (it stores under ~/<folderName>/, not ~/.config/),
+// which makes it the wrong tool for a per-machine config we want
+// alongside window-state.txt and recent.txt.
+juce::String readKey (const juce::String& key)
+{
+    const auto file = getStorePath();
+    if (! file.existsAsFile()) return {};
+
+    juce::StringArray lines;
+    file.readLines (lines);
+    for (auto& raw : lines)
+    {
+        const auto line = raw.trim();
+        if (line.isEmpty() || line.startsWithChar ('#')) continue;
+        const auto eq = line.indexOfChar ('=');
+        if (eq <= 0) continue;
+        if (line.substring (0, eq).trim() == key)
+            return line.substring (eq + 1).trim();
+    }
+    return {};
+}
+
+void writeKey (const juce::String& key, const juce::String& value)
+{
+    const auto file = getStorePath();
+    juce::StringArray lines;
+    if (file.existsAsFile()) file.readLines (lines);
+
+    bool replaced = false;
+    for (auto& raw : lines)
+    {
+        const auto trimmed = raw.trim();
+        if (trimmed.isEmpty() || trimmed.startsWithChar ('#')) continue;
+        const auto eq = trimmed.indexOfChar ('=');
+        if (eq <= 0) continue;
+        if (trimmed.substring (0, eq).trim() == key)
+        {
+            raw = key + "=" + value;
+            replaced = true;
+            break;
+        }
+    }
+    if (! replaced) lines.add (key + "=" + value);
+
+    file.replaceWithText (lines.joinIntoString ("\n"));
+}
+} // namespace
+
+float getUiScaleOverride()
+{
+    const auto raw = readKey (kKeyUiScale);
+    if (raw.isEmpty()) return kUiScaleDefault;
+    const float value = raw.getFloatValue();
+    return juce::jlimit (kUiScaleMin, kUiScaleMax,
+                          value > 0.0f ? value : kUiScaleDefault);
+}
+
+void setUiScaleOverride (float scale)
+{
+    const float clamped = juce::jlimit (kUiScaleMin, kUiScaleMax, scale);
+    writeKey (kKeyUiScale, juce::String (clamped));
+}
+} // namespace adhdaw::appconfig
