@@ -1,1 +1,104 @@
-# focal-daw
+# Focal
+
+A deliberately constrained, portastudio-style DAW for Linux. Built for engineers who want to **record, mix, and master without leaving the application** — no plugin paralysis, no menu diving, no infinite-options sprawl.
+
+> *"If it wouldn't exist as a physical control on a $2000 hardware recorder, it probably doesn't belong here."*
+
+JUCE 8 / C++17. PipeWire (primary) via JUCE's JACK backend; ALSA fallback. Authoritative spec: [ADHDaw.md](ADHDaw.md).
+
+## Status
+
+**Phase 1a-2 in progress.** Alpha. Not for production work yet.
+
+| Stage | Status |
+|---|---|
+| Live mixer (16 ch + 4 aux + master, EQ + comp on each) | Working |
+| Multitrack recording / playback | Working |
+| Plugin hosting (per-channel VST3 / LV2) | Working |
+| Mastering view (waveform + EQ + multiband comp + L4-style limiter) | Working |
+| Bounce / mixdown export | Working |
+| Aux sends + reverb / delay returns | In progress |
+| MIDI tracks + instrument plugins | Phase 4 |
+| Console automation (Write / Read / Touch) | Phase 3 |
+
+6/6 headless self-test passes at 96 kHz / 256 samples on UMC1820 ALSA.
+
+## Why
+
+Most DAWs are built for production studios with infinite track counts and infinite options. They're also paralysing for ADHD-pattern users — every decision branches, every parameter is reachable, every track type wants its own configuration. Focal flips the constraint: a fixed signal chain, a finite track count, a single visible page per stage. You commit, you move on.
+
+## The seven hard constraints
+
+These are not implementation details — they're the product. Anything that violates them is wrong.
+
+1. **16 channels maximum.** Fixed. Two banks of 8 to match standard control surfaces.
+2. **Fixed signal chain.** No reordering EQ / comp. No adding / removing processors. Channel-strip processing order is the same on every track, every time.
+3. **No waveform editing.** Region-level move / split / delete / trim only. No zoom-to-sample, no pencil tool.
+4. **Console-style automation only.** Write / Read / Touch via gesture; no curve drawing.
+5. **Everything visible.** No tabs, no hidden panels (MIDI piano roll overlay is the only exception).
+6. **No preferences sprawl.** Audio device config and that's it.
+7. **Portastudio philosophy.** "Would this exist on a $2000 hardware recorder?" If no, don't build it.
+
+## Architecture
+
+```
+Channel 1-16 → 4 Aux Buses → Master → Output
+   HPF              EQ          Pultec EQ
+   4-band EQ        Comp        Bus Comp
+   FET/Opto Comp    Fader       Tape Saturation
+   Pan + Sends                  Fader
+   Fader
+   Mute / Solo / Ø
+```
+
+- **DSP**: extracted from the [Dusk Audio plugin suite](../plugins/) (4K EQ, Multi-Comp FET/Opto, Multi-Q Pultec, TapeMachine, shared AnalogEmulation). Header-only cores live in the plugins repo and are picked up at build time — no copy step, no submodule bump.
+- **JUCE**: 8.x, resolved via `-DJUCE_PATH` or a sibling `../JUCE` directory.
+- **Plugin host**: VST3 + LV2 (yabridge-friendly) on every channel strip; aux buses get plugin chains for reverb / delay returns (Phase 1b).
+
+## Build
+
+```bash
+# JUCE expected at ../JUCE (or pass -DJUCE_PATH=/path/to/JUCE)
+# Dusk plugins at ../plugins (or pass -DDUSK_PLUGINS_PATH=/path/to/plugins)
+
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
+
+./build/ADHDaw_artefacts/Release/"ADH DAW"
+```
+
+(Binary still ships as "ADH DAW" — full rename to Focal is pending.)
+
+## Self-test
+
+Headless audio-pipeline test (no GUI, no audio device — runs in CI / on push):
+
+```bash
+ADHDAW_RUN_SELFTEST=1 ./build/ADHDaw_artefacts/Release/"ADH DAW"
+```
+
+Six tests: pass-through unity, mute silence, master fader −6 dB, channel routing 2-out, channel routing 4-out, master tape gain. All must PASS.
+
+## Dev affordances
+
+```bash
+ADHDAW_START_STAGE=mixing       # land directly in Mixing stage
+ADHDAW_START_STAGE=mastering    # ... or Mastering
+ADHDAW_SKIP_STARTUP_DIALOG=1    # bypass the session-picker on launch
+```
+
+## Repository
+
+```
+src/
+  dsp/         # ChannelStrip, AuxBusStrip, MasterBus, BrickwallLimiter, etc.
+  engine/      # AudioEngine, RecordManager, PlaybackEngine, BounceEngine, MasteringChain
+  session/     # Session model + JSON serialization
+  ui/          # MainComponent, ConsoleView, channel/aux/master strips, mastering view
+ADHDaw.md      # authoritative product spec (read this before non-trivial changes)
+CLAUDE.md      # AI-assist instructions
+```
+
+## License
+
+TBD.
