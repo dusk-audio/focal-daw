@@ -82,11 +82,12 @@ void ChannelStrip::updateGainTargets() noexcept
 {
     if (paramsRef == nullptr) return;
 
-    // Read liveFaderDb, not faderDb: AudioEngine routes the effective dB
-    // (manual setpoint OR Read-mode automation) through this atom each
-    // block. faderDb stays the persisted user setpoint.
+    // Read liveFaderDb / liveMute, not faderDb / mute: AudioEngine routes
+    // the effective values (manual setpoint OR Read-mode automation)
+    // through these atoms each block. The non-live `faderDb` / `mute`
+    // stay the persisted user setpoint.
     const float faderDb = paramsRef->liveFaderDb.load (std::memory_order_relaxed);
-    const bool  muted   = paramsRef->mute.load        (std::memory_order_relaxed);
+    const bool  muted   = paramsRef->liveMute.load    (std::memory_order_relaxed);
 
     const float gain = (muted || faderDb <= ChannelStripParams::kFaderInfThreshDb)
                        ? 0.0f

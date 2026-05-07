@@ -384,7 +384,77 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     for (int t = 0; t < Session::kNumTracks; ++t)
     {
         const auto& trackParams = session.track (t).strip;
-        const bool muted   = trackParams.mute.load (std::memory_order_relaxed);
+
+        // Automation routing runs FIRST so the per-strip routing decisions
+        // below (passes / monitorPasses / etc.) see the automated values
+        // when in Read or Touch mode. Writes liveFaderDb / livePan /
+        // liveAuxSendDb / liveMute. ChannelStrip's processAndAccumulate
+        // also reads these live atoms when computing per-sample gains.
+        //
+        // The mode atom is loaded with `acquire` so the audio thread sees
+        // every prior write to the lane's points vector (made on the
+        // message thread during a Write pass) before reading it - the UI
+        // release-stores the new mode after appending, so the load-acquire
+        // here pairs with the store-release there.
+        {
+            const int amode = session.track (t).automationMode.load (std::memory_order_acquire);
+
+            // Per-param continuous routing: Read pulls from the lane
+            // unconditionally; Touch pulls from the lane only while the
+            // user is NOT grabbing that specific control; Off / Write
+            // always pass the manual setpoint through. Per-control
+            // `touched` flags so a grab on the fader doesn't release pan.
+            auto routeContinuous = [&] (AutomationParam param,
+                                          const std::atomic<float>& manual,
+                                          const std::atomic<bool>* touched,
+                                          std::atomic<float>& live)
+            {
+                const auto& lane = session.track (t).automationLanes[(size_t) param];
+                const bool readsLane =
+                       amode == (int) AutomationMode::Read
+                    || (amode == (int) AutomationMode::Touch
+                        && touched != nullptr
+                        && ! touched->load (std::memory_order_acquire));
+                const float v = (readsLane && ! lane.points.empty())
+                    ? evaluateLane (lane, blockStartSamples, param)
+                    : manual.load (std::memory_order_relaxed);
+                live.store (v, std::memory_order_relaxed);
+            };
+
+            routeContinuous (AutomationParam::FaderDb,
+                              trackParams.faderDb, &trackParams.faderTouched,
+                              trackParams.liveFaderDb);
+            routeContinuous (AutomationParam::Pan,
+                              trackParams.pan, &trackParams.panTouched,
+                              trackParams.livePan);
+            for (int i = 0; i < ChannelStripParams::kNumAuxSends; ++i)
+            {
+                const auto param = (AutomationParam) ((int) AutomationParam::AuxSend1 + i);
+                routeContinuous (param,
+                                  trackParams.auxSendDb[(size_t) i],
+                                  &trackParams.auxSendTouched[(size_t) i],
+                                  trackParams.liveAuxSendDb[(size_t) i]);
+            }
+
+            // Mute - discrete, no Touch flag. Read or Touch reads lane;
+            // Off or Write reads manual. Discrete params return 0.0 or
+            // 1.0 from evaluateLane (after denormalize); we threshold at
+            // 0.5 to a bool. Empty lane falls through to manual.
+            {
+                const auto& lane = session.track (t).automationLanes[(size_t) AutomationParam::Mute];
+                const bool readsLane =
+                       (amode == (int) AutomationMode::Read
+                     || amode == (int) AutomationMode::Touch);
+                const bool effMute = (readsLane && ! lane.points.empty())
+                    ? (evaluateLane (lane, blockStartSamples, AutomationParam::Mute) >= 0.5f)
+                    : trackParams.mute.load (std::memory_order_relaxed);
+                trackParams.liveMute.store (effMute, std::memory_order_relaxed);
+            }
+        }
+
+        // Reads liveMute - just-routed by the block above, so the strip's
+        // passes / monitorPasses calculation sees automated state.
+        const bool muted   = trackParams.liveMute.load (std::memory_order_relaxed);
         const bool soloed  = trackParams.solo.load (std::memory_order_relaxed);
         const bool armed   = session.track (t).recordArmed.load (std::memory_order_relaxed);
         const bool monitorEnabled = session.track (t).inputMonitor.load (std::memory_order_relaxed);
@@ -494,60 +564,6 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         const bool needPrintBuffer = isRecording && armed && deviceInput != nullptr
                                   && session.track (t).printEffects.load (std::memory_order_relaxed);
         strips[(size_t) t].setNeedsProcessedMono (needPrintBuffer);
-
-        // Automation routing: write the effective fader dB into liveFaderDb
-        // BEFORE the strip processes. ChannelStrip reads liveFaderDb as its
-        // smoother target, so an Off- / Write-mode strip just sees the
-        // manual setpoint while a Read-mode strip with non-empty fader lane
-        // sees the interpolated automation value at this block's playhead.
-        // The UI fader-display timer also polls liveFaderDb, giving free
-        // motor-fader animation in Read mode without extra wiring.
-        //
-        // The mode atom is loaded with `acquire` so the audio thread sees
-        // every prior write to the lane's points vector (made on the
-        // message thread during a Write pass) before reading it - the UI
-        // release-stores the new mode after appending, so the load-acquire
-        // here pairs with the store-release there to publish the points.
-        {
-            const int amode = session.track (t).automationMode.load (std::memory_order_acquire);
-
-            // Per-param routing: Read pulls from the lane unconditionally;
-            // Touch pulls from the lane only while the user is NOT
-            // grabbing that specific control; Off / Write always pass the
-            // manual setpoint through. Per-control `touched` flags so a
-            // grab on the fader doesn't release the pan, etc.
-            auto routeContinuous = [&] (AutomationParam param,
-                                          const std::atomic<float>& manual,
-                                          const std::atomic<bool>* touched,
-                                          std::atomic<float>& live)
-            {
-                const auto& lane = session.track (t).automationLanes[(size_t) param];
-                const bool readsLane =
-                       amode == (int) AutomationMode::Read
-                    || (amode == (int) AutomationMode::Touch
-                        && touched != nullptr
-                        && ! touched->load (std::memory_order_acquire));
-                const float v = (readsLane && ! lane.points.empty())
-                    ? evaluateLane (lane, blockStartSamples, param)
-                    : manual.load (std::memory_order_relaxed);
-                live.store (v, std::memory_order_relaxed);
-            };
-
-            routeContinuous (AutomationParam::FaderDb,
-                              trackParams.faderDb, &trackParams.faderTouched,
-                              trackParams.liveFaderDb);
-            routeContinuous (AutomationParam::Pan,
-                              trackParams.pan, &trackParams.panTouched,
-                              trackParams.livePan);
-            for (int i = 0; i < ChannelStripParams::kNumAuxSends; ++i)
-            {
-                const auto param = (AutomationParam) ((int) AutomationParam::AuxSend1 + i);
-                routeContinuous (param,
-                                  trackParams.auxSendDb[(size_t) i],
-                                  &trackParams.auxSendTouched[(size_t) i],
-                                  trackParams.liveAuxSendDb[(size_t) i]);
-            }
-        }
 
         strips[(size_t) t].processAndAccumulate (monoIn,
                                                  mixL.data(), mixR.data(),

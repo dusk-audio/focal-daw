@@ -515,7 +515,22 @@ ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
     muteButton.setTooltip ("Mute (M) - silences this channel at the master");
     muteButton.onClick = [this]
     {
-        track.strip.mute.store (muteButton.getToggleState(), std::memory_order_relaxed);
+        const bool newState = muteButton.getToggleState();
+        track.strip.mute.store (newState, std::memory_order_relaxed);
+
+        // Discrete-param automation capture: a mute click in Write or
+        // Touch mode (with transport playing) writes a transition point
+        // into the lane at the current playhead. Discrete = no
+        // interpolation, no tick-based capture - the click IS the only
+        // event worth recording. In Touch mode the audio thread reads
+        // the lane, so this click is heard immediately on the next
+        // block; in Write the audio reads manual which we just stored.
+        const int amode = track.automationMode.load (std::memory_order_relaxed);
+        const bool capturing = engine.getTransport().isPlaying()
+            && (amode == (int) AutomationMode::Write
+                || amode == (int) AutomationMode::Touch);
+        if (capturing)
+            captureWritePoint (AutomationParam::Mute, newState ? 1.0f : 0.0f);
     };
     addAndMakeVisible (muteButton);
 
@@ -1434,6 +1449,17 @@ void ChannelStripComponent::timerCallback()
                                     track.strip.pan.load (std::memory_order_relaxed));
         }
 
+        // Mute - discrete param. Sync the button's visual state to
+        // liveMute when the audio engine is driving it (Read or Touch).
+        // In Off / Write the button's state already matches what the
+        // user clicked, and liveMute mirrors it back, so syncing in
+        // those modes is harmless idempotent.
+        {
+            const bool live = track.strip.liveMute.load (std::memory_order_relaxed);
+            if (muteButton.getToggleState() != live)
+                muteButton.setToggleState (live, juce::dontSendNotification);
+        }
+
         // Aux sends - animate + capture in lockstep with fader / pan.
         // Threshold 0.1 dB on a -60..+6 dB knob (~0.15 % of travel).
         // Knob is null when the strip isn't in mixing mode (visible).
@@ -1564,6 +1590,7 @@ void ChannelStripComponent::onAutoModeClicked()
     const bool interactive = next != (int) AutomationMode::Read;
     faderSlider.setEnabled (interactive);
     panKnob    .setEnabled (interactive);
+    muteButton .setEnabled (interactive);
     for (auto& knob : auxKnobs)
         if (knob != nullptr) knob->setEnabled (interactive);
 
