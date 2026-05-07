@@ -511,36 +511,41 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         {
             const int amode = session.track (t).automationMode.load (std::memory_order_acquire);
 
-            // Helper: a param "reads from the lane" when in Read mode
-            // unconditionally, OR in Touch mode when the user is NOT
-            // currently grabbing that specific control. Pan and Fader
-            // each track their own touched flag so a Touch on one
-            // doesn't release the other.
-            const bool readsLaneIfNotTouched =
-                   amode == (int) AutomationMode::Read
-                || amode == (int) AutomationMode::Touch;
+            // Per-param routing: Read pulls from the lane unconditionally;
+            // Touch pulls from the lane only while the user is NOT
+            // grabbing that specific control; Off / Write always pass the
+            // manual setpoint through. Per-control `touched` flags so a
+            // grab on the fader doesn't release the pan, etc.
+            auto routeContinuous = [&] (AutomationParam param,
+                                          const std::atomic<float>& manual,
+                                          const std::atomic<bool>* touched,
+                                          std::atomic<float>& live)
+            {
+                const auto& lane = session.track (t).automationLanes[(size_t) param];
+                const bool readsLane =
+                       amode == (int) AutomationMode::Read
+                    || (amode == (int) AutomationMode::Touch
+                        && touched != nullptr
+                        && ! touched->load (std::memory_order_acquire));
+                const float v = (readsLane && ! lane.points.empty())
+                    ? evaluateLane (lane, blockStartSamples, param)
+                    : manual.load (std::memory_order_relaxed);
+                live.store (v, std::memory_order_relaxed);
+            };
 
-            // Fader.
+            routeContinuous (AutomationParam::FaderDb,
+                              trackParams.faderDb, &trackParams.faderTouched,
+                              trackParams.liveFaderDb);
+            routeContinuous (AutomationParam::Pan,
+                              trackParams.pan, &trackParams.panTouched,
+                              trackParams.livePan);
+            for (int i = 0; i < ChannelStripParams::kNumAuxSends; ++i)
             {
-                const auto& lane = session.track (t).automationLanes[(size_t) AutomationParam::FaderDb];
-                const bool readsLane = readsLaneIfNotTouched
-                    && (amode == (int) AutomationMode::Read
-                        || ! trackParams.faderTouched.load (std::memory_order_acquire));
-                const float effDb = (readsLane && ! lane.points.empty())
-                    ? evaluateLane (lane, blockStartSamples, AutomationParam::FaderDb)
-                    : trackParams.faderDb.load (std::memory_order_relaxed);
-                trackParams.liveFaderDb.store (effDb, std::memory_order_relaxed);
-            }
-            // Pan. Same pattern as Fader.
-            {
-                const auto& lane = session.track (t).automationLanes[(size_t) AutomationParam::Pan];
-                const bool readsLane = readsLaneIfNotTouched
-                    && (amode == (int) AutomationMode::Read
-                        || ! trackParams.panTouched.load (std::memory_order_acquire));
-                const float effPan = (readsLane && ! lane.points.empty())
-                    ? evaluateLane (lane, blockStartSamples, AutomationParam::Pan)
-                    : trackParams.pan.load (std::memory_order_relaxed);
-                trackParams.livePan.store (effPan, std::memory_order_relaxed);
+                const auto param = (AutomationParam) ((int) AutomationParam::AuxSend1 + i);
+                routeContinuous (param,
+                                  trackParams.auxSendDb[(size_t) i],
+                                  &trackParams.auxSendTouched[(size_t) i],
+                                  trackParams.liveAuxSendDb[(size_t) i]);
             }
         }
 

@@ -104,11 +104,13 @@ void ChannelStrip::updateGainTargets() noexcept
         busGain[(size_t) i].setTargetValue (
             paramsRef->busAssign[(size_t) i].load (std::memory_order_relaxed) ? 1.0f : 0.0f);
 
-    // Aux sends - per-knob linear gain. -100 dB sentinel (knob fully CCW)
-    // hard-mutes; the inner loop short-circuits zero-gain sends.
+    // Aux sends - per-knob linear gain. Reads liveAuxSendDb (engine routes
+    // manual or lane through it) - same pattern as liveFaderDb / livePan.
+    // -100 dB sentinel (knob fully CCW) hard-mutes; the inner loop
+    // short-circuits zero-gain sends.
     for (int i = 0; i < kNumAuxSends; ++i)
     {
-        const float db = paramsRef->auxSendDb[(size_t) i].load (std::memory_order_relaxed);
+        const float db = paramsRef->liveAuxSendDb[(size_t) i].load (std::memory_order_relaxed);
         const float g  = (db <= ChannelStripParams::kAuxSendOffDb)
                             ? 0.0f
                             : juce::Decibels::decibelsToGain (db);

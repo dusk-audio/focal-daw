@@ -183,6 +183,16 @@ struct ChannelStripParams
     mutable std::atomic<float> livePan { 0.0f };
     std::atomic<bool> panTouched { false };
 
+    // Live aux send levels (dB) AFTER automation routing. Same pattern
+    // as liveFaderDb but per-send. ChannelStrip reads liveAuxSendDb when
+    // computing aux-send gains; the manual auxSendDb stays the user's
+    // persisted setpoint.
+    mutable std::array<std::atomic<float>, kNumAuxSends> liveAuxSendDb {
+        std::atomic<float>{ kAuxSendOffDb }, std::atomic<float>{ kAuxSendOffDb },
+        std::atomic<float>{ kAuxSendOffDb }, std::atomic<float>{ kAuxSendOffDb }
+    };
+    std::array<std::atomic<bool>, kNumAuxSends> auxSendTouched {};
+
     static constexpr float kFaderMinDb       = -100.0f;
     static constexpr float kFaderMaxDb       =  12.0f;
     static constexpr float kFaderInfThreshDb = -90.0f;  // below this we hard-mute

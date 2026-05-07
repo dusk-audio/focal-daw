@@ -163,6 +163,8 @@ private:
     float displayedLiveFaderDb = 0.0f;
     // Same idea for the pan knob - polled from track.strip.livePan.
     float displayedLivePan = 0.0f;
+    // And for each aux send knob - polled from track.strip.liveAuxSendDb[i].
+    std::array<float, ChannelStripParams::kNumAuxSends> displayedLiveAuxSendDb {};
     juce::TextButton armButton     { "ARM" };
     juce::TextButton monitorButton { "IN"  };
     juce::TextButton printButton   { "PRINT" };  // print EQ/comp to recording

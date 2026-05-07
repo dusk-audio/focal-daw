@@ -765,6 +765,14 @@ ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
             track.strip.auxSendDb[idx].store (stored, std::memory_order_relaxed);
             auxKnobLabels[(size_t) idx].setText (formatAuxSend (stored), juce::dontSendNotification);
         };
+        knob->onDragStart = [this, idx]
+        {
+            track.strip.auxSendTouched[(size_t) idx].store (true, std::memory_order_release);
+        };
+        knob->onDragEnd = [this, idx]
+        {
+            track.strip.auxSendTouched[(size_t) idx].store (false, std::memory_order_release);
+        };
         addChildComponent (knob.get());
         auxKnobs[(size_t) i] = std::move (knob);
 
@@ -1425,6 +1433,34 @@ void ChannelStripComponent::timerCallback()
                 captureWritePoint (AutomationParam::Pan,
                                     track.strip.pan.load (std::memory_order_relaxed));
         }
+
+        // Aux sends - animate + capture in lockstep with fader / pan.
+        // Threshold 0.1 dB on a -60..+6 dB knob (~0.15 % of travel).
+        // Knob is null when the strip isn't in mixing mode (visible).
+        for (int i = 0; i < ChannelStripParams::kNumAuxSends; ++i)
+        {
+            const float live    = track.strip.liveAuxSendDb[(size_t) i].load (std::memory_order_relaxed);
+            const bool  touched = track.strip.auxSendTouched[(size_t) i].load (std::memory_order_relaxed);
+            const bool  animating = isRead || (isTouch && ! touched);
+            if (animating && std::abs (live - displayedLiveAuxSendDb[(size_t) i]) > 0.1f)
+            {
+                displayedLiveAuxSendDb[(size_t) i] = live;
+                if (auto* knob = auxKnobs[(size_t) i].get())
+                    knob->setValue (live, juce::dontSendNotification);
+            }
+            else if (! animating)
+            {
+                displayedLiveAuxSendDb[(size_t) i] = live;
+            }
+
+            const bool capturing = playing && (isWrite || (isTouch && touched));
+            if (capturing)
+            {
+                const auto param = (AutomationParam) ((int) AutomationParam::AuxSend1 + i);
+                captureWritePoint (param,
+                                    track.strip.auxSendDb[(size_t) i].load (std::memory_order_relaxed));
+            }
+        }
     }
 }
 
@@ -1528,6 +1564,8 @@ void ChannelStripComponent::onAutoModeClicked()
     const bool interactive = next != (int) AutomationMode::Read;
     faderSlider.setEnabled (interactive);
     panKnob    .setEnabled (interactive);
+    for (auto& knob : auxKnobs)
+        if (knob != nullptr) knob->setEnabled (interactive);
 
     refreshAutoModeButton();
 }
