@@ -1,5 +1,6 @@
 #include "MainComponent.h"
 #include "AudioSettingsPanel.h"
+#include "AuxView.h"
 #include "BounceDialog.h"
 #include "MasteringView.h"
 #include "StartupDialog.h"
@@ -41,15 +42,19 @@ MainComponent::MainComponent()
     };
     styleStageButton (recordingStageBtn, juce::Colour (0xffd03030));   // red, like REC
     styleStageButton (mixingStageBtn,    juce::Colour (0xff5a8ad0));   // mix-desk blue
+    styleStageButton (auxStageBtn,       juce::Colour (0xff9080c0));   // aux purple-grey
     styleStageButton (masteringStageBtn, juce::Colour (0xff8a5ad0));   // mastering purple
     recordingStageBtn.setConnectedEdges (juce::Button::ConnectedOnRight);
     mixingStageBtn   .setConnectedEdges (juce::Button::ConnectedOnLeft | juce::Button::ConnectedOnRight);
+    auxStageBtn      .setConnectedEdges (juce::Button::ConnectedOnLeft | juce::Button::ConnectedOnRight);
     masteringStageBtn.setConnectedEdges (juce::Button::ConnectedOnLeft);
     recordingStageBtn.onClick = [this] { switchToStage (AudioEngine::Stage::Recording); };
     mixingStageBtn   .onClick = [this] { switchToStage (AudioEngine::Stage::Mixing); };
+    auxStageBtn      .onClick = [this] { switchToStage (AudioEngine::Stage::Aux); };
     masteringStageBtn.onClick = [this] { switchToStage (AudioEngine::Stage::Mastering); };
     addAndMakeVisible (recordingStageBtn);
     addAndMakeVisible (mixingStageBtn);
+    addAndMakeVisible (auxStageBtn);
     addAndMakeVisible (masteringStageBtn);
     mixingStageBtn.setToggleState (true, juce::dontSendNotification);  // default
 
@@ -350,6 +355,8 @@ void MainComponent::resized()
 
     const auto curStage = engine.getStage();
     const bool inMastering = (curStage == AudioEngine::Stage::Mastering);
+    const bool inAux       = (curStage == AudioEngine::Stage::Aux);
+    const bool inFullscreenView = inMastering || inAux;
 
     // ── Combined transport / stage / bank row ──
     // Everything that used to live on three separate rows (stage selector,
@@ -360,7 +367,7 @@ void MainComponent::resized()
     // hint label is hidden so it doesn't render under the overlays.
     constexpr int kRowH = 44;
     juce::Rectangle<int> rowBounds;
-    if (! inMastering && transportBar != nullptr)
+    if (! inFullscreenView && transportBar != nullptr)
     {
         rowBounds = area.removeFromTop (kRowH);
         transportBar->setBounds (rowBounds);
@@ -368,31 +375,33 @@ void MainComponent::resized()
     }
     else
     {
-        // In mastering the transport bar is hidden; the stage selector still
-        // needs a row to live on. Reserve the same height so the stage row
-        // doesn't jump positions when the user switches stages.
+        // In mastering / aux the transport bar is hidden; the stage selector
+        // still needs a row to live on. Reserve the same height so the stage
+        // row doesn't jump positions when the user switches stages.
         rowBounds = area.removeFromTop (kRowH);
     }
 
-    const int stageW = 130;
+    const int stageW = 110;
     constexpr int kStageBtnH = 28;
-    const int stageBlockW = stageW * 3;
+    const int stageBlockW = stageW * 4;
     const int stageY = rowBounds.getY() + (rowBounds.getHeight() - kStageBtnH) / 2;
     const int stageX = rowBounds.getX() + (rowBounds.getWidth() - stageBlockW) / 2;
     recordingStageBtn.setBounds (stageX,                stageY, stageW, kStageBtnH);
     mixingStageBtn   .setBounds (stageX + stageW,       stageY, stageW, kStageBtnH);
-    masteringStageBtn.setBounds (stageX + 2 * stageW,   stageY, stageW, kStageBtnH);
+    auxStageBtn      .setBounds (stageX + 2 * stageW,   stageY, stageW, kStageBtnH);
+    masteringStageBtn.setBounds (stageX + 3 * stageW,   stageY, stageW, kStageBtnH);
     // Children added before transportBar in the constructor render UNDER it
     // by default. Bring the overlay buttons to the front so the transport
     // bar's painted hint area doesn't bury them.
     recordingStageBtn.toFront (false);
     mixingStageBtn   .toFront (false);
+    auxStageBtn      .toFront (false);
     masteringStageBtn.toFront (false);
 
     // Banking decision: console can't fit all 16 strips at reference width.
-    // Hidden in mastering (no console there). Banks slot in just to the left
-    // of the centred stage block.
-    const bool needsBanking = (consoleView != nullptr) && (! inMastering)
+    // Hidden in mastering / aux (no console there). Banks slot in just to
+    // the left of the centred stage block.
+    const bool needsBanking = (consoleView != nullptr) && (! inFullscreenView)
                              && (area.getWidth() < consoleView->fixedWidthFor16Tracks());
     bankAButton.setVisible (needsBanking);
     bankBButton.setVisible (needsBanking);
@@ -416,7 +425,7 @@ void MainComponent::resized()
     }
     area.removeFromTop (4);
 
-    if (! inMastering)
+    if (! inFullscreenView)
     {
         if (tapeStrip != nullptr && tapeStripExpanded)
         {
@@ -426,9 +435,13 @@ void MainComponent::resized()
 
         if (consoleView != nullptr) consoleView->setBounds (area);
     }
-    else
+    else if (inMastering)
     {
         if (masteringView != nullptr) masteringView->setBounds (area);
+    }
+    else if (inAux)
+    {
+        if (auxView != nullptr) auxView->setBounds (area);
     }
 }
 
@@ -465,14 +478,16 @@ void MainComponent::switchToStage (AudioEngine::Stage s)
     engine.setStage (s);
 
     // Mixing/Recording share the console + tape strip; Mastering swaps to
-    // MasteringView. We construct MasteringView lazily so the heavy DSP
-    // bindings don't pay startup cost for users who never visit Mastering.
+    // MasteringView; Aux swaps to AuxView. Both heavy views are constructed
+    // lazily so users who never visit them pay no startup cost.
     const bool wantMastering = (s == AudioEngine::Stage::Mastering);
+    const bool wantAux       = (s == AudioEngine::Stage::Aux);
     const bool wantMixing    = (s == AudioEngine::Stage::Mixing);
+    const bool wantFullscreenView = wantMastering || wantAux;
 
-    if (consoleView   != nullptr) consoleView  ->setVisible (! wantMastering);
-    if (transportBar  != nullptr) transportBar ->setVisible (! wantMastering);
-    if (tapeStrip     != nullptr) tapeStrip    ->setVisible (! wantMastering && tapeStripExpanded);
+    if (consoleView   != nullptr) consoleView  ->setVisible (! wantFullscreenView);
+    if (transportBar  != nullptr) transportBar ->setVisible (! wantFullscreenView);
+    if (tapeStrip     != nullptr) tapeStrip    ->setVisible (! wantFullscreenView && tapeStripExpanded);
 
     // Channel strips swap their tracking-only block (input/IN/ARM/PRINT) for
     // a row of 4 AUX send knobs while in Mixing.
@@ -492,11 +507,26 @@ void MainComponent::switchToStage (AudioEngine::Stage s)
         masteringView->setVisible (false);
     }
 
+    if (wantAux)
+    {
+        if (auxView == nullptr)
+        {
+            auxView = std::make_unique<AuxView> (session, engine);
+            addAndMakeVisible (auxView.get());
+        }
+        auxView->setVisible (true);
+    }
+    else if (auxView != nullptr)
+    {
+        auxView->setVisible (false);
+    }
+
     // Sync the segmented buttons (radio group means only one is on, but
     // explicitly setting the right one keeps a programmatic switch - like
     // doMixdown's auto-handoff - visually consistent).
     recordingStageBtn.setToggleState (s == AudioEngine::Stage::Recording, juce::dontSendNotification);
     mixingStageBtn   .setToggleState (s == AudioEngine::Stage::Mixing,    juce::dontSendNotification);
+    auxStageBtn      .setToggleState (s == AudioEngine::Stage::Aux,       juce::dontSendNotification);
     masteringStageBtn.setToggleState (s == AudioEngine::Stage::Mastering, juce::dontSendNotification);
 
     resized();
@@ -563,17 +593,20 @@ void MainComponent::launchStartupDialog()
 
 void MainComponent::newSessionPrompt()
 {
+    // Single-dialog "Save As" UX: filename text field + folder browser in
+    // one step. The typed name becomes the session folder; the navigated
+    // directory becomes its parent.
     auto startDir = juce::File::getSpecialLocation (juce::File::userMusicDirectory)
                         .getChildFile ("Focal");
     if (! startDir.exists()) startDir.createDirectory();
 
     sessionFileChooser = std::make_unique<juce::FileChooser> (
-        "Choose a folder for the new session",
-        startDir,
+        "Name your new session",
+        startDir.getChildFile ("MySong"),
         juce::String());
 
     const auto chooserFlags = juce::FileBrowserComponent::saveMode
-                            | juce::FileBrowserComponent::canSelectDirectories
+                            | juce::FileBrowserComponent::canSelectFiles
                             | juce::FileBrowserComponent::warnAboutOverwriting;
 
     sessionFileChooser->launchAsync (chooserFlags, [this] (const juce::FileChooser& fc)
@@ -581,9 +614,9 @@ void MainComponent::newSessionPrompt()
         const auto chosen = fc.getResult();
         if (chosen == juce::File()) return;
 
-        // Set the directory and immediately persist an empty session.json so
-        // the user can re-open this dir later (and so subsequent Save calls
-        // don't re-prompt because the session.json now exists).
+        // Treat the chosen path as the new session folder. saveSessionTo
+        // creates the dir + audio subdir and persists an initial session.json
+        // so subsequent saves don't re-prompt.
         saveSessionTo (chosen);
     });
 }
@@ -677,20 +710,27 @@ void MainComponent::saveSessionAndThen (std::function<void(bool)> onComplete)
         return;
     }
 
-    // No prior save - open Save As. The chooser callback runs the user's
-    // onComplete with success/failure when done. Cancel == failure.
-    auto startDir = session.getSessionDirectory();
+    // No prior save - open a Save As dialog where the user types the session
+    // name and picks a parent directory in one step. The chooser is in
+    // saveMode | canSelectFiles so the OS shows a filename text field; we
+    // then treat the resulting "file" path as the session folder we'll
+    // create (saveSessionTo already creates the directory if missing).
+    auto startDir = session.getSessionDirectory().getParentDirectory();
     if (! startDir.isDirectory())
         startDir = juce::File::getSpecialLocation (juce::File::userMusicDirectory)
                        .getChildFile ("Focal");
+    if (! startDir.exists()) startDir.createDirectory();
+
+    juce::String defaultName = session.getSessionDirectory().getFileName();
+    if (defaultName.isEmpty() || defaultName == "Untitled") defaultName = "MySong";
 
     sessionFileChooser = std::make_unique<juce::FileChooser> (
-        "Save session to folder",
-        startDir,
+        "Save session as...",
+        startDir.getChildFile (defaultName),
         juce::String());
 
     const auto chooserFlags = juce::FileBrowserComponent::saveMode
-                            | juce::FileBrowserComponent::canSelectDirectories
+                            | juce::FileBrowserComponent::canSelectFiles
                             | juce::FileBrowserComponent::warnAboutOverwriting;
 
     sessionFileChooser->launchAsync (chooserFlags,
@@ -709,68 +749,41 @@ void MainComponent::saveSessionAndThen (std::function<void(bool)> onComplete)
 
 void MainComponent::saveAsPrompt()
 {
-    // Two-step Save As: prompt for a session NAME first, then a parent
-    // directory. The session ends up at <parent>/<name>/. Splitting the
-    // flow this way lets us collect a free-form name (which the OS
-    // directory chooser doesn't expose) without forcing the user to
-    // pre-create an empty folder.
-    auto* nameDialog = new juce::AlertWindow ("Save As - name this session",
-                                                "Choose a name for the session folder.",
-                                                juce::MessageBoxIconType::QuestionIcon);
-
-    auto& session = this->session;
-    juce::String defaultName = session.getSessionDirectory().getFileName();
-    if (defaultName.isEmpty() || defaultName == "Untitled") defaultName = "MySong";
-
-    nameDialog->addTextEditor ("name", defaultName, "Session name:");
-    nameDialog->addButton ("Continue", 1, juce::KeyPress (juce::KeyPress::returnKey));
-    nameDialog->addButton ("Cancel",   0, juce::KeyPress (juce::KeyPress::escapeKey));
-
-    juce::Component::SafePointer<MainComponent> safe (this);
-    nameDialog->enterModalState (true,
-        juce::ModalCallbackFunction::create ([safe, nameDialog] (int result)
-        {
-            std::unique_ptr<juce::AlertWindow> own (nameDialog);
-            if (result != 1) return;
-            auto* self = safe.getComponent();
-            if (self == nullptr) return;
-
-            const auto raw = nameDialog->getTextEditorContents ("name").trim();
-            if (raw.isEmpty()) return;
-            // Sanitise - strip path separators so the user can't break out
-            // of the parent directory.
-            const auto safeName = juce::File::createLegalFileName (raw);
-            if (safeName.isEmpty()) return;
-
-            self->saveAsParentPrompt (safeName);
-        }), true);
-}
-
-void MainComponent::saveAsParentPrompt (const juce::String& sessionName)
-{
+    // Single-dialog Save As: filename text field + folder browser in one
+    // step. The typed name becomes the session folder; the navigated
+    // directory becomes its parent. Replaces the old two-step modal-then-
+    // chooser flow which only let the user browse, never type.
     auto startDir = session.getSessionDirectory().getParentDirectory();
     if (! startDir.isDirectory())
         startDir = juce::File::getSpecialLocation (juce::File::userMusicDirectory)
                        .getChildFile ("Focal");
     if (! startDir.exists()) startDir.createDirectory();
 
+    juce::String defaultName = session.getSessionDirectory().getFileName();
+    if (defaultName.isEmpty() || defaultName == "Untitled") defaultName = "MySong";
+
     sessionFileChooser = std::make_unique<juce::FileChooser> (
-        "Save \"" + sessionName + "\" in...",
-        startDir,
+        "Save session as...",
+        startDir.getChildFile (defaultName),
         juce::String());
 
     const auto chooserFlags = juce::FileBrowserComponent::saveMode
-                            | juce::FileBrowserComponent::canSelectDirectories
+                            | juce::FileBrowserComponent::canSelectFiles
                             | juce::FileBrowserComponent::warnAboutOverwriting;
 
     sessionFileChooser->launchAsync (chooserFlags,
-        [this, sessionName] (const juce::FileChooser& fc)
+        [this] (const juce::FileChooser& fc)
         {
-            const auto parent = fc.getResult();
-            if (parent == juce::File()) return;
-            const auto target = parent.getChildFile (sessionName);
-            saveSessionTo (target);
+            const auto chosen = fc.getResult();
+            if (chosen == juce::File()) return;
+            saveSessionTo (chosen);
         });
+}
+
+void MainComponent::saveAsParentPrompt (const juce::String& /*sessionName*/)
+{
+    // Retained as a no-op for any caller that still references the old
+    // two-step flow. saveAsPrompt now does the whole job in one dialog.
 }
 
 bool MainComponent::loadSessionFromJson (const juce::File& sessionJson)

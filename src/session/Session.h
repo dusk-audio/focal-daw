@@ -207,7 +207,7 @@ struct Track
 // + meter. Bus EQ uses 3 of BritishEQProcessor's 4 bands (LF / MID-as-LM / HF)
 // with fixed musical frequencies. Bus comp uses UniversalCompressor in Bus
 // mode (mode index 3).
-struct AuxBusParams
+struct BusParams
 {
     std::atomic<float> faderDb { 0.0f };
     std::atomic<float> pan     { 0.0f };  // -1..1 (left..right balance)
@@ -236,18 +236,45 @@ struct AuxBusParams
     mutable std::atomic<float> meterGrDb       { 0.0f };
 };
 
-struct AuxBus
+struct Bus
 {
     juce::String name;
     juce::Colour colour;
-    AuxBusParams strip;
+    BusParams strip;
+};
 
-    // Send-FX plugin slot persistence. Same shape as Track: populated from
-    // the live PluginSlot by AudioEngine::publishPluginStateForSave before
-    // session save, consumed by consumePluginStateAfterLoad on load. Empty
-    // when no plugin is loaded.
-    juce::String pluginDescriptionXml;
-    juce::String pluginStateBase64;
+// AUX return lane. Distinct from Bus: a Bus is a subgroup that channels
+// route INTO via the kNumBuses busAssign toggles (a 1/2/3/4 button group on
+// each strip), while an AuxLane is an FX return that channels SEND TO via
+// the kNumAuxSends auxSendDb knobs. Each lane hosts up to kMaxLanePlugins
+// plugin slots (typically a reverb / delay) and mixes its processed output
+// into the master after the bus pass.
+struct AuxLaneParams
+{
+    // Single plugin per lane. The whole point of the AUX stage is to show
+    // the plugin's full UI at a comfortable size; doubling up halves that
+    // budget and was already squeezing fixed-size plugin editors.
+    static constexpr int kMaxLanePlugins = 1;
+
+    std::atomic<float> returnLevelDb { 0.0f };   // -inf via kFaderInfThreshDb sentinel
+    std::atomic<bool>  mute           { false };
+
+    // Stereo output meters - mutable for write-by-DSP semantics.
+    mutable std::atomic<float> meterPostL { -100.0f };
+    mutable std::atomic<float> meterPostR { -100.0f };
+};
+
+struct AuxLane
+{
+    juce::String name;
+    juce::Colour colour;
+    AuxLaneParams params;
+
+    // Per-slot plugin state. Populated by AudioEngine::publishPluginStateForSave
+    // before serialisation, consumed by consumePluginStateAfterLoad. Empty
+    // strings = no plugin loaded in that slot.
+    std::array<juce::String, AuxLaneParams::kMaxLanePlugins> pluginDescriptionXml;
+    std::array<juce::String, AuxLaneParams::kMaxLanePlugins> pluginStateBase64;
 };
 
 struct MasterBusParams
@@ -359,7 +386,8 @@ class Session
 {
 public:
     static constexpr int kNumTracks   = 16;
-    static constexpr int kNumAuxBuses = 4;
+    static constexpr int kNumBuses    = 4;
+    static constexpr int kNumAuxLanes = 4;   // matches ChannelStripParams::kNumAuxSends
     static constexpr int kBankSize    = 8;
     static constexpr int kNumBanks    = kNumTracks / kBankSize;
 
@@ -372,8 +400,11 @@ public:
     Track& track (int i) noexcept             { jassert (i >= 0 && i < kNumTracks);   return tracks[(size_t) i]; }
     const Track& track (int i) const noexcept { jassert (i >= 0 && i < kNumTracks);   return tracks[(size_t) i]; }
 
-    AuxBus& aux (int i) noexcept              { jassert (i >= 0 && i < kNumAuxBuses); return auxBuses[(size_t) i]; }
-    const AuxBus& aux (int i) const noexcept  { jassert (i >= 0 && i < kNumAuxBuses); return auxBuses[(size_t) i]; }
+    Bus& bus (int i) noexcept              { jassert (i >= 0 && i < kNumBuses); return buses[(size_t) i]; }
+    const Bus& bus (int i) const noexcept  { jassert (i >= 0 && i < kNumBuses); return buses[(size_t) i]; }
+
+    AuxLane&       auxLane (int i)       noexcept { jassert (i >= 0 && i < kNumAuxLanes); return auxLanes[(size_t) i]; }
+    const AuxLane& auxLane (int i) const noexcept { jassert (i >= 0 && i < kNumAuxLanes); return auxLanes[(size_t) i]; }
 
     MasterBusParams& master() noexcept             { return masterParams; }
     const MasterBusParams& master() const noexcept { return masterParams; }
@@ -388,14 +419,14 @@ public:
     // queries scanned 16 / 4 / 16 atoms every callback before the per-track
     // loop even started.
     bool anyTrackSoloed() const noexcept;
-    bool anyAuxSoloed()   const noexcept;
+    bool anyBusSoloed()   const noexcept;
     bool anyTrackArmed()  const noexcept;
 
     // Counter-aware setters. Atomically toggle the bool AND adjust the
     // corresponding count, so anyXSoloed() stays correct without scans.
     // No-op when the value didn't actually change. Call from message thread.
     void setTrackSoloed (int trackIndex, bool soloed) noexcept;
-    void setAuxSoloed   (int auxIndex,   bool soloed) noexcept;
+    void setBusSoloed   (int busIndex,   bool soloed) noexcept;
     void setTrackArmed  (int trackIndex, bool armed)  noexcept;
 
     // Re-scan every track / aux atom and rebuild the counters. Call after a
@@ -424,7 +455,7 @@ public:
     // Global oversampling factor applied to effects that support it (master
     // tape sat, master/aux bus comp). Per-channel comp + EQ run at native
     // rate regardless. 1 = native (default - lowest CPU), 2 = 2× ox, 4 =
-    // 4× ox. Read by MasterBus and AuxBusStrip in prepare(); changing it
+    // 4× ox. Read by MasterBus and BusStrip in prepare(); changing it
     // requires a re-prepare (the AudioSettingsPanel triggers one via
     // setAudioDeviceSetup). Stored as an atomic<int> so future audio-thread
     // reads (e.g. for per-block reactive ox) are lock-free, but today only
@@ -462,7 +493,8 @@ public:
 
 private:
     std::array<Track, kNumTracks> tracks;
-    std::array<AuxBus, kNumAuxBuses> auxBuses;
+    std::array<Bus, kNumBuses> buses;
+    std::array<AuxLane, kNumAuxLanes> auxLanes;
     MasterBusParams masterParams;
     MasteringParams masteringParams;
     juce::File sessionDir;
@@ -472,7 +504,7 @@ private:
     // by the matching setter; the audio thread does a single relaxed load
     // per callback instead of scanning all 16 / 4 atoms.
     std::atomic<int> soloTrackCount { 0 };
-    std::atomic<int> soloAuxCount   { 0 };
+    std::atomic<int> soloBusCount   { 0 };
     std::atomic<int> armedTrackCount { 0 };
 };
 } // namespace focal

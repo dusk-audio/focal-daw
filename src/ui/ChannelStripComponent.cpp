@@ -426,7 +426,7 @@ ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
     // the strip headers. ──
     for (int i = 0; i < ChannelStripParams::kNumBuses; ++i)
     {
-        const auto busColour = session.aux (i).colour;
+        const auto busColour = session.bus (i).colour;
         lastBusColours[(size_t) i] = busColour.getARGB();
         auto btn = std::make_unique<juce::TextButton> (juce::String (i + 1));
         btn->setClickingTogglesState (true);
@@ -1250,7 +1250,7 @@ void ChannelStripComponent::timerCallback()
     // negligible (16 strips × 4 buses).
     for (int i = 0; i < ChannelStripParams::kNumBuses; ++i)
     {
-        const auto current = session.aux (i).colour;
+        const auto current = session.bus (i).colour;
         if (current.getARGB() != lastBusColours[(size_t) i])
         {
             lastBusColours[(size_t) i] = current.getARGB();

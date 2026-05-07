@@ -1,20 +1,15 @@
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
-#include <functional>
-#include <memory>
 #include "../session/Session.h"
 
 namespace focal
 {
-class PluginSlot;
-
-class AuxBusComponent final : public juce::Component, private juce::Timer
+class BusComponent final : public juce::Component, private juce::Timer
 {
 public:
-    AuxBusComponent (AuxBus& auxRef, class Session& sessionRef, int auxIndex,
-                      PluginSlot& slotRef);
-    ~AuxBusComponent() override;
+    BusComponent (Bus& busRef, class Session& sessionRef, int busIndex);
+    ~BusComponent() override;
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -23,34 +18,13 @@ public:
 private:
     void timerCallback() override;
     void showColourMenu();
-    void applyAuxColour (juce::Colour c);
-    void refreshFxButton();
-    void showFxButtonMenu();      // right-click menu (replace / remove / re-enable)
+    void applyBusColour (juce::Colour c);
 
-    AuxBus& aux;
+    Bus& bus;
     Session& sessionRef;
-    int auxIndex;
-    PluginSlot& pluginSlot;
+    int busIndex;
     juce::Label nameLabel;
-    juce::Rectangle<int> fxArea;     // bounds of the plugin-slot FX button
-
-    // FX plugin slot button. Mirrors the channel strip's PluginSlotButton:
-    // left-click opens the picker; right-click opens a context menu for
-    // unload / replace / re-enable. Right-click handling is inline so we
-    // don't need a separate subclass header.
-    struct FxButton final : public juce::TextButton
-    {
-        using juce::TextButton::TextButton;
-        std::function<void(const juce::MouseEvent&)> onRightClick;
-        void mouseDown (const juce::MouseEvent& e) override
-        {
-            if (e.mods.isPopupMenu() && onRightClick) { onRightClick (e); return; }
-            juce::TextButton::mouseDown (e);
-        }
-    };
-    FxButton fxButton { "+ FX" };
-    juce::String lastSlotName;
-    std::unique_ptr<juce::FileChooser> activeFxChooser;
+    juce::Rectangle<int> fxArea;     // unused for now; reserved for future inline DSP UI
 
     // 3-band EQ controls (LF / MID / HF gains, fixed musical frequencies).
     juce::TextButton eqButton  { "EQ" };

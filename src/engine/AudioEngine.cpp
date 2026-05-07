@@ -14,12 +14,14 @@ AudioEngine::AudioEngine (Session& sessionToBindTo) : session (sessionToBindTo)
         // plugin is actually loaded, so binding here costs nothing.
         strips[(size_t) i].bindPluginManager (pluginManager);
     }
-    for (int i = 0; i < Session::kNumAuxBuses; ++i)
+    for (int i = 0; i < Session::kNumBuses; ++i)
+        busStrips[(size_t) i].bind (session.bus (i).strip);
+    for (int i = 0; i < Session::kNumAuxLanes; ++i)
     {
-        auxStrips[(size_t) i].bind (session.aux (i).strip);
-        // Same PluginManager binding as the channel strips - the aux's
-        // send-FX slot needs it to resolve files into AudioPluginInstances.
-        auxStrips[(size_t) i].bindPluginManager (pluginManager);
+        auxLaneStrips[(size_t) i].bind (session.auxLane (i).params);
+        // Lanes host plugins (reverb / delay / etc.) so they need the
+        // shared PluginManager to resolve files into AudioPluginInstances.
+        auxLaneStrips[(size_t) i].bindPluginManager (pluginManager);
     }
     master.bind (session.master());
     masteringChain.bind (session.mastering());
@@ -155,12 +157,15 @@ void AudioEngine::publishPluginStateForSave()
         track.pluginDescriptionXml = slot.getDescriptionXmlForSave();
         track.pluginStateBase64    = slot.getStateBase64ForSave();
     }
-    for (int a = 0; a < Session::kNumAuxBuses; ++a)
+    for (int a = 0; a < Session::kNumAuxLanes; ++a)
     {
-        auto& aux  = session.aux (a);
-        auto& slot = auxStrips[(size_t) a].getPluginSlot();
-        aux.pluginDescriptionXml = slot.getDescriptionXmlForSave();
-        aux.pluginStateBase64    = slot.getStateBase64ForSave();
+        auto& lane = session.auxLane (a);
+        for (int s = 0; s < AuxLaneParams::kMaxLanePlugins; ++s)
+        {
+            auto& slot = auxLaneStrips[(size_t) a].getPluginSlot (s);
+            lane.pluginDescriptionXml[(size_t) s] = slot.getDescriptionXmlForSave();
+            lane.pluginStateBase64[(size_t) s]    = slot.getStateBase64ForSave();
+        }
     }
 }
 
@@ -200,16 +205,19 @@ void AudioEngine::consumePluginStateAfterLoad()
                   << ": " << error);
         }
     }
-    for (int a = 0; a < Session::kNumAuxBuses; ++a)
+    for (int a = 0; a < Session::kNumAuxLanes; ++a)
     {
-        auto& aux  = session.aux (a);
-        auto& slot = auxStrips[(size_t) a].getPluginSlot();
-        juce::String error;
-        if (! slot.restoreFromSavedState (aux.pluginDescriptionXml,
-                                            aux.pluginStateBase64, error))
+        auto& lane = session.auxLane (a);
+        for (int s = 0; s < AuxLaneParams::kMaxLanePlugins; ++s)
         {
-            DBG ("AudioEngine: failed to restore plugin on aux " << (a + 1)
-                  << ": " << error);
+            auto& slot = auxLaneStrips[(size_t) a].getPluginSlot (s);
+            juce::String error;
+            if (! slot.restoreFromSavedState (lane.pluginDescriptionXml[(size_t) s],
+                                                lane.pluginStateBase64[(size_t) s], error))
+            {
+                DBG ("AudioEngine: failed to restore plugin on aux lane " << (a + 1)
+                      << " slot " << (s + 1) << ": " << error);
+            }
         }
     }
 }
@@ -264,8 +272,9 @@ void AudioEngine::prepareForSelfTest (double sr, int bs)
     // (for master) to the tape oversampler.
     const int oxFactor = session.oversamplingFactor.load (std::memory_order_relaxed);
 
-    for (auto& s : strips)    s.prepare (sr, bs);
-    for (auto& a : auxStrips) a.prepare (sr, bs, oxFactor);
+    for (auto& s : strips)        s.prepare (sr, bs);
+    for (auto& a : busStrips)     a.prepare (sr, bs, oxFactor);
+    for (auto& a : auxLaneStrips) a.prepare (sr, bs);
     master.prepare (sr, bs, oxFactor);
     masteringChain.prepare (sr, bs);
     masteringPlayer.prepare (bs);
@@ -274,8 +283,10 @@ void AudioEngine::prepareForSelfTest (double sr, int bs)
 
     mixL.assign ((size_t) bs, 0.0f);
     mixR.assign ((size_t) bs, 0.0f);
-    for (auto& v : auxL) v.assign ((size_t) bs, 0.0f);
-    for (auto& v : auxR) v.assign ((size_t) bs, 0.0f);
+    for (auto& v : busL)      v.assign ((size_t) bs, 0.0f);
+    for (auto& v : busR)      v.assign ((size_t) bs, 0.0f);
+    for (auto& v : auxLaneL)  v.assign ((size_t) bs, 0.0f);
+    for (auto& v : auxLaneR)  v.assign ((size_t) bs, 0.0f);
     playbackScratch.assign ((size_t) bs, 0.0f);
 }
 
@@ -342,18 +353,27 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     // memset would still call into libc and miss the alignment-aware path.
     juce::FloatVectorOperations::clear (mixL.data(), numSamples);
     juce::FloatVectorOperations::clear (mixR.data(), numSamples);
-    for (auto& v : auxL) juce::FloatVectorOperations::clear (v.data(), numSamples);
-    for (auto& v : auxR) juce::FloatVectorOperations::clear (v.data(), numSamples);
+    for (auto& v : busL) juce::FloatVectorOperations::clear (v.data(), numSamples);
+    for (auto& v : busR) juce::FloatVectorOperations::clear (v.data(), numSamples);
+    for (auto& v : auxLaneL) juce::FloatVectorOperations::clear (v.data(), numSamples);
+    for (auto& v : auxLaneR) juce::FloatVectorOperations::clear (v.data(), numSamples);
 
     const bool anyChannelSolo = session.anyTrackSoloed();
-    const bool anyAuxSolo     = session.anyAuxSoloed();
+    const bool anyBusSolo     = session.anyBusSoloed();
 
     std::array<float*, ChannelStrip::kNumBuses> busLPtrs {};
     std::array<float*, ChannelStrip::kNumBuses> busRPtrs {};
-    for (int a = 0; a < Session::kNumAuxBuses; ++a)
+    for (int a = 0; a < Session::kNumBuses; ++a)
     {
-        busLPtrs[(size_t) a] = auxL[(size_t) a].data();
-        busRPtrs[(size_t) a] = auxR[(size_t) a].data();
+        busLPtrs[(size_t) a] = busL[(size_t) a].data();
+        busRPtrs[(size_t) a] = busR[(size_t) a].data();
+    }
+    std::array<float*, ChannelStripParams::kNumAuxSends> auxLanePtrsL {};
+    std::array<float*, ChannelStripParams::kNumAuxSends> auxLanePtrsR {};
+    for (int a = 0; a < Session::kNumAuxLanes; ++a)
+    {
+        auxLanePtrsL[(size_t) a] = auxLaneL[(size_t) a].data();
+        auxLanePtrsR[(size_t) a] = auxLaneR[(size_t) a].data();
     }
 
     const auto state = transport.getState();
@@ -478,6 +498,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         strips[(size_t) t].processAndAccumulate (monoIn,
                                                  mixL.data(), mixR.data(),
                                                  busLPtrs, busRPtrs,
+                                                 auxLanePtrsL, auxLanePtrsR,
                                                  numSamples,
                                                  passes && monoIn != nullptr);
         session.track (t).meterGrDb.store (strips[(size_t) t].getCurrentGrDb(),
@@ -545,12 +566,12 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         }
     }
 
-    for (int a = 0; a < Session::kNumAuxBuses; ++a)
+    for (int a = 0; a < Session::kNumBuses; ++a)
     {
-        const auto& params = session.aux (a).strip;
+        const auto& params = session.bus (a).strip;
         const bool muted   = params.mute.load (std::memory_order_relaxed);
         const bool soloed  = params.solo.load (std::memory_order_relaxed);
-        const bool passes  = ! muted && (anyAuxSolo ? soloed : true);
+        const bool passes  = ! muted && (anyBusSolo ? soloed : true);
 
         if (! passes) continue;
 
@@ -564,26 +585,54 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         // when audio resumes, so no click on re-engage.
         {
             const auto rngL = juce::FloatVectorOperations::findMinAndMax (
-                                  auxL[(size_t) a].data(), numSamples);
+                                  busL[(size_t) a].data(), numSamples);
             const auto rngR = juce::FloatVectorOperations::findMinAndMax (
-                                  auxR[(size_t) a].data(), numSamples);
+                                  busR[(size_t) a].data(), numSamples);
             const float peak = juce::jmax (
                 juce::jmax (std::abs (rngL.getStart()), std::abs (rngL.getEnd())),
                 juce::jmax (std::abs (rngR.getStart()), std::abs (rngR.getEnd())));
             if (peak <= 1e-6f) continue;
         }
 
-        auxStrips[(size_t) a].processInPlace (auxL[(size_t) a].data(),
-                                              auxR[(size_t) a].data(),
+        busStrips[(size_t) a].processInPlace (busL[(size_t) a].data(),
+                                              busR[(size_t) a].data(),
                                               numSamples);
         // SIMD'd mix accumulate - hot inner loop, runs once per active aux
         // per callback. JUCE picks the right SSE/NEON path based on the
         // platform; cheaper than scalar [i]+= even with -O3.
         juce::FloatVectorOperations::add (mixL.data(),
-                                            auxL[(size_t) a].data(),
+                                            busL[(size_t) a].data(),
                                             numSamples);
         juce::FloatVectorOperations::add (mixR.data(),
-                                            auxR[(size_t) a].data(),
+                                            busR[(size_t) a].data(),
+                                            numSamples);
+    }
+
+    // AUX return lanes - process each lane's accumulated send buffer
+    // through its plugin chain, then sum the wet output into master. Same
+    // silence-skip optimisation as the bus pass above so idle lanes (no
+    // channel sending to them) don't run their plugins.
+    for (int a = 0; a < Session::kNumAuxLanes; ++a)
+    {
+        {
+            const auto rngL = juce::FloatVectorOperations::findMinAndMax (
+                                  auxLaneL[(size_t) a].data(), numSamples);
+            const auto rngR = juce::FloatVectorOperations::findMinAndMax (
+                                  auxLaneR[(size_t) a].data(), numSamples);
+            const float peak = juce::jmax (
+                juce::jmax (std::abs (rngL.getStart()), std::abs (rngL.getEnd())),
+                juce::jmax (std::abs (rngR.getStart()), std::abs (rngR.getEnd())));
+            if (peak <= 1e-6f) continue;
+        }
+
+        auxLaneStrips[(size_t) a].processStereoBlock (auxLaneL[(size_t) a].data(),
+                                                        auxLaneR[(size_t) a].data(),
+                                                        numSamples);
+        juce::FloatVectorOperations::add (mixL.data(),
+                                            auxLaneL[(size_t) a].data(),
+                                            numSamples);
+        juce::FloatVectorOperations::add (mixR.data(),
+                                            auxLaneR[(size_t) a].data(),
                                             numSamples);
     }
 

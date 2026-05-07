@@ -27,7 +27,8 @@ namespace focal
 class ChannelStrip
 {
 public:
-    static constexpr int kNumBuses = ChannelStripParams::kNumBuses;
+    static constexpr int kNumBuses    = ChannelStripParams::kNumBuses;
+    static constexpr int kNumAuxSends = ChannelStripParams::kNumAuxSends;
 
     void prepare (double sampleRate, int blockSize);
     void bind (const ChannelStripParams& params) noexcept { paramsRef = &params; }
@@ -60,13 +61,17 @@ public:
     int getLastProcessedSamples() const noexcept { return lastProcessedSamples; }
 
     // Reads `numSamples` of mono audio from `monoIn`. Internal: HPF + 4-band EQ
-    // (single source from dsp-cores), then accumulates the post-fader stereo
-    // signal into masterL/masterR and into busL[N]/busR[N] for each assigned
-    // bus (binary on/off - each bus receives the channel signal at unity).
+    // (single source from dsp-cores), then accumulates:
+    //   • post-fader stereo signal into masterL/masterR (when not bus-routed)
+    //   • binary-routed signal into busL[N]/busR[N] for each assigned bus
+    //   • aux-send signal into auxLaneL[N]/auxLaneR[N] at auxSendDb[N] gain,
+    //     pre- or post-fader per auxSendPreFader[N]
     void processAndAccumulate (const float* monoIn,
                                float* masterL, float* masterR,
                                const std::array<float*, kNumBuses>& busL,
                                const std::array<float*, kNumBuses>& busR,
+                               const std::array<float*, kNumAuxSends>& auxLaneL,
+                               const std::array<float*, kNumAuxSends>& auxLaneR,
                                int numSamples,
                                bool passByGate) noexcept;
 
@@ -77,6 +82,13 @@ private:
     juce::SmoothedValue<float> panGainR   { 0.7071f };
     // Binary bus routing - smoothed 0..1 to avoid clicks on toggle.
     std::array<juce::SmoothedValue<float>, kNumBuses> busGain;
+    // Aux send levels - linear gain (mapped from auxSendDb each block).
+    // Smoothed so knob turns and pre/post toggles don't click.
+    std::array<juce::SmoothedValue<float>, kNumAuxSends> auxSendGain;
+    // Cached per-block: which aux sends use the pre-fader tap. Sampled at
+    // the top of processAndAccumulate so the inner loop avoids per-sample
+    // atomic loads.
+    std::array<bool, kNumAuxSends> auxSendPre {};
 
     std::vector<float> tempMono;  // pre-fader scratch buffer (post-EQ)
     juce::AudioBuffer<float> eqMonoBuffer;  // wraps tempMono for BritishEQProcessor::process

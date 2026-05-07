@@ -1,15 +1,15 @@
-#include "AuxBusStrip.h"
+#include "BusStrip.h"
 #include <cmath>
 #include <cstring>
 
 namespace focal
 {
-void AuxBusStrip::bind (const AuxBusParams& params) noexcept
+void BusStrip::bind (const BusParams& params) noexcept
 {
     paramsRef = &params;
 }
 
-void AuxBusStrip::prepare (double sampleRate, int blockSize, int oversamplingFactor)
+void BusStrip::prepare (double sampleRate, int blockSize, int oversamplingFactor)
 {
     faderGain.reset (sampleRate, 0.020);
     faderGain.setCurrentAndTargetValue (1.0f);
@@ -17,10 +17,6 @@ void AuxBusStrip::prepare (double sampleRate, int blockSize, int oversamplingFac
     panGainR .reset (sampleRate, 0.020);
     panGainL .setCurrentAndTargetValue (1.0f);
     panGainR .setCurrentAndTargetValue (1.0f);
-
-    // Plugin slot - sized for the current device config so the audio thread
-    // never sees an unprepared instance. Cheap when no plugin is loaded.
-    pluginSlot.prepareToPlay (sampleRate, juce::jmax (1, blockSize));
 
 #if FOCAL_HAS_DUSK_DSP
     eq.prepare (sampleRate, juce::jmax (1, blockSize), 2);
@@ -38,7 +34,7 @@ void AuxBusStrip::prepare (double sampleRate, int blockSize, int oversamplingFac
 }
 
 #if FOCAL_HAS_DUSK_DSP
-void AuxBusStrip::bindCompParams()
+void BusStrip::bindCompParams()
 {
     auto& apvts = busComp.getParameters();
     compModeAtom       = apvts.getRawParameterValue ("mode");
@@ -58,7 +54,7 @@ void AuxBusStrip::bindCompParams()
     storeAtom (compAutoMakeupAtom,    0.0f);
 }
 
-void AuxBusStrip::updateEqParameters() noexcept
+void BusStrip::updateEqParameters() noexcept
 {
     if (paramsRef == nullptr) return;
     // Value-init padding to zero so the memcmp cache against lastEqParams
@@ -94,7 +90,7 @@ void AuxBusStrip::updateEqParameters() noexcept
     }
 }
 
-void AuxBusStrip::updateCompParameters() noexcept
+void BusStrip::updateCompParameters() noexcept
 {
     if (paramsRef == nullptr) return;
     storeAtom (compBypassAtom,
@@ -107,7 +103,7 @@ void AuxBusStrip::updateCompParameters() noexcept
 }
 #endif
 
-void AuxBusStrip::updateGainTargets() noexcept
+void BusStrip::updateGainTargets() noexcept
 {
     if (paramsRef == nullptr) return;
 
@@ -124,7 +120,7 @@ void AuxBusStrip::updateGainTargets() noexcept
     panGainR.setTargetValue (std::sin (angle) * juce::MathConstants<float>::sqrt2);
 }
 
-void AuxBusStrip::processInPlace (float* L, float* R, int numSamples) noexcept
+void BusStrip::processInPlace (float* L, float* R, int numSamples) noexcept
 {
    #if FOCAL_HAS_DUSK_DSP
     // Contract: numSamples must fit the buffer prepare() sized for the comp.
@@ -164,13 +160,6 @@ void AuxBusStrip::processInPlace (float* L, float* R, int numSamples) noexcept
                                          std::memory_order_relaxed);
     }
 #endif
-
-    // Send-FX plugin (Phase 1b). No-op when nothing is loaded; otherwise
-    // runs in place on the post-comp L/R buffer. Time-budget watchdog inside
-    // PluginSlot auto-bypasses on stalls so a misbehaving reverb can't lock
-    // the audio thread. Position is post-comp / pre-fader so the bus fader
-    // still trims the wet return level.
-    pluginSlot.processStereoBlock (L, R, numSamples);
 
     float postPeakL = 0.0f, postPeakR = 0.0f;
     for (int i = 0; i < numSamples; ++i)

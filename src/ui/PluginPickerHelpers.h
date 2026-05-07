@@ -24,10 +24,16 @@ namespace pluginpicker
 //   • "Browse for file..." → launches a juce::FileChooser owned by
 //     `chooserOwner` (kept alive across the async callback).
 // `onChange` runs on every successful change to the slot.
+//
+// `screenPosition` overrides the menu anchor. Pass the cursor's screen
+// position when `target` is a large click-target (full-slot placeholder)
+// so the menu appears at the click rather than at the component's
+// top-left. Default {-1,-1} means "use target component bounds".
 void openPickerMenu (PluginSlot& slot,
                       juce::Component& target,
                       std::unique_ptr<juce::FileChooser>& chooserOwner,
-                      std::function<void()> onChange);
+                      std::function<void()> onChange,
+                      juce::Point<int> screenPosition = { -1, -1 });
 
 // Synchronous scan with a tiny modal banner so the user sees progress.
 // Same UX as the per-channel scan dialog. Safe to call from message thread.

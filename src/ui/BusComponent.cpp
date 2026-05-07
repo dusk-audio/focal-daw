@@ -1,7 +1,5 @@
-#include "AuxBusComponent.h"
+#include "BusComponent.h"
 #include "FocalLookAndFeel.h"  // fourKColors palette
-#include "PluginPickerHelpers.h"
-#include "../engine/PluginSlot.h"
 
 namespace focal
 {
@@ -44,10 +42,10 @@ void styleToggle (juce::TextButton& b, juce::Colour onColour)
 }
 } // namespace
 
-AuxBusComponent::AuxBusComponent (AuxBus& a, Session& s, int idx, PluginSlot& slotRef)
-    : aux (a), sessionRef (s), auxIndex (idx), pluginSlot (slotRef)
+BusComponent::BusComponent (Bus& b, Session& s, int idx)
+    : bus (b), sessionRef (s), busIndex (idx)
 {
-    nameLabel.setText (aux.name, juce::dontSendNotification);
+    nameLabel.setText (bus.name, juce::dontSendNotification);
     nameLabel.setJustificationType (juce::Justification::centred);
     nameLabel.setColour (juce::Label::textColourId, juce::Colours::white);
     nameLabel.setFont (juce::Font (juce::FontOptions (12.0f, juce::Font::bold)));
@@ -58,42 +56,10 @@ AuxBusComponent::AuxBusComponent (AuxBus& a, Session& s, int idx, PluginSlot& sl
     nameLabel.onTextChange = [this]
     {
         const auto txt = nameLabel.getText().trim();
-        if (txt.isEmpty()) nameLabel.setText (aux.name, juce::dontSendNotification);
-        else aux.name = txt;
+        if (txt.isEmpty()) nameLabel.setText (bus.name, juce::dontSendNotification);
+        else bus.name = txt;
     };
     addAndMakeVisible (nameLabel);
-
-    // FX plugin slot button. Sits in the placeholder fxArea at the top of
-    // the strip. Empty slot → "+ FX"; loaded → plugin name (truncated to
-    // fit). Right-click for replace/remove/re-enable.
-    fxButton.setColour (juce::TextButton::buttonColourId,   juce::Colour (0xff222226));
-    fxButton.setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xff5a4880));
-    fxButton.setColour (juce::TextButton::textColourOffId,  juce::Colour (0xff9080c0));
-    fxButton.setColour (juce::TextButton::textColourOnId,   juce::Colours::white);
-    fxButton.setTooltip ("Click to load a send-FX plugin (reverb / delay / etc).\n"
-                          "Right-click for replace / remove.");
-    fxButton.onClick = [this]
-    {
-        // Loaded → toggle bypass (and clear auto-bypass) on left-click for
-        // quick A/B; empty slot → open picker.
-        if (pluginSlot.isLoaded())
-        {
-            if (pluginSlot.wasAutoBypassed())
-            {
-                pluginSlot.clearAutoBypass();
-                refreshFxButton();
-                return;
-            }
-            pluginSlot.setBypassed (! pluginSlot.isBypassed());
-            refreshFxButton();
-            return;
-        }
-        pluginpicker::openPickerMenu (pluginSlot, fxButton, activeFxChooser,
-                                        [this] { refreshFxButton(); });
-    };
-    fxButton.onRightClick = [this] (const juce::MouseEvent&) { showFxButtonMenu(); };
-    addAndMakeVisible (fxButton);
-    refreshFxButton();
 
     const auto eqGreen = juce::Colour (0xff80c090);
     const auto compGold = juce::Colour (0xffe0c050);
@@ -103,23 +69,23 @@ AuxBusComponent::AuxBusComponent (AuxBus& a, Session& s, int idx, PluginSlot& sl
 
     // EQ section.
     styleToggle (eqButton, eqGreen);
-    eqButton.setToggleState (aux.strip.eqEnabled.load (std::memory_order_relaxed),
+    eqButton.setToggleState (bus.strip.eqEnabled.load (std::memory_order_relaxed),
                               juce::dontSendNotification);
     eqButton.setTooltip ("3-band British-style EQ on/off");
     eqButton.onClick = [this]
     {
-        aux.strip.eqEnabled.store (eqButton.getToggleState(), std::memory_order_relaxed);
+        bus.strip.eqEnabled.store (eqButton.getToggleState(), std::memory_order_relaxed);
     };
     addAndMakeVisible (eqButton);
 
     // Suffixes empty - same rationale as master: 38-px textbox can't fit
     // " dB"/" ms" without truncating, and the L/M/H labels already imply dB.
-    styleSmallKnob (eqLfGain,  -15.0, 15.0, 0.0, aux.strip.eqLfGainDb.load(),  eqGreen, "", 1);
-    styleSmallKnob (eqMidGain, -15.0, 15.0, 0.0, aux.strip.eqMidGainDb.load(), eqGreen, "", 1);
-    styleSmallKnob (eqHfGain,  -15.0, 15.0, 0.0, aux.strip.eqHfGainDb.load(),  eqGreen, "", 1);
-    eqLfGain .onValueChange = [this] { aux.strip.eqLfGainDb .store ((float) eqLfGain .getValue(), std::memory_order_relaxed); };
-    eqMidGain.onValueChange = [this] { aux.strip.eqMidGainDb.store ((float) eqMidGain.getValue(), std::memory_order_relaxed); };
-    eqHfGain .onValueChange = [this] { aux.strip.eqHfGainDb .store ((float) eqHfGain .getValue(), std::memory_order_relaxed); };
+    styleSmallKnob (eqLfGain,  -15.0, 15.0, 0.0, bus.strip.eqLfGainDb.load(),  eqGreen, "", 1);
+    styleSmallKnob (eqMidGain, -15.0, 15.0, 0.0, bus.strip.eqMidGainDb.load(), eqGreen, "", 1);
+    styleSmallKnob (eqHfGain,  -15.0, 15.0, 0.0, bus.strip.eqHfGainDb.load(),  eqGreen, "", 1);
+    eqLfGain .onValueChange = [this] { bus.strip.eqLfGainDb .store ((float) eqLfGain .getValue(), std::memory_order_relaxed); };
+    eqMidGain.onValueChange = [this] { bus.strip.eqMidGainDb.store ((float) eqMidGain.getValue(), std::memory_order_relaxed); };
+    eqHfGain .onValueChange = [this] { bus.strip.eqHfGainDb .store ((float) eqHfGain .getValue(), std::memory_order_relaxed); };
     addAndMakeVisible (eqLfGain); addAndMakeVisible (eqMidGain); addAndMakeVisible (eqHfGain);
     // L = low shelf, M = bell, H = high shelf - standard 3-band EQ labelling.
     styleSmallLabel (eqLfLbl,  "L", eqGreen);
@@ -129,25 +95,25 @@ AuxBusComponent::AuxBusComponent (AuxBus& a, Session& s, int idx, PluginSlot& sl
 
     // Comp section.
     styleToggle (compButton, compGold);
-    compButton.setToggleState (aux.strip.compEnabled.load (std::memory_order_relaxed),
+    compButton.setToggleState (bus.strip.compEnabled.load (std::memory_order_relaxed),
                                 juce::dontSendNotification);
     compButton.setTooltip ("Bus compressor on/off (UniversalCompressor in Bus mode)");
     compButton.onClick = [this]
     {
-        aux.strip.compEnabled.store (compButton.getToggleState(), std::memory_order_relaxed);
+        bus.strip.compEnabled.store (compButton.getToggleState(), std::memory_order_relaxed);
     };
     addAndMakeVisible (compButton);
 
-    styleSmallKnob (compThresh,  -30.0,    0.0,  -10.0, aux.strip.compThreshDb.load(),  compGold, "",   1);
-    styleSmallKnob (compRatio,     1.0,   10.0,    4.0, aux.strip.compRatio.load(),     compGold, ":1", 1);
-    styleSmallKnob (compAttack,    0.1,   50.0,    5.0, aux.strip.compAttackMs.load(),  compGold, "",   1);
-    styleSmallKnob (compRelease,  50.0, 1000.0,  200.0, aux.strip.compReleaseMs.load(), compGold, "",   0);
-    styleSmallKnob (compMakeup,  -10.0,   20.0,    0.0, aux.strip.compMakeupDb.load(),  compGold, "",   1);
-    compThresh .onValueChange = [this] { aux.strip.compThreshDb .store ((float) compThresh .getValue(), std::memory_order_relaxed); };
-    compRatio  .onValueChange = [this] { aux.strip.compRatio    .store ((float) compRatio  .getValue(), std::memory_order_relaxed); };
-    compAttack .onValueChange = [this] { aux.strip.compAttackMs .store ((float) compAttack .getValue(), std::memory_order_relaxed); };
-    compRelease.onValueChange = [this] { aux.strip.compReleaseMs.store ((float) compRelease.getValue(), std::memory_order_relaxed); };
-    compMakeup .onValueChange = [this] { aux.strip.compMakeupDb .store ((float) compMakeup .getValue(), std::memory_order_relaxed); };
+    styleSmallKnob (compThresh,  -30.0,    0.0,  -10.0, bus.strip.compThreshDb.load(),  compGold, "",   1);
+    styleSmallKnob (compRatio,     1.0,   10.0,    4.0, bus.strip.compRatio.load(),     compGold, ":1", 1);
+    styleSmallKnob (compAttack,    0.1,   50.0,    5.0, bus.strip.compAttackMs.load(),  compGold, "",   1);
+    styleSmallKnob (compRelease,  50.0, 1000.0,  200.0, bus.strip.compReleaseMs.load(), compGold, "",   0);
+    styleSmallKnob (compMakeup,  -10.0,   20.0,    0.0, bus.strip.compMakeupDb.load(),  compGold, "",   1);
+    compThresh .onValueChange = [this] { bus.strip.compThreshDb .store ((float) compThresh .getValue(), std::memory_order_relaxed); };
+    compRatio  .onValueChange = [this] { bus.strip.compRatio    .store ((float) compRatio  .getValue(), std::memory_order_relaxed); };
+    compAttack .onValueChange = [this] { bus.strip.compAttackMs .store ((float) compAttack .getValue(), std::memory_order_relaxed); };
+    compRelease.onValueChange = [this] { bus.strip.compReleaseMs.store ((float) compRelease.getValue(), std::memory_order_relaxed); };
+    compMakeup .onValueChange = [this] { bus.strip.compMakeupDb .store ((float) compMakeup .getValue(), std::memory_order_relaxed); };
     addAndMakeVisible (compThresh); addAndMakeVisible (compRatio);
     addAndMakeVisible (compAttack); addAndMakeVisible (compRelease);
     addAndMakeVisible (compMakeup);
@@ -161,37 +127,37 @@ AuxBusComponent::AuxBusComponent (AuxBus& a, Session& s, int idx, PluginSlot& sl
     addAndMakeVisible (compMakLbl);
 
     // Pan.
-    styleSmallKnob (panKnob, -1.0, 1.0, 0.0, aux.strip.pan.load(), panRed, "", 2);
-    panKnob.onValueChange = [this] { aux.strip.pan.store ((float) panKnob.getValue(), std::memory_order_relaxed); };
+    styleSmallKnob (panKnob, -1.0, 1.0, 0.0, bus.strip.pan.load(), panRed, "", 2);
+    panKnob.onValueChange = [this] { bus.strip.pan.store ((float) panKnob.getValue(), std::memory_order_relaxed); };
     addAndMakeVisible (panKnob);
     styleSmallLabel (panLbl, "PAN", panRed);
     addAndMakeVisible (panLbl);
 
     faderSlider.setRange (ChannelStripParams::kFaderMinDb, ChannelStripParams::kFaderMaxDb, 0.1);
     faderSlider.setSkewFactorFromMidPoint (-12.0);
-    faderSlider.setValue (aux.strip.faderDb.load (std::memory_order_relaxed), juce::dontSendNotification);
+    faderSlider.setValue (bus.strip.faderDb.load (std::memory_order_relaxed), juce::dontSendNotification);
     faderSlider.setDoubleClickReturnValue (true, 0.0);
     faderSlider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 56, 16);
     faderSlider.setTextValueSuffix (" dB");
     faderSlider.onValueChange = [this]
     {
-        aux.strip.faderDb.store ((float) faderSlider.getValue(), std::memory_order_relaxed);
+        bus.strip.faderDb.store ((float) faderSlider.getValue(), std::memory_order_relaxed);
     };
     addAndMakeVisible (faderSlider);
 
     muteButton.setClickingTogglesState (true);
     muteButton.setColour (juce::TextButton::buttonOnColourId, juce::Colours::orangered);
-    muteButton.setToggleState (aux.strip.mute.load (std::memory_order_relaxed), juce::dontSendNotification);
-    muteButton.onClick = [this] { aux.strip.mute.store (muteButton.getToggleState(), std::memory_order_relaxed); };
+    muteButton.setToggleState (bus.strip.mute.load (std::memory_order_relaxed), juce::dontSendNotification);
+    muteButton.onClick = [this] { bus.strip.mute.store (muteButton.getToggleState(), std::memory_order_relaxed); };
     addAndMakeVisible (muteButton);
 
     soloButton.setClickingTogglesState (true);
     soloButton.setColour (juce::TextButton::buttonOnColourId, juce::Colours::yellow.darker (0.2f));
-    soloButton.setToggleState (aux.strip.solo.load (std::memory_order_relaxed), juce::dontSendNotification);
+    soloButton.setToggleState (bus.strip.solo.load (std::memory_order_relaxed), juce::dontSendNotification);
     soloButton.onClick = [this]
     {
-        // Counter-aware so anyAuxSoloed() stays O(1) on the audio thread.
-        sessionRef.setAuxSoloed (auxIndex, soloButton.getToggleState());
+        // Counter-aware so anyBusSoloed() stays O(1) on the audio thread.
+        sessionRef.setBusSoloed (busIndex, soloButton.getToggleState());
     };
     addAndMakeVisible (soloButton);
 
@@ -216,9 +182,9 @@ AuxBusComponent::AuxBusComponent (AuxBus& a, Session& s, int idx, PluginSlot& sl
     startTimerHz (30);
 }
 
-AuxBusComponent::~AuxBusComponent() = default;
+BusComponent::~BusComponent() = default;
 
-void AuxBusComponent::timerCallback()
+void BusComponent::timerCallback()
 {
     auto smoothChannel = [] (float& displayed, float& peakHold, int& peakFrames, float src)
     {
@@ -229,8 +195,8 @@ void AuxBusComponent::timerCallback()
         else if (peakFrames > 0) --peakFrames;
         else peakHold = juce::jmax (-100.0f, peakHold - 1.5f);
     };
-    const float outL = aux.strip.meterPostBusLDb.load (std::memory_order_relaxed);
-    const float outR = aux.strip.meterPostBusRDb.load (std::memory_order_relaxed);
+    const float outL = bus.strip.meterPostBusLDb.load (std::memory_order_relaxed);
+    const float outR = bus.strip.meterPostBusRDb.load (std::memory_order_relaxed);
     smoothChannel (displayedOutputLDb, outputPeakHoldLDb, outputPeakHoldFramesL, outL);
     smoothChannel (displayedOutputRDb, outputPeakHoldRDb, outputPeakHoldFramesR, outR);
 
@@ -244,7 +210,7 @@ void AuxBusComponent::timerCallback()
         maxHold >= -12.0f ? juce::Colour (0xffe0c050) :
                              juce::Colour (0xffd0d0d0));
 
-    const float gr = aux.strip.meterGrDb.load (std::memory_order_relaxed);
+    const float gr = bus.strip.meterGrDb.load (std::memory_order_relaxed);
     if (gr < displayedGrDb) displayedGrDb = gr;
     else                    displayedGrDb += (gr - displayedGrDb) * 0.18f;
 
@@ -261,92 +227,16 @@ void AuxBusComponent::timerCallback()
 
     if (! meterArea.isEmpty())   repaint (meterArea);
     if (! grMeterArea.isEmpty()) repaint (grMeterArea.expanded (2, 10));  // include "GR" caption
-
-    // Poll the slot's display name. The PluginSlot is mutated only on the
-    // message thread, so we just refresh whenever the displayed string is
-    // out of sync with the live slot.
-    const auto current = pluginSlot.isLoaded() ? pluginSlot.getLoadedName() : juce::String();
-    if (current != lastSlotName)
-        refreshFxButton();
 }
 
-void AuxBusComponent::refreshFxButton()
-{
-    if (pluginSlot.isLoaded())
-    {
-        const auto name = pluginSlot.getLoadedName();
-        lastSlotName = name;
-        const bool autoBp = pluginSlot.wasAutoBypassed();
-        const bool manBp  = pluginSlot.isBypassed();
-        // Auto-bypass is the loud failure mode (plugin stalled) - show it as
-        // a clear tag so the user knows what happened.
-        if (autoBp)
-            fxButton.setButtonText ("! " + name + " (stalled)");
-        else if (manBp)
-            fxButton.setButtonText ("(bypassed) " + name);
-        else
-            fxButton.setButtonText (name);
-        fxButton.setToggleState (! manBp && ! autoBp, juce::dontSendNotification);
-    }
-    else
-    {
-        lastSlotName.clear();
-        fxButton.setButtonText ("+ FX");
-        fxButton.setToggleState (false, juce::dontSendNotification);
-    }
-}
-
-void AuxBusComponent::showFxButtonMenu()
-{
-    juce::PopupMenu menu;
-    if (pluginSlot.isLoaded())
-    {
-        menu.addItem (3001, "Replace plugin...");
-        menu.addItem (3002, "Remove plugin");
-        if (pluginSlot.wasAutoBypassed())
-            menu.addItem (3003, "Re-enable plugin (auto-bypassed)");
-    }
-    else
-    {
-        menu.addItem (3010, "Pick plugin...");
-    }
-
-    juce::Component::SafePointer<AuxBusComponent> safe (this);
-    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&fxButton),
-        [safe] (int result)
-        {
-            auto* self = safe.getComponent();
-            if (self == nullptr || result <= 0) return;
-            switch (result)
-            {
-                case 3001:
-                case 3010:
-                    pluginpicker::openPickerMenu (self->pluginSlot, self->fxButton,
-                                                    self->activeFxChooser,
-                                                    [s = juce::Component::SafePointer<AuxBusComponent> (self)]
-                                                    { if (auto* x = s.getComponent()) x->refreshFxButton(); });
-                    break;
-                case 3002:
-                    self->pluginSlot.unload();
-                    self->refreshFxButton();
-                    break;
-                case 3003:
-                    self->pluginSlot.clearAutoBypass();
-                    self->refreshFxButton();
-                    break;
-                default: break;
-            }
-        });
-}
-
-void AuxBusComponent::mouseDown (const juce::MouseEvent& e)
+void BusComponent::mouseDown (const juce::MouseEvent& e)
 {
     if (e.mods.isPopupMenu()) showColourMenu();
 }
 
-void AuxBusComponent::applyAuxColour (juce::Colour c) { aux.colour = c; repaint(); }
+void BusComponent::applyBusColour (juce::Colour c) { bus.colour = c; repaint(); }
 
-void AuxBusComponent::showColourMenu()
+void BusComponent::showColourMenu()
 {
     const std::pair<const char*, juce::uint32> presets[] = {
         { "Red",        fourKColors::kHfRed     },
@@ -368,7 +258,7 @@ void AuxBusComponent::showColourMenu()
         item.colour = juce::Colour (presets[i].second);
         menu.addItem (item);
     }
-    juce::Component::SafePointer<AuxBusComponent> safe (this);
+    juce::Component::SafePointer<BusComponent> safe (this);
     std::vector<std::pair<juce::String, juce::uint32>> presetCopy;
     presetCopy.reserve (std::size (presets));
     for (auto& p : presets) presetCopy.emplace_back (juce::String (p.first), p.second);
@@ -380,16 +270,16 @@ void AuxBusComponent::showColourMenu()
             if (self == nullptr) return;
             const int idx = result - 1;
             if (idx >= 0 && idx < (int) presetCopy.size())
-                self->applyAuxColour (juce::Colour (presetCopy[(size_t) idx].second));
+                self->applyBusColour (juce::Colour (presetCopy[(size_t) idx].second));
         });
 }
 
-void AuxBusComponent::paint (juce::Graphics& g)
+void BusComponent::paint (juce::Graphics& g)
 {
     auto r = getLocalBounds().toFloat().reduced (1.5f);
     g.setColour (juce::Colour (0xff181820));
     g.fillRoundedRectangle (r, 4.0f);
-    g.setColour (aux.colour.withAlpha (0.85f));
+    g.setColour (bus.colour.withAlpha (0.85f));
     g.fillRoundedRectangle (r.removeFromTop (4.0f), 2.0f);
     g.setColour (juce::Colour (0xff2a2a2e));
     g.drawRoundedRectangle (getLocalBounds().toFloat().reduced (1.5f), 4.0f, 1.0f);
@@ -498,17 +388,17 @@ void AuxBusComponent::paint (juce::Graphics& g)
     }
 }
 
-void AuxBusComponent::resized()
+void BusComponent::resized()
 {
     auto area = getLocalBounds().reduced (4);
     area.removeFromTop (6);
     nameLabel.setBounds (area.removeFromTop (20));
     area.removeFromTop (3);
 
-    // FX plugin slot button. Same vertical budget as the channel strip's
-    // plugin button so the cross-strip rhythm reads cleanly.
-    fxArea = area.removeFromTop (32);
-    fxButton.setBounds (fxArea.reduced (3, 4));
+    // No plugin slots on buses - reserved space stays a thin gap so the
+    // strip's vertical layout matches the channel strips' rhythm. Plugins
+    // live on AUX return lanes (the AUX stage), not on bus subgroups.
+    fxArea = juce::Rectangle<int>();
     area.removeFromTop (3);
 
     // 26 px rotary + 14 px textbox. Block width is 40 - wider than the

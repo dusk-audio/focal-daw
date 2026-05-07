@@ -11,10 +11,19 @@ Session::Session()
     }
 
     static const char* defaultBusNames[] = { "BUS 1", "BUS 2", "BUS 3", "BUS 4" };
-    for (int i = 0; i < kNumAuxBuses; ++i)
+    for (int i = 0; i < kNumBuses; ++i)
     {
-        auxBuses[(size_t) i].name = defaultBusNames[i];
-        auxBuses[(size_t) i].colour = juce::Colour::fromHSV (0.55f + i * 0.07f, 0.35f, 0.72f, 1.0f);
+        buses[(size_t) i].name = defaultBusNames[i];
+        buses[(size_t) i].colour = juce::Colour::fromHSV (0.55f + i * 0.07f, 0.35f, 0.72f, 1.0f);
+    }
+
+    static const char* defaultLaneNames[] = { "AUX 1", "AUX 2", "AUX 3", "AUX 4" };
+    for (int i = 0; i < kNumAuxLanes; ++i)
+    {
+        auxLanes[(size_t) i].name = defaultLaneNames[i];
+        // Different hue band so the AUX UI reads differently from the bus
+        // strips and the track palette.
+        auxLanes[(size_t) i].colour = juce::Colour::fromHSV (0.78f + i * 0.05f, 0.40f, 0.78f, 1.0f);
     }
 }
 
@@ -23,9 +32,9 @@ bool Session::anyTrackSoloed() const noexcept
     return soloTrackCount.load (std::memory_order_relaxed) > 0;
 }
 
-bool Session::anyAuxSoloed() const noexcept
+bool Session::anyBusSoloed() const noexcept
 {
-    return soloAuxCount.load (std::memory_order_relaxed) > 0;
+    return soloBusCount.load (std::memory_order_relaxed) > 0;
 }
 
 bool Session::anyTrackArmed() const noexcept
@@ -42,13 +51,13 @@ void Session::setTrackSoloed (int trackIndex, bool soloed) noexcept
         soloTrackCount.fetch_add (soloed ? 1 : -1, std::memory_order_relaxed);
 }
 
-void Session::setAuxSoloed (int auxIndex, bool soloed) noexcept
+void Session::setBusSoloed (int busIndex, bool soloed) noexcept
 {
-    if (auxIndex < 0 || auxIndex >= kNumAuxBuses) return;
-    auto& a = auxBuses[(size_t) auxIndex].strip.solo;
+    if (busIndex < 0 || busIndex >= kNumBuses) return;
+    auto& a = buses[(size_t) busIndex].strip.solo;
     const bool prev = a.exchange (soloed, std::memory_order_relaxed);
     if (prev != soloed)
-        soloAuxCount.fetch_add (soloed ? 1 : -1, std::memory_order_relaxed);
+        soloBusCount.fetch_add (soloed ? 1 : -1, std::memory_order_relaxed);
 }
 
 void Session::setTrackArmed (int trackIndex, bool armed) noexcept
@@ -68,11 +77,11 @@ void Session::recomputeRtCounters() noexcept
         if (t.strip.solo.load (std::memory_order_relaxed)) ++s;
         if (t.recordArmed.load (std::memory_order_relaxed)) ++ar;
     }
-    for (auto& aux : auxBuses)
-        if (aux.strip.solo.load (std::memory_order_relaxed)) ++a;
+    for (auto& b : buses)
+        if (b.strip.solo.load (std::memory_order_relaxed)) ++a;
 
     soloTrackCount .store (s,  std::memory_order_relaxed);
-    soloAuxCount   .store (a,  std::memory_order_relaxed);
+    soloBusCount   .store (a,  std::memory_order_relaxed);
     armedTrackCount.store (ar, std::memory_order_relaxed);
 }
 

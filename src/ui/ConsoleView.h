@@ -3,7 +3,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <array>
 #include <memory>
-#include "AuxBusComponent.h"
+#include "BusComponent.h"
 #include "ChannelStripComponent.h"
 #include "MasterStripComponent.h"
 #include "../session/Session.h"
@@ -24,11 +24,11 @@ public:
     void resized() override;
 
     static constexpr int kMinChannelWidth = 120;
-    static constexpr int kMinAuxWidth     = 130;   // 3 × 40 px knob blocks + 10 px padding
+    static constexpr int kMinBusWidth     = 130;   // 3 × 40 px knob blocks + 10 px padding
     static constexpr int kMinMasterWidth  = 210;   // 5 × 40 px knob blocks + 10 px padding
 
     static constexpr int kRefChannelWidth = 150;
-    static constexpr int kRefAuxWidth     = 150;   // comfortable padding around the 3-knob row
+    static constexpr int kRefBusWidth     = 150;   // comfortable padding around the 3-knob row
     static constexpr int kRefMasterWidth  = 230;   // 5 EQ knobs + 5 comp knobs at 40 px each
 
     static constexpr int kStripGap     = 4;
@@ -61,7 +61,7 @@ public:
     void setStripsMixingMode (bool mixing);
 
 private:
-    std::array<std::unique_ptr<AuxBusComponent>,       Session::kNumAuxBuses> auxStrips;
+    std::array<std::unique_ptr<BusComponent>,       Session::kNumBuses> busStrips;
     std::unique_ptr<MasterStripComponent> masterStrip;
 
     int currentBank = 0;

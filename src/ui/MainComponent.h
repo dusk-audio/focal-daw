@@ -83,10 +83,11 @@ private:
     // - the menu bar is much slimmer and reads as a normal app menu.
     juce::MenuBarComponent menuBar;
 
-    // Stage selector - three big-button segmented control. Drives both
-    // engine.setStage() and which view the body shows.
+    // Stage selector - segmented control. Drives both engine.setStage() and
+    // which view the body shows.
     juce::TextButton recordingStageBtn { "RECORDING" };
     juce::TextButton mixingStageBtn    { "MIXING" };
+    juce::TextButton auxStageBtn       { "AUX" };
     juce::TextButton masteringStageBtn { "MASTERING" };
 
     // Bank A / B buttons. Used when the window is too narrow to show all
@@ -101,6 +102,7 @@ private:
     std::unique_ptr<juce::FileChooser> bounceFileChooser;
     std::unique_ptr<juce::FileChooser> sessionFileChooser;
     std::unique_ptr<class MasteringView> masteringView;
+    std::unique_ptr<class AuxView>       auxView;
 
     // Track the audio settings DialogWindow so we can explicitly delete it
     // in our destructor BEFORE AudioEngine destructs. Required because the

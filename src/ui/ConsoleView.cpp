@@ -10,12 +10,11 @@ ConsoleView::ConsoleView (Session& session, AudioEngine& engine) : sessionRef (s
             i, session.track (i), session, engine.getStrip (i).getPluginSlot());
         addAndMakeVisible (strips[(size_t) i].get());
     }
-    for (int i = 0; i < Session::kNumAuxBuses; ++i)
+    for (int i = 0; i < Session::kNumBuses; ++i)
     {
-        auxStrips[(size_t) i] = std::make_unique<AuxBusComponent> (
-            session.aux (i), session, i,
-            engine.getAuxStrip (i).getPluginSlot());
-        addAndMakeVisible (auxStrips[(size_t) i].get());
+        busStrips[(size_t) i] = std::make_unique<BusComponent> (
+            session.bus (i), session, i);
+        addAndMakeVisible (busStrips[(size_t) i].get());
     }
     masterStrip = std::make_unique<MasterStripComponent> (session.master());
     addAndMakeVisible (masterStrip.get());
@@ -31,10 +30,10 @@ int ConsoleView::minimumContentWidth()
 {
     const int gaps = (Session::kBankSize - 1) * kStripGap         // gaps between channels
                    + kSectionGap                                  // channel block -> aux block
-                   + (Session::kNumAuxBuses - 1) * kStripGap      // gaps between aux strips
+                   + (Session::kNumBuses - 1) * kStripGap      // gaps between aux strips
                    + kSectionGap;                                 // aux block -> master
     return Session::kBankSize * kMinChannelWidth
-         + Session::kNumAuxBuses * kMinAuxWidth
+         + Session::kNumBuses * kMinBusWidth
          + kMinMasterWidth
          + gaps
          + 12;  // outer padding
@@ -47,10 +46,10 @@ int ConsoleView::fixedWidthFor16Tracks() const
     // banking and show every track at once.
     const int gaps = (Session::kNumTracks - 1) * kStripGap
                    + kSectionGap
-                   + (Session::kNumAuxBuses - 1) * kStripGap
+                   + (Session::kNumBuses - 1) * kStripGap
                    + kSectionGap;
     return Session::kNumTracks * kRefChannelWidth
-         + Session::kNumAuxBuses * kRefAuxWidth
+         + Session::kNumBuses * kRefBusWidth
          + kRefMasterWidth
          + gaps
          + 12;  // outer padding match
@@ -102,15 +101,15 @@ void ConsoleView::resized()
     // scale up: extra horizontal space stays as whitespace on the right.
     const int gaps = (visibleChannels - 1) * kStripGap
                    + kSectionGap
-                   + (Session::kNumAuxBuses - 1) * kStripGap
+                   + (Session::kNumBuses - 1) * kStripGap
                    + kSectionGap;
     const int availForStrips = juce::jmax (0, area.getWidth() - gaps);
     const int refTotal = visibleChannels * kRefChannelWidth
-                       + Session::kNumAuxBuses * kRefAuxWidth
+                       + Session::kNumBuses * kRefBusWidth
                        + kRefMasterWidth;
 
     int channelW = kRefChannelWidth;
-    int auxW     = kRefAuxWidth;
+    int busW     = kRefBusWidth;
     int masterW  = kRefMasterWidth;
 
     if (availForStrips < refTotal)
@@ -118,7 +117,7 @@ void ConsoleView::resized()
         // Window is narrower than the reference - shrink proportionally.
         const float scale = (float) availForStrips / (float) refTotal;
         channelW = juce::jmax (kMinChannelWidth, (int) std::round (kRefChannelWidth * scale));
-        auxW     = juce::jmax (kMinAuxWidth,     (int) std::round (kRefAuxWidth     * scale));
+        busW     = juce::jmax (kMinBusWidth,     (int) std::round (kRefBusWidth     * scale));
         masterW  = juce::jmax (kMinMasterWidth,  (int) std::round (kRefMasterWidth  * scale));
 
         // Secondary fit-to-budget pass: if any kMin floor pushed the total
@@ -127,13 +126,13 @@ void ConsoleView::resized()
         // squished knobs are better than the master strip being clipped
         // off the right edge of the window.
         const int totalContent = visibleChannels * channelW
-                               + Session::kNumAuxBuses * auxW
+                               + Session::kNumBuses * busW
                                + masterW;
         if (totalContent > availForStrips && totalContent > 0)
         {
             const float secondary = (float) availForStrips / (float) totalContent;
             channelW = juce::jmax (1, (int) std::floor (channelW * secondary));
-            auxW     = juce::jmax (1, (int) std::floor (auxW     * secondary));
+            busW     = juce::jmax (1, (int) std::floor (busW     * secondary));
             masterW  = juce::jmax (1, (int) std::floor (masterW  * secondary));
         }
     }
@@ -153,10 +152,10 @@ void ConsoleView::resized()
     }
 
     x += kSectionGap;
-    for (int i = 0; i < Session::kNumAuxBuses; ++i)
+    for (int i = 0; i < Session::kNumBuses; ++i)
     {
-        auxStrips[(size_t) i]->setBounds (x, y, auxW, h);
-        x += auxW + (i + 1 < Session::kNumAuxBuses ? kStripGap : 0);
+        busStrips[(size_t) i]->setBounds (x, y, busW, h);
+        x += busW + (i + 1 < Session::kNumBuses ? kStripGap : 0);
     }
 
     x += kSectionGap;

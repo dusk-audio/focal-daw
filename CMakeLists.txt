@@ -59,7 +59,8 @@ target_sources(Focal PRIVATE
     src/engine/PluginManager.cpp
     src/engine/PluginSlot.cpp
     src/engine/RecordManager.cpp
-    src/dsp/AuxBusStrip.cpp
+    src/dsp/AuxLaneStrip.cpp
+    src/dsp/BusStrip.cpp
     src/dsp/BrickwallLimiter.cpp
     src/dsp/ChannelStrip.cpp
     src/dsp/LoudnessMeter.cpp
@@ -73,7 +74,9 @@ target_sources(Focal PRIVATE
     src/session/SessionSerializer.cpp
     src/ui/AppConfig.cpp
     src/ui/AudioSettingsPanel.cpp
-    src/ui/AuxBusComponent.cpp
+    src/ui/AuxLaneComponent.cpp
+    src/ui/AuxView.cpp
+    src/ui/BusComponent.cpp
     src/ui/BounceDialog.cpp
     src/ui/ChannelCompEditor.cpp
     src/ui/ChannelEqEditor.cpp

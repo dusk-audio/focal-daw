@@ -134,7 +134,7 @@ juce::DynamicObject::Ptr trackToObject (const Track& t)
     return obj;
 }
 
-juce::DynamicObject::Ptr auxToObject (const AuxBus& a)
+juce::DynamicObject::Ptr busToObject (const Bus& a)
 {
     auto* obj = new juce::DynamicObject();
     obj->setProperty ("name",     a.name);
@@ -155,12 +155,6 @@ juce::DynamicObject::Ptr auxToObject (const AuxBus& a)
     obj->setProperty ("comp_attack_ms",   a.strip.compAttackMs.load());
     obj->setProperty ("comp_release_ms",  a.strip.compReleaseMs.load());
     obj->setProperty ("comp_makeup_db",   a.strip.compMakeupDb.load());
-
-    // Send-FX plugin slot. Same encoding as Track.
-    if (a.pluginDescriptionXml.isNotEmpty())
-        obj->setProperty ("plugin_desc_xml", a.pluginDescriptionXml);
-    if (a.pluginStateBase64.isNotEmpty())
-        obj->setProperty ("plugin_state",    a.pluginStateBase64);
 
     return obj;
 }
@@ -314,7 +308,7 @@ void restoreTrack (Track& t, const juce::var& v)
     }
 }
 
-void restoreAux (AuxBus& a, const juce::var& v)
+void restoreBus (Bus& a, const juce::var& v)
 {
     if (! v.isObject()) return;
     if (auto s = v["name"].toString();   s.isNotEmpty()) a.name = s;
@@ -335,9 +329,6 @@ void restoreAux (AuxBus& a, const juce::var& v)
     if (v.hasProperty ("comp_attack_ms"))  a.strip.compAttackMs .store ((float) (double) v["comp_attack_ms"]);
     if (v.hasProperty ("comp_release_ms")) a.strip.compReleaseMs.store ((float) (double) v["comp_release_ms"]);
     if (v.hasProperty ("comp_makeup_db"))  a.strip.compMakeupDb .store ((float) (double) v["comp_makeup_db"]);
-
-    a.pluginDescriptionXml = v["plugin_desc_xml"].toString();
-    a.pluginStateBase64    = v["plugin_state"]   .toString();
 }
 } // namespace
 
@@ -351,10 +342,34 @@ bool SessionSerializer::save (const Session& s, const juce::File& target)
         tracks.add (juce::var (trackToObject (s.track (i)).get()));
     root->setProperty ("tracks", tracks);
 
-    juce::Array<juce::var> auxes;
-    for (int i = 0; i < Session::kNumAuxBuses; ++i)
-        auxes.add (juce::var (auxToObject (s.aux (i)).get()));
-    root->setProperty ("aux_buses", auxes);
+    juce::Array<juce::var> busesArr;
+    for (int i = 0; i < Session::kNumBuses; ++i)
+        busesArr.add (juce::var (busToObject (s.bus (i)).get()));
+    root->setProperty ("buses", busesArr);
+
+    juce::Array<juce::var> auxLanesArr;
+    for (int i = 0; i < Session::kNumAuxLanes; ++i)
+    {
+        const auto& lane = s.auxLane (i);
+        auto* obj = new juce::DynamicObject();
+        obj->setProperty ("name",   lane.name);
+        obj->setProperty ("colour", colourToHex (lane.colour));
+        obj->setProperty ("return_level_db", lane.params.returnLevelDb.load());
+        obj->setProperty ("mute",            lane.params.mute.load());
+        // Per-slot plugin state. Empty strings serialise as empty - same
+        // pattern as Track.
+        juce::Array<juce::var> slots;
+        for (int p = 0; p < AuxLaneParams::kMaxLanePlugins; ++p)
+        {
+            auto* slot = new juce::DynamicObject();
+            slot->setProperty ("plugin_desc_xml", lane.pluginDescriptionXml[(size_t) p]);
+            slot->setProperty ("plugin_state",    lane.pluginStateBase64[(size_t) p]);
+            slots.add (juce::var (slot));
+        }
+        obj->setProperty ("plugin_slots", slots);
+        auxLanesArr.add (juce::var (obj));
+    }
+    root->setProperty ("aux_lanes", auxLanesArr);
 
     auto* master = new juce::DynamicObject();
     master->setProperty ("fader_db",     s.master().faderDb.load());
@@ -435,11 +450,38 @@ bool SessionSerializer::load (Session& s, const juce::File& source)
         for (int i = 0; i < n; ++i)
             restoreTrack (s.track (i), tracks[i]);
     }
-    if (auto auxes = root["aux_buses"]; auxes.isArray())
+    if (auto busesArr = root["buses"]; busesArr.isArray())
     {
-        const int n = juce::jmin (Session::kNumAuxBuses, auxes.size());
+        const int n = juce::jmin (Session::kNumBuses, busesArr.size());
         for (int i = 0; i < n; ++i)
-            restoreAux (s.aux (i), auxes[i]);
+            restoreBus (s.bus (i), busesArr[i]);
+    }
+    if (auto auxLanesArr = root["aux_lanes"]; auxLanesArr.isArray())
+    {
+        const int n = juce::jmin (Session::kNumAuxLanes, auxLanesArr.size());
+        for (int i = 0; i < n; ++i)
+        {
+            const auto v = auxLanesArr[i];
+            if (! v.isObject()) continue;
+            auto& lane = s.auxLane (i);
+            if (auto str = v["name"].toString();   str.isNotEmpty()) lane.name   = str;
+            if (auto str = v["colour"].toString(); str.isNotEmpty()) lane.colour = hexToColour (str, lane.colour);
+            if (v.hasProperty ("return_level_db"))
+                lane.params.returnLevelDb.store ((float) (double) v["return_level_db"]);
+            if (v.hasProperty ("mute"))
+                lane.params.mute.store ((bool) v["mute"]);
+            if (auto slots = v["plugin_slots"]; slots.isArray())
+            {
+                const int sn = juce::jmin (AuxLaneParams::kMaxLanePlugins, slots.size());
+                for (int p = 0; p < sn; ++p)
+                {
+                    auto sv = slots[p];
+                    if (! sv.isObject()) continue;
+                    lane.pluginDescriptionXml[(size_t) p] = sv["plugin_desc_xml"].toString();
+                    lane.pluginStateBase64[(size_t) p]    = sv["plugin_state"]   .toString();
+                }
+            }
+        }
     }
     if (auto master = root["master"]; master.isObject())
     {

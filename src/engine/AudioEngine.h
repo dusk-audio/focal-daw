@@ -5,7 +5,8 @@
 #include <array>
 #include <atomic>
 #include <vector>
-#include "../dsp/AuxBusStrip.h"
+#include "../dsp/AuxLaneStrip.h"
+#include "../dsp/BusStrip.h"
 #include "../dsp/ChannelStrip.h"
 #include "../dsp/MasterBus.h"
 #include "../dsp/MasteringChain.h"
@@ -24,11 +25,13 @@ namespace focal
 class AudioEngine final : public juce::AudioIODeviceCallback
 {
 public:
-    // Workflow stages - drives which signal flow the audio callback runs.
-    // Recording / Mixing share the live track-to-master path (input + disk
-    // playback into channel strips → aux / master); Mastering swaps that
-    // for stereo file → MasteringChain → output.
-    enum class Stage { Recording, Mixing, Mastering };
+    // Workflow stages - drives which signal flow the audio callback runs
+    // AND which view the UI shows. Recording / Mixing / Aux share the live
+    // track-to-master path (input + disk playback into channel strips →
+    // bus / aux lanes / master); only the visible UI changes between them.
+    // Mastering swaps the signal flow entirely for stereo file →
+    // MasteringChain → output.
+    enum class Stage { Recording, Mixing, Aux, Mastering };
 
     explicit AudioEngine (Session& sessionToBindTo);
     ~AudioEngine() override;
@@ -70,8 +73,10 @@ public:
     // still owns the strips; this is just a typed accessor.
     ChannelStrip&       getStrip (int idx)       noexcept { return strips[(size_t) idx]; }
     const ChannelStrip& getStrip (int idx) const noexcept { return strips[(size_t) idx]; }
-    AuxBusStrip&        getAuxStrip (int idx)       noexcept { return auxStrips[(size_t) idx]; }
-    const AuxBusStrip&  getAuxStrip (int idx) const noexcept { return auxStrips[(size_t) idx]; }
+    BusStrip&        getBusStrip (int idx)       noexcept { return busStrips[(size_t) idx]; }
+    const BusStrip&  getBusStrip (int idx) const noexcept { return busStrips[(size_t) idx]; }
+    AuxLaneStrip&        getAuxLaneStrip (int idx)       noexcept { return auxLaneStrips[(size_t) idx]; }
+    const AuxLaneStrip&  getAuxLaneStrip (int idx) const noexcept { return auxLaneStrips[(size_t) idx]; }
 
     // Convenience for the UI; runs on the message thread. Coordinates the
     // RecordManager / PlaybackEngine state changes around Transport.
@@ -155,11 +160,13 @@ private:
     std::atomic<Stage> stage { Stage::Mixing };
 
     std::array<ChannelStrip, Session::kNumTracks> strips;
-    std::array<AuxBusStrip,  Session::kNumAuxBuses> auxStrips;
+    std::array<BusStrip,  Session::kNumBuses> busStrips;
+    std::array<AuxLaneStrip, Session::kNumAuxLanes> auxLaneStrips;
     MasterBus master;
 
     std::vector<float> mixL, mixR;
-    std::array<std::vector<float>, Session::kNumAuxBuses> auxL, auxR;
+    std::array<std::vector<float>, Session::kNumBuses> busL, busR;
+    std::array<std::vector<float>, Session::kNumAuxLanes> auxLaneL, auxLaneR;
     std::vector<float> playbackScratch;  // per-track playback read scratch
 
     std::atomic<double> currentSampleRate { 0.0 };

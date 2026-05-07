@@ -92,7 +92,8 @@ void openFileChooser (PluginSlot& slot,
 void openPickerMenu (PluginSlot& slot,
                       juce::Component& target,
                       std::unique_ptr<juce::FileChooser>& chooserOwner,
-                      std::function<void()> onChange)
+                      std::function<void()> onChange,
+                      juce::Point<int> screenPosition)
 {
     auto& manager = slot.getManagerForUi();
     auto& known   = manager.getKnownPluginList();
@@ -120,8 +121,19 @@ void openPickerMenu (PluginSlot& slot,
     auto* chooserOwnerPtr = &chooserOwner;
     auto onChangeCopy = onChange;
 
-    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&target),
-        [slotPtr, safeTarget, chooserOwnerPtr, onChangeCopy = std::move (onChangeCopy)] (int result) mutable
+    // Anchor on click position when supplied (large click-target buttons
+    // would otherwise drop the menu at their top-left), otherwise on the
+    // component's bounds.
+    auto options = juce::PopupMenu::Options();
+    if (screenPosition.x >= 0 && screenPosition.y >= 0)
+        options = options.withTargetScreenArea (
+            juce::Rectangle<int> (screenPosition.x, screenPosition.y, 1, 1));
+    else
+        options = options.withTargetComponent (&target);
+
+    menu.showMenuAsync (options,
+        [slotPtr, safeTarget, chooserOwnerPtr, onChangeCopy = std::move (onChangeCopy),
+         screenPosition] (int result) mutable
         {
             if (safeTarget.getComponent() == nullptr) return;  // host UI gone
             if (result == 0) return;  // cancelled
@@ -129,9 +141,12 @@ void openPickerMenu (PluginSlot& slot,
             {
                 runScanModal (slotPtr->getManagerForUi());
                 // Reopen the picker so the user immediately sees the newly
-                // scanned plugins without a second click.
+                // scanned plugins without a second click. Preserve the
+                // original anchor so the reopened menu lands in the same
+                // visual spot.
                 openPickerMenu (*slotPtr, *safeTarget.getComponent(),
-                                  *chooserOwnerPtr, std::move (onChangeCopy));
+                                  *chooserOwnerPtr, std::move (onChangeCopy),
+                                  screenPosition);
                 return;
             }
             if (result == kIdBrowseFile)

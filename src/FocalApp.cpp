@@ -86,19 +86,30 @@ public:
         juce::AlertWindow::showAsync (opts,
             [main] (int picked)
             {
-                // showAsync's callback gets the 0-based index of the button
-                // pressed. Buttons were added in order:
-                //   0 = Don't quit   (cancel)
-                //   1 = Just quit    (discard + close)
-                //   2 = Save and quit
-                // Any other return code is treated as cancel for safety.
+                // showAsync's callback receives JUCE's button result code,
+                // NOT a 0-based index. For three buttons added in order
+                // [Don't quit, Just quit, Save and quit] the codes are:
+                //   button[0] (Don't quit)    → 1
+                //   button[1] (Just quit)     → 2
+                //   button[2] (Save and quit) → 0
+                // (See juce::AlertWindow::showAsync docs.)
+                // Anything else (Esc, window close on the alert): cancel.
                 if (picked == 1)
                 {
-                    JUCEApplication::getInstance()->systemRequestedQuit();
+                    // Don't quit - do nothing, leave the window open.
                     return;
                 }
                 if (picked == 2)
                 {
+                    // Just quit - close immediately, discarding unsaved work.
+                    JUCEApplication::getInstance()->systemRequestedQuit();
+                    return;
+                }
+                if (picked == 0)
+                {
+                    // Save and quit. saveSessionAndThen handles both the
+                    // sync (existing session) and async (Save As file
+                    // chooser) paths.
                     if (main == nullptr)
                     {
                         JUCEApplication::getInstance()->systemRequestedQuit();
@@ -113,7 +124,7 @@ public:
                     });
                     return;
                 }
-                // picked == 0 (Don't quit) or anything else: do nothing.
+                // Unknown / dismissed: treat as cancel.
             });
     }
 };

@@ -18,6 +18,12 @@ void ChannelStrip::prepare (double sampleRate, int blockSize)
         s.reset (sampleRate, rampSeconds);
         s.setCurrentAndTargetValue (0.0f);
     }
+    for (auto& s : auxSendGain)
+    {
+        s.reset (sampleRate, rampSeconds);
+        s.setCurrentAndTargetValue (0.0f);
+    }
+    for (auto& b : auxSendPre) b = false;
 
     tempMono.assign ((size_t) juce::jmax (1, blockSize), 0.0f);
 
@@ -92,6 +98,19 @@ void ChannelStrip::updateGainTargets() noexcept
     for (int i = 0; i < kNumBuses; ++i)
         busGain[(size_t) i].setTargetValue (
             paramsRef->busAssign[(size_t) i].load (std::memory_order_relaxed) ? 1.0f : 0.0f);
+
+    // Aux sends - per-knob linear gain. -100 dB sentinel (knob fully CCW)
+    // hard-mutes; the inner loop short-circuits zero-gain sends.
+    for (int i = 0; i < kNumAuxSends; ++i)
+    {
+        const float db = paramsRef->auxSendDb[(size_t) i].load (std::memory_order_relaxed);
+        const float g  = (db <= ChannelStripParams::kAuxSendOffDb)
+                            ? 0.0f
+                            : juce::Decibels::decibelsToGain (db);
+        auxSendGain[(size_t) i].setTargetValue (g);
+        auxSendPre[(size_t) i] =
+            paramsRef->auxSendPreFader[(size_t) i].load (std::memory_order_relaxed);
+    }
 }
 
 void ChannelStrip::updateEqParameters() noexcept
@@ -173,6 +192,8 @@ void ChannelStrip::processAndAccumulate (const float* monoIn,
                                          float* masterL, float* masterR,
                                          const std::array<float*, kNumBuses>& busL,
                                          const std::array<float*, kNumBuses>& busR,
+                                         const std::array<float*, kNumAuxSends>& auxLaneL,
+                                         const std::array<float*, kNumAuxSends>& auxLaneR,
                                          int numSamples,
                                          bool passByGate) noexcept
 {
@@ -185,11 +206,13 @@ void ChannelStrip::processAndAccumulate (const float* monoIn,
     if (paramsRef == nullptr || monoIn == nullptr)
     {
         faderGain.setTargetValue (0.0f);
-        for (auto& s : busGain) s.setTargetValue (0.0f);
+        for (auto& s : busGain)     s.setTargetValue (0.0f);
+        for (auto& s : auxSendGain) s.setTargetValue (0.0f);
         for (int i = 0; i < numSamples; ++i)
         {
             faderGain.getNextValue();
-            for (auto& s : busGain) s.getNextValue();
+            for (auto& s : busGain)     s.getNextValue();
+            for (auto& s : auxSendGain) s.getNextValue();
         }
         return;
     }
@@ -204,11 +227,13 @@ void ChannelStrip::processAndAccumulate (const float* monoIn,
     if (! passByGate && ! needsProcessedMono)
     {
         faderGain.setTargetValue (0.0f);
-        for (auto& s : busGain) s.setTargetValue (0.0f);
+        for (auto& s : busGain)     s.setTargetValue (0.0f);
+        for (auto& s : auxSendGain) s.setTargetValue (0.0f);
         for (int i = 0; i < numSamples; ++i)
         {
             faderGain.getNextValue();
-            for (auto& s : busGain) s.getNextValue();
+            for (auto& s : busGain)     s.getNextValue();
+            for (auto& s : auxSendGain) s.getNextValue();
         }
         return;
     }
@@ -274,11 +299,13 @@ void ChannelStrip::processAndAccumulate (const float* monoIn,
         // post-effects signal even when the engineer has IN off (direct
         // hardware monitoring scenario).
         faderGain.setTargetValue (0.0f);
-        for (auto& s : busGain) s.setTargetValue (0.0f);
+        for (auto& s : busGain)     s.setTargetValue (0.0f);
+        for (auto& s : auxSendGain) s.setTargetValue (0.0f);
         for (int i = 0; i < numSamples; ++i)
         {
             faderGain.getNextValue();
-            for (auto& s : busGain) s.getNextValue();
+            for (auto& s : busGain)     s.getNextValue();
+            for (auto& s : auxSendGain) s.getNextValue();
         }
         return;
     }
@@ -297,10 +324,18 @@ void ChannelStrip::processAndAccumulate (const float* monoIn,
         if (busGain[(size_t) a].getCurrentValue() > 0.0f) anyBusActive = true;
         if (busGain[(size_t) a].isSmoothing())            anyBusSmoothing = true;
     }
-
-    if (! anyBusActive && ! anyBusSmoothing)
+    bool anyAuxActive = false;
+    bool anyAuxSmoothing = false;
+    for (int a = 0; a < kNumAuxSends; ++a)
     {
-        // Master-only fast path - no bus accumulation, no maxBusG gating.
+        if (auxSendGain[(size_t) a].getCurrentValue() > 0.0f) anyAuxActive = true;
+        if (auxSendGain[(size_t) a].isSmoothing())            anyAuxSmoothing = true;
+    }
+
+    if (! anyBusActive && ! anyBusSmoothing && ! anyAuxActive && ! anyAuxSmoothing)
+    {
+        // Master-only fast path - no bus, no aux. The common steady state
+        // for a track that's just summing direct to master.
         for (int i = 0; i < numSamples; ++i)
         {
             const float fg = faderGain.getNextValue();
@@ -316,9 +351,17 @@ void ChannelStrip::processAndAccumulate (const float* monoIn,
     for (int i = 0; i < numSamples; ++i)
     {
         const float fg = faderGain.getNextValue();
-        const float gL = panGainL.getNextValue() * fg;
-        const float gR = panGainR.getNextValue() * fg;
+        // Capture pan-only gains so we can build pre-fader stereo for the
+        // aux sends without ticking the smoother twice. wetL/wetR include
+        // the fader; wetLPre/wetRPre are post-pan, pre-fader (used by aux
+        // sends with auxSendPre[i]==true).
+        const float pL = panGainL.getNextValue();
+        const float pR = panGainR.getNextValue();
+        const float gL = pL * fg;
+        const float gR = pR * fg;
         const float sIn = tempMono[(size_t) i];
+        const float wetLPre = sIn * pL;
+        const float wetRPre = sIn * pR;
         const float wetL = sIn * gL;
         const float wetR = sIn * gR;
 
@@ -347,6 +390,27 @@ void ChannelStrip::processAndAccumulate (const float* monoIn,
             {
                 busL[(size_t) a][i] += wetL * perBusG[a];
                 busR[(size_t) a][i] += wetR * perBusG[a];
+            }
+        }
+
+        // Aux sends. Each send's gain ticks every sample so a knob ramp is
+        // smooth; pre/post-fader is captured per-block (auxSendPre[]). A
+        // send is independent of bus-vs-master routing - turning up an aux
+        // send doesn't reduce the master / bus signal, since auxes are FX
+        // returns that mix back into master via their own AuxLaneStrip pass.
+        for (int a = 0; a < kNumAuxSends; ++a)
+        {
+            const float sg = auxSendGain[(size_t) a].getNextValue();
+            if (sg <= 0.0f) continue;
+            if (auxSendPre[(size_t) a])
+            {
+                auxLaneL[(size_t) a][i] += wetLPre * sg;
+                auxLaneR[(size_t) a][i] += wetRPre * sg;
+            }
+            else
+            {
+                auxLaneL[(size_t) a][i] += wetL * sg;
+                auxLaneR[(size_t) a][i] += wetR * sg;
             }
         }
     }
