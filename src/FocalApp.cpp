@@ -5,6 +5,9 @@
 #include "ui/WindowState.h"
 #include "engine/AudioEngine.h"
 #include "engine/AudioPipelineSelfTest.h"
+#if defined(__linux__)
+ #include "engine/alsa/AlsaAudioIODeviceType.h"
+#endif
 #include "session/Session.h"
 
 #include <cstdio>
@@ -203,6 +206,22 @@ static void runHeadlessToneTest()
     // switched explicitly below.
     if (const auto err = dm.initialiseWithDefaultDevices (0, 2); err.isNotEmpty())
         std::fprintf (stdout, "init: %s\n", err.toRawUTF8());
+
+    // Register Focal's custom ALSA backend AFTER the default-types init so
+    // JACK + JUCE's ALSA still get auto-registered alongside ours. With
+    // this in place, FOCAL_TONE_BACKEND="ALSA (Focal)" routes the test
+    // tone through our writei path - same code AudioEngine uses.
+    //
+    // JUCE's createDeviceTypesIfNeeded only scans types it auto-registers;
+    // types added later (ours) need an explicit scan before
+    // setAudioDeviceSetup can resolve their device names. The GUI path gets
+    // this for free via AudioDeviceSelectorComponent's first-paint; in
+    // headless we have to do it ourselves.
+   #if defined(__linux__)
+    dm.addAudioDeviceType (std::make_unique<focal::AlsaAudioIODeviceType>());
+    for (auto* type : dm.getAvailableDeviceTypes())
+        if (type != nullptr) type->scanForDevices();
+   #endif
 
     dm.setCurrentAudioDeviceType (backendName, /*treatAsChosen*/ true);
 
