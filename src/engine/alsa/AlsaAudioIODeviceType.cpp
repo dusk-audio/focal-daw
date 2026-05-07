@@ -6,7 +6,7 @@
 namespace focal
 {
 AlsaAudioIODeviceType::AlsaAudioIODeviceType()
-    : juce::AudioIODeviceType ("ALSA (Focal)")
+    : juce::AudioIODeviceType ("ALSA")
 {
 }
 

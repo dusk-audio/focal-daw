@@ -29,15 +29,29 @@ AudioEngine::AudioEngine (Session& sessionToBindTo) : session (sessionToBindTo)
     master.bind (session.master());
     masteringChain.bind (session.mastering());
 
-    // Initialise the device manager FIRST, then optionally register Focal's
-    // custom ALSA backend (Linux only). JUCE's auto-registration only runs
-    // if availableDeviceTypes is empty, so pre-adding ours would suppress
-    // JACK + JUCE's ALSA. We work around that by adding ours AFTER init.
-    // On Linux the dropdown shows three backends: JUCE's "ALSA" (its
-    // patched hw:-only flavour), JACK, and our "ALSA (Focal)". On macOS /
-    // Windows the FOCAL_HAS_FOCAL_ALSA define is absent and the device
-    // manager keeps its default backends (CoreAudio / WASAPI / JACK if
-    // installed).
+    // Linux: pre-register Focal's ALSA backend + JACK BEFORE
+    // initialiseWithDefaultDevices. JUCE's createDeviceTypesIfNeeded only
+    // auto-registers its defaults (which would re-add the stock ALSA path
+    // we don't want) when availableDeviceTypes is empty; pre-adding ours
+    // makes that branch a no-op. We then explicitly call scanForDevices
+    // on each pre-registered type so init's pickCurrentDeviceTypeWithDevices
+    // pass can query device counts without tripping our hasScanned
+    // assertions. The dropdown now shows two backends: "ALSA" (ours) and
+    // "JACK" - no double-listing.
+    //
+    // On macOS / Windows we let JUCE auto-register its native backends
+    // (CoreAudio / WASAPI / ASIO / JACK-if-installed) the standard way -
+    // FOCAL_HAS_FOCAL_ALSA isn't defined there so the pre-registration
+    // path is skipped entirely.
+   #if defined(FOCAL_HAS_FOCAL_ALSA)
+    if (auto* jackType = juce::AudioIODeviceType::createAudioIODeviceType_JACK())
+        deviceManager.addAudioDeviceType (std::unique_ptr<juce::AudioIODeviceType> (jackType));
+    deviceManager.addAudioDeviceType (std::make_unique<AlsaAudioIODeviceType>());
+
+    for (auto* t : deviceManager.getAvailableDeviceTypes())
+        if (t != nullptr) t->scanForDevices();
+   #endif
+
     if (const auto err = deviceManager.initialiseWithDefaultDevices (16, 2);
         err.isNotEmpty())
     {
@@ -45,10 +59,6 @@ AudioEngine::AudioEngine (Session& sessionToBindTo) : session (sessionToBindTo)
                       "[Focal/AudioEngine] device-manager init reported: %s\n",
                       err.toRawUTF8());
     }
-
-   #if defined(FOCAL_HAS_FOCAL_ALSA)
-    deviceManager.addAudioDeviceType (std::make_unique<AlsaAudioIODeviceType>());
-   #endif
 
     deviceManager.addAudioCallback (this);
 }

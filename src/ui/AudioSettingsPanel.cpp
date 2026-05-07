@@ -3,6 +3,9 @@
 #include "SelfTestPanel.h"
 #include "../engine/AudioEngine.h"
 #include "../session/Session.h"
+#if defined(__linux__)
+ #include "../engine/alsa/AlsaAudioIODevice.h"
+#endif
 
 namespace focal
 {
@@ -27,7 +30,7 @@ AudioSettingsPanel::AudioSettingsPanel (juce::AudioDeviceManager& dm,
     // latency but give the kernel more headroom against scheduler jitter.
     for (int p : { 2, 3, 4, 8, 16 })
         periodsCombo.addItem (juce::String (p), p);
-    periodsCombo.setSelectedId (juce::getALSARequestedPeriods(), juce::dontSendNotification);
+    periodsCombo.setSelectedId (AlsaAudioIODevice::getRequestedPeriods(), juce::dontSendNotification);
     periodsCombo.setTooltip ("ALSA period count. Only applies to ALSA backend. "
                               "Increase if you hear xruns or distortion at low "
                               "buffer sizes; decrease for lower latency.");
@@ -188,7 +191,7 @@ void AudioSettingsPanel::applyPeriodsChange()
     const int p = periodsCombo.getSelectedId();
     if (p <= 0) return;
 
-    juce::setALSARequestedPeriods (p);
+    AlsaAudioIODevice::setRequestedPeriods (p);
 
     // Re-open the device with the same setup so setParameters() runs and
     // picks up the new period count. Without this, the change only takes

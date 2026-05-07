@@ -202,27 +202,22 @@ static void runHeadlessToneTest()
                   backendName.toRawUTF8(), deviceName.toRawUTF8(),
                   targetRate, targetBuf, durationMs);
 
-    // Initialise with no channels - we don't care about input here. The
-    // backend-cycle logic in JUCE still enumerates and the type can be
-    // switched explicitly below.
-    if (const auto err = dm.initialiseWithDefaultDevices (0, 2); err.isNotEmpty())
-        std::fprintf (stdout, "init: %s\n", err.toRawUTF8());
-
-    // Register Focal's custom ALSA backend AFTER the default-types init so
-    // JACK + JUCE's ALSA still get auto-registered alongside ours. With
-    // this in place, FOCAL_TONE_BACKEND="ALSA (Focal)" routes the test
-    // tone through our writei path - same code AudioEngine uses.
-    //
-    // JUCE's createDeviceTypesIfNeeded only scans types it auto-registers;
-    // types added later (ours) need an explicit scan before
-    // setAudioDeviceSetup can resolve their device names. The GUI path gets
-    // this for free via AudioDeviceSelectorComponent's first-paint; in
-    // headless we have to do it ourselves.
+    // Linux: pre-register Focal's ALSA backend + JACK before init, same
+    // pattern AudioEngine uses. Stops JUCE's createDeviceTypesIfNeeded
+    // from auto-registering its stock ALSA path (which would collide on
+    // the type-name "ALSA" with ours). Pre-scanning lets init's
+    // pickCurrentDeviceTypeWithDevices read device counts without tripping
+    // hasScanned assertions.
    #if defined(__linux__)
+    if (auto* jackType = juce::AudioIODeviceType::createAudioIODeviceType_JACK())
+        dm.addAudioDeviceType (std::unique_ptr<juce::AudioIODeviceType> (jackType));
     dm.addAudioDeviceType (std::make_unique<focal::AlsaAudioIODeviceType>());
     for (auto* type : dm.getAvailableDeviceTypes())
         if (type != nullptr) type->scanForDevices();
    #endif
+
+    if (const auto err = dm.initialiseWithDefaultDevices (0, 2); err.isNotEmpty())
+        std::fprintf (stdout, "init: %s\n", err.toRawUTF8());
 
     dm.setCurrentAudioDeviceType (backendName, /*treatAsChosen*/ true);
 

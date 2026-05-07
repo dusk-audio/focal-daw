@@ -287,7 +287,7 @@ int AlsaAudioIODevice::getRequestedPeriods() noexcept
 AlsaAudioIODevice::AlsaAudioIODevice (const juce::String& name,
                                         const juce::String& inId,
                                         const juce::String& outId)
-    : juce::AudioIODevice (name, "ALSA (Focal)"),
+    : juce::AudioIODevice (name, "ALSA"),
       juce::Thread ("Focal-ALSA-IO"),
       inputId (inId),
       outputId (outId),
