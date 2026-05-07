@@ -53,6 +53,13 @@ private:
 #endif
     juce::TextButton selfTestButton { "Run Self-Test..." };
 
+    // Rescan button: triggers re-enumeration of all registered audio
+    // backends so freshly plugged-in / removed devices appear in the
+    // dropdowns without restarting Focal. Most relevant for USB hot-plug
+    // on Linux where there's no OS-level notification path; also fine on
+    // mac/Windows since AudioIODeviceType::scanForDevices is universal.
+    juce::TextButton rescanButton  { "Rescan devices" };
+
     // Global effect oversampling - single source of truth for "1× / 2× / 4×
     // across all effects". Default 1× (lowest CPU). 2× / 4× engage internal
     // oversampling on master + aux bus comps and the master tape sat
@@ -70,6 +77,7 @@ private:
 #endif
     void applyOversamplingChange();
     void applyUiScaleChange();
+    void applyRescan();
     void openSelfTest();
 };
 } // namespace focal

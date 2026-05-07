@@ -26,6 +26,12 @@ public:
     juce::AudioIODevice* createDevice (const juce::String& outputDeviceName,
                                         const juce::String& inputDeviceName) override;
 
+    // Re-run device enumeration and notify any registered listeners (which
+    // includes JUCE's AudioDeviceSelectorComponent, so the dropdown
+    // repopulates). The UI's Rescan button calls this after a USB
+    // plug/unplug.
+    void rescan();
+
 private:
     juce::StringArray inputNames, outputNames;
     juce::StringArray inputIds, outputIds;

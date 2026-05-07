@@ -41,6 +41,12 @@ AudioSettingsPanel::AudioSettingsPanel (juce::AudioDeviceManager& dm,
         "- synthetic engine tests + backend cycle."));
     addAndMakeVisible (selfTestButton);
 
+    rescanButton.onClick = [this] { applyRescan(); };
+    rescanButton.setTooltip ("Re-enumerate audio backends and devices. "
+                              "Use after plugging in or removing a USB / "
+                              "Thunderbolt audio interface.");
+    addAndMakeVisible (rescanButton);
+
     // Effect oversampling - global. ComboBox IDs are the literal factor (1,
     // 2, 4) so we read the value back without an extra mapping table.
     // CharPointer_UTF8 wrappers are required because the "×" multiplication
@@ -110,7 +116,7 @@ void AudioSettingsPanel::resized()
 {
     auto area = getLocalBounds();
 
-    // Bottom row: Periods + Oversampling + Self-Test button.
+    // Bottom row: Periods + Oversampling + Rescan + Self-Test buttons.
     auto bottom = area.removeFromBottom (32);
 #if defined(__linux__)
     periodsLabel.setBounds       (bottom.removeFromLeft (180).reduced (4, 4));
@@ -119,6 +125,7 @@ void AudioSettingsPanel::resized()
     oversamplingLabel.setBounds  (bottom.removeFromLeft (160).reduced (4, 4));
     oversamplingCombo.setBounds  (bottom.removeFromLeft (120).reduced (4, 4));
     selfTestButton.setBounds     (bottom.removeFromRight (160).reduced (4, 4));
+    rescanButton.setBounds       (bottom.removeFromRight (140).reduced (4, 4));
 
     // Row above: UI scale slider + hint.
     auto scaleRow = area.removeFromBottom (28);
@@ -149,6 +156,30 @@ void AudioSettingsPanel::applyUiScaleChange()
     const float scale = (float) uiScaleSlider.getValue();
     appconfig::setUiScaleOverride (scale);
     juce::Desktop::getInstance().setGlobalScaleFactor (scale);
+}
+
+void AudioSettingsPanel::applyRescan()
+{
+    // Re-enumerate every registered audio backend. AudioIODeviceType's
+    // scanForDevices() repopulates the type's internal device list; the
+    // listener notification path (fired by callDeviceChangeListeners() on
+    // our ALSA type, and by JUCE's own backends on theirs) tells the
+    // AudioDeviceSelectorComponent to re-query and rebuild its dropdowns.
+    //
+    // We iterate every type rather than only the current one so that
+    // switching backend (e.g. ALSA -> JACK) after a hot-plug still sees
+    // the freshly-enumerated devices on the new backend.
+    const auto& types = deviceManager.getAvailableDeviceTypes();
+    for (auto* type : types)
+        if (type != nullptr)
+            type->scanForDevices();
+
+    // The selector subscribes to AudioDeviceManager change broadcasts,
+    // which fire when setAudioDeviceSetup is called. The cheapest way to
+    // poke it without changing the actual setup is to re-apply the
+    // current setup unchanged.
+    auto setup = deviceManager.getAudioDeviceSetup();
+    deviceManager.setAudioDeviceSetup (setup, /*treatAsChosenDevice*/ false);
 }
 
 #if defined(__linux__)

@@ -1,4 +1,7 @@
 #include "AudioPipelineSelfTest.h"
+#if defined(__linux__)
+ #include "alsa/AlsaAudioIODevice.h"
+#endif
 #include <cmath>
 
 namespace focal
@@ -523,6 +526,16 @@ juce::String AudioPipelineSelfTest::runAll()
     report.add (testChannelRoutingFourOut());
     report.add (testMasterTapeAddsGain());
     report.add ("");
+
+   #if defined(__linux__)
+    // Pure-logic self-test for the Focal-owned ALSA backend. Covers the
+    // converter math, channel-mask routing, hw:CARD,DEV parsing, and the
+    // periods-knob clamping. Real-device opens of the backend are
+    // exercised by the backend cycle below alongside the JUCE-stock
+    // ALSA / JACK paths.
+    report.add (AlsaAudioIODevice::runSelfTest());
+    report.add ("");
+   #endif
 
     // Restore session state, then re-attach the engine BEFORE the backend
     // cycle. Without this, every setCurrentAudioDeviceType / setAudioDeviceSetup
