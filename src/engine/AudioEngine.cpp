@@ -1,4 +1,7 @@
 #include "AudioEngine.h"
+#if defined(FOCAL_HAS_FOCAL_ALSA)
+  #include "alsa/AlsaAudioIODeviceType.h"
+#endif
 #include <cstring>
 
 namespace focal
@@ -26,9 +29,15 @@ AudioEngine::AudioEngine (Session& sessionToBindTo) : session (sessionToBindTo)
     master.bind (session.master());
     masteringChain.bind (session.mastering());
 
-    // Capture the init error string so a backend-open failure (no device,
-    // exclusive-mode contention, missing libjack at runtime) doesn't fail
-    // silently. Empty string == success.
+    // Initialise the device manager FIRST, then optionally register Focal's
+    // custom ALSA backend (Linux only). JUCE's auto-registration only runs
+    // if availableDeviceTypes is empty, so pre-adding ours would suppress
+    // JACK + JUCE's ALSA. We work around that by adding ours AFTER init.
+    // On Linux the dropdown shows three backends: JUCE's "ALSA" (its
+    // patched hw:-only flavour), JACK, and our "ALSA (Focal)". On macOS /
+    // Windows the FOCAL_HAS_FOCAL_ALSA define is absent and the device
+    // manager keeps its default backends (CoreAudio / WASAPI / JACK if
+    // installed).
     if (const auto err = deviceManager.initialiseWithDefaultDevices (16, 2);
         err.isNotEmpty())
     {
@@ -36,6 +45,11 @@ AudioEngine::AudioEngine (Session& sessionToBindTo) : session (sessionToBindTo)
                       "[Focal/AudioEngine] device-manager init reported: %s\n",
                       err.toRawUTF8());
     }
+
+   #if defined(FOCAL_HAS_FOCAL_ALSA)
+    deviceManager.addAudioDeviceType (std::make_unique<AlsaAudioIODeviceType>());
+   #endif
+
     deviceManager.addAudioCallback (this);
 }
 

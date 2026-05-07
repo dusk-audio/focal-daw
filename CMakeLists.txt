@@ -97,6 +97,25 @@ target_sources(Focal PRIVATE
     src/ui/TransportBar.cpp
     src/ui/WindowState.cpp)
 
+# Focal-owned ALSA backend - a juce::AudioIODevice + AudioIODeviceType pair
+# written from scratch using Ardour's libs/backends/alsa/ as a reference for
+# patterns (xrun recovery, sw_params choices, format priority, channel-mask
+# handling) but with no copied code. Replaces JUCE's stock ALSA backend,
+# which is structurally insufficient for hardware-direct studio use across
+# the long tail of audio interfaces.
+#
+# Linux-only: the implementation depends on <alsa/asoundlib.h>. macOS and
+# Windows builds skip it and fall back to the audio backends JUCE provides
+# (CoreAudio / WASAPI). The AudioEngine constructor's registration is
+# similarly guarded by #if defined(__linux__).
+if(UNIX AND NOT APPLE)
+    target_sources(Focal PRIVATE
+        src/engine/alsa/AlsaAudioIODevice.cpp
+        src/engine/alsa/AlsaAudioIODeviceType.cpp)
+    target_link_libraries(Focal PRIVATE asound)
+    target_compile_definitions(Focal PRIVATE FOCAL_HAS_FOCAL_ALSA=1)
+endif()
+
 target_include_directories(Focal PRIVATE
     src
     external/projucer-shim)  # JuceHeader.h shim used by vendored plugin DSP headers
