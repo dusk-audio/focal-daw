@@ -193,14 +193,17 @@ struct ChannelStripParams
     };
     std::array<std::atomic<bool>, kNumAuxSends> auxSendTouched {};
 
-    // Live mute AFTER automation routing. Mute is discrete (no
+    // Live mute / solo AFTER automation routing. Discrete (no
     // interpolation) and the button click is instantaneous (no
     // grab/release), so unlike the continuous params there's no
-    // muteTouched flag - Touch mode for mute simply means "read lane,
-    // and any click writes a new transition point into the lane". The
-    // audio thread reads liveMute for both the strip's gain decision
-    // and the engine's per-strip routing flags.
+    // touched flag - Touch mode for these simply means "read lane,
+    // and any click writes a new transition point into the lane".
+    // The audio thread reads liveMute / liveSolo for both the
+    // strip's gain decision and the engine's per-strip routing
+    // flags. Session::anyTrackSoloed() also scans liveSolo, so
+    // automated solos correctly trigger the global SIP-mute logic.
     mutable std::atomic<bool> liveMute { false };
+    mutable std::atomic<bool> liveSolo { false };
 
     static constexpr float kFaderMinDb       = -100.0f;
     static constexpr float kFaderMaxDb       =  12.0f;

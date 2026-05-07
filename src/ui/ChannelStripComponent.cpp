@@ -541,8 +541,18 @@ ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
     soloButton.onClick = [this]
     {
         // Route through the session-level setter so the counter-backed
-        // anyTrackSoloed() stays in sync with the underlying atom.
+        // path stays current. Note that anyTrackSoloed() now scans
+        // liveSolo so it works with automation-overridden solos too,
+        // but the counter is still updated for consistency.
         session.setTrackSoloed (trackIndex, soloButton.getToggleState());
+
+        // Discrete-param automation capture - same pattern as mute.
+        const int amode = track.automationMode.load (std::memory_order_relaxed);
+        const bool capturing = engine.getTransport().isPlaying()
+            && (amode == (int) AutomationMode::Write
+                || amode == (int) AutomationMode::Touch);
+        if (capturing)
+            captureWritePoint (AutomationParam::Solo, soloButton.getToggleState() ? 1.0f : 0.0f);
     };
     addAndMakeVisible (soloButton);
 
@@ -1449,15 +1459,20 @@ void ChannelStripComponent::timerCallback()
                                     track.strip.pan.load (std::memory_order_relaxed));
         }
 
-        // Mute - discrete param. Sync the button's visual state to
-        // liveMute when the audio engine is driving it (Read or Touch).
-        // In Off / Write the button's state already matches what the
-        // user clicked, and liveMute mirrors it back, so syncing in
-        // those modes is harmless idempotent.
+        // Mute / Solo - discrete params. Sync the button visuals to
+        // liveMute / liveSolo when the audio engine is driving them
+        // (Read or Touch). In Off / Write the button state already
+        // matches the user's clicks and the live atoms mirror them,
+        // so syncing is harmless idempotent in all modes.
         {
             const bool live = track.strip.liveMute.load (std::memory_order_relaxed);
             if (muteButton.getToggleState() != live)
                 muteButton.setToggleState (live, juce::dontSendNotification);
+        }
+        {
+            const bool live = track.strip.liveSolo.load (std::memory_order_relaxed);
+            if (soloButton.getToggleState() != live)
+                soloButton.setToggleState (live, juce::dontSendNotification);
         }
 
         // Aux sends - animate + capture in lockstep with fader / pan.
@@ -1591,6 +1606,7 @@ void ChannelStripComponent::onAutoModeClicked()
     faderSlider.setEnabled (interactive);
     panKnob    .setEnabled (interactive);
     muteButton .setEnabled (interactive);
+    soloButton .setEnabled (interactive);
     for (auto& knob : auxKnobs)
         if (knob != nullptr) knob->setEnabled (interactive);
 

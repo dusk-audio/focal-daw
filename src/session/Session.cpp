@@ -29,7 +29,17 @@ Session::Session()
 
 bool Session::anyTrackSoloed() const noexcept
 {
-    return soloTrackCount.load (std::memory_order_relaxed) > 0;
+    // Scan liveSolo so automated solos count toward the global "any
+    // soloed?" check. liveSolo is written by AudioEngine's per-track
+    // routing block at the top of every callback - a Read-mode lane
+    // overriding manual solo to true is reflected in this scan even
+    // though `setTrackSoloed`'s counter wouldn't capture it. 16
+    // relaxed atomic loads is in the noise compared to the rest of
+    // the per-block work.
+    for (auto& t : tracks)
+        if (t.strip.liveSolo.load (std::memory_order_relaxed))
+            return true;
+    return false;
 }
 
 bool Session::anyBusSoloed() const noexcept

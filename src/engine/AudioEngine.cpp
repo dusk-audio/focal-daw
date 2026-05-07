@@ -436,26 +436,33 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                                   trackParams.liveAuxSendDb[(size_t) i]);
             }
 
-            // Mute - discrete, no Touch flag. Read or Touch reads lane;
-            // Off or Write reads manual. Discrete params return 0.0 or
-            // 1.0 from evaluateLane (after denormalize); we threshold at
-            // 0.5 to a bool. Empty lane falls through to manual.
+            // Mute / Solo - discrete, no Touch flag. Read or Touch reads
+            // lane; Off or Write reads manual. Discrete params return
+            // 0.0 or 1.0 from evaluateLane (after denormalize); we
+            // threshold at 0.5 to a bool. Empty lane falls through to
+            // manual.
+            auto routeDiscrete = [&] (AutomationParam param,
+                                       const std::atomic<bool>& manual,
+                                       std::atomic<bool>& live)
             {
-                const auto& lane = session.track (t).automationLanes[(size_t) AutomationParam::Mute];
+                const auto& lane = session.track (t).automationLanes[(size_t) param];
                 const bool readsLane =
-                       (amode == (int) AutomationMode::Read
-                     || amode == (int) AutomationMode::Touch);
-                const bool effMute = (readsLane && ! lane.points.empty())
-                    ? (evaluateLane (lane, blockStartSamples, AutomationParam::Mute) >= 0.5f)
-                    : trackParams.mute.load (std::memory_order_relaxed);
-                trackParams.liveMute.store (effMute, std::memory_order_relaxed);
-            }
+                       amode == (int) AutomationMode::Read
+                    || amode == (int) AutomationMode::Touch;
+                const bool effective = (readsLane && ! lane.points.empty())
+                    ? (evaluateLane (lane, blockStartSamples, param) >= 0.5f)
+                    : manual.load (std::memory_order_relaxed);
+                live.store (effective, std::memory_order_relaxed);
+            };
+            routeDiscrete (AutomationParam::Mute, trackParams.mute, trackParams.liveMute);
+            routeDiscrete (AutomationParam::Solo, trackParams.solo, trackParams.liveSolo);
         }
 
-        // Reads liveMute - just-routed by the block above, so the strip's
-        // passes / monitorPasses calculation sees automated state.
+        // Reads liveMute / liveSolo - just-routed by the block above, so
+        // the strip's passes / monitorPasses calculation sees automated
+        // mute and solo state.
         const bool muted   = trackParams.liveMute.load (std::memory_order_relaxed);
-        const bool soloed  = trackParams.solo.load (std::memory_order_relaxed);
+        const bool soloed  = trackParams.liveSolo.load (std::memory_order_relaxed);
         const bool armed   = session.track (t).recordArmed.load (std::memory_order_relaxed);
         const bool monitorEnabled = session.track (t).inputMonitor.load (std::memory_order_relaxed);
 
