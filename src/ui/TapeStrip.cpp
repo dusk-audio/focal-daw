@@ -216,6 +216,19 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
     auto col = tracksColumnBounds();
     auto ruler = rulerBounds();
 
+    // Left-click on a marker flag → seek to that marker. Checked before
+    // the region hit-test so a flag overlapping a track row still wins.
+    if (! e.mods.isRightButtonDown())
+    {
+        if (const int markerIdx = hitTestMarker (e.x, e.y); markerIdx >= 0)
+        {
+            const auto& m = session.getMarkers()[(size_t) markerIdx];
+            engine.getTransport().setPlayhead (m.timelineSamples);
+            repaint();
+            return;
+        }
+    }
+
     // Right-click on a region opens a region-specific menu (delete, split).
     // Right-click on empty timeline / ruler opens the loop+punch menu.
     if (e.mods.isRightButtonDown())
@@ -276,6 +289,50 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
             transport.setPunchRange (0, 0);
             transport.setPunchEnabled (false);
         });
+        m.addSeparator();
+        m.addSectionHeader ("Markers");
+        const int hoveredMarkerIdx = hitTestMarker (e.x, e.y);
+        if (hoveredMarkerIdx >= 0)
+        {
+            const auto& mk = session.getMarkers()[(size_t) hoveredMarkerIdx];
+            m.addItem ("Delete \"" + mk.name + "\"",
+                        [safeThis = juce::Component::SafePointer<TapeStrip> (this),
+                         hoveredMarkerIdx]
+                        {
+                            if (safeThis == nullptr) return;
+                            safeThis->session.removeMarker (hoveredMarkerIdx);
+                            safeThis->repaint();
+                        });
+        }
+        m.addItem ("Add marker here",
+                    [safeThis = juce::Component::SafePointer<TapeStrip> (this),
+                     clickedSample]
+                    {
+                        if (safeThis == nullptr) return;
+                        safeThis->session.addMarker (clickedSample);
+                        safeThis->repaint();
+                    });
+        if (! session.getMarkers().empty())
+        {
+            juce::PopupMenu jumpSub;
+            for (int i = 0; i < (int) session.getMarkers().size(); ++i)
+            {
+                const auto& mk = session.getMarkers()[(size_t) i];
+                jumpSub.addItem (mk.name + "  ("
+                                  + juce::String ((int) (mk.timelineSamples / 44100)) + "s)",
+                                  [safeThis = juce::Component::SafePointer<TapeStrip> (this),
+                                   i]
+                                  {
+                                      if (safeThis == nullptr) return;
+                                      const auto& m = safeThis->session.getMarkers();
+                                      if (i < 0 || i >= (int) m.size()) return;
+                                      safeThis->engine.getTransport()
+                                          .setPlayhead (m[(size_t) i].timelineSamples);
+                                      safeThis->repaint();
+                                  });
+            }
+            m.addSubMenu ("Jump to marker", jumpSub);
+        }
         m.addSeparator();
         m.addItem ("Move playhead here", [&transport, clickedSample]
         {
@@ -465,6 +522,12 @@ void TapeStrip::mouseMove (const juce::MouseEvent& e)
 {
     // Cursor feedback so the user can tell where edges/body are without
     // clicking blindly.
+    if (hitTestMarker (e.x, e.y) >= 0)
+    {
+        setMouseCursor (juce::MouseCursor::PointingHandCursor);
+        return;
+    }
+
     const auto hit = hitTestRegion (e.x, e.y);
     switch (hit.op)
     {
@@ -730,6 +793,37 @@ void TapeStrip::paint (juce::Graphics& g)
     drawRange (transport.getPunchIn(),    transport.getPunchOut(),
                 juce::Colour (0xffd05a5a), transport.isPunchEnabled(), "Punch");
 
+    // ── Markers ──
+    // Vertical guideline + flag at the top of the ruler. The line is
+    // drawn before the playhead so the playhead's red sits on top when
+    // they coincide.
+    {
+        g.setFont (juce::Font (juce::FontOptions (10.0f, juce::Font::bold)));
+        for (const auto& marker : session.getMarkers())
+        {
+            const int x = xForSample (marker.timelineSamples);
+            if (x < col.getX() - 80 || x > col.getRight()) continue;
+
+            // Guideline through the track area.
+            g.setColour (marker.colour.withAlpha (0.30f));
+            g.drawVerticalLine (x, (float) col.getY(), (float) getHeight());
+
+            // Flag at the top of the ruler. Width fits the name plus a
+            // small padding; clamp so the flag doesn't go off the right.
+            const int textW  = g.getCurrentFont().getStringWidth (marker.name) + 10;
+            const int flagW  = juce::jlimit (28, 160, textW);
+            const int flagH  = 12;
+            const int flagX  = juce::jmin (x, getWidth() - flagW - 2);
+            juce::Rectangle<int> flag (flagX, 2, flagW, flagH);
+
+            g.setColour (marker.colour);
+            g.fillRoundedRectangle (flag.toFloat(), 2.0f);
+            g.setColour (juce::Colour (0xff181820));
+            g.drawText (marker.name, flag.reduced (4, 0),
+                         juce::Justification::centredLeft, true);
+        }
+    }
+
     // ── Playhead line ──
     const auto playhead = engine.getTransport().getPlayhead();
     const int phX = xForSample (playhead);
@@ -738,6 +832,29 @@ void TapeStrip::paint (juce::Graphics& g)
         g.setColour (juce::Colour (0xffe04040));
         g.drawVerticalLine (phX, 0.0f, (float) getHeight());
     }
+}
+
+int TapeStrip::hitTestMarker (int x, int y) const noexcept
+{
+    auto ruler = rulerBounds();
+    // Flags occupy the top ~14px of the ruler band; ignore clicks below.
+    if (! ruler.contains (x, y) || y > ruler.getY() + 14) return -1;
+
+    const auto& markers = session.getMarkers();
+    // Iterate back-to-front so a later (rightmost) marker wins on overlap,
+    // matching the painter's left-to-right draw order.
+    for (int i = (int) markers.size() - 1; i >= 0; --i)
+    {
+        const int mx = xForSample (markers[(size_t) i].timelineSamples);
+        // Same width math the painter uses, just without a Graphics
+        // context. Slightly looser bound (8 px/char) so hit-testing is
+        // forgiving on the right edge of the flag.
+        const int approxFlagW = juce::jlimit (28, 160,
+            (int) markers[(size_t) i].name.length() * 8 + 12);
+        const int flagX = juce::jmin (mx, getWidth() - approxFlagW - 2);
+        if (x >= flagX && x <= flagX + approxFlagW) return i;
+    }
+    return -1;
 }
 
 bool TapeStrip::copySelectedRegion()

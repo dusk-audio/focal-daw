@@ -371,6 +371,17 @@ bool SessionSerializer::save (const Session& s, const juce::File& target)
     }
     root->setProperty ("aux_lanes", auxLanesArr);
 
+    juce::Array<juce::var> markersArr;
+    for (const auto& m : s.getMarkers())
+    {
+        auto* obj = new juce::DynamicObject();
+        obj->setProperty ("name",   m.name);
+        obj->setProperty ("time",   (juce::int64) m.timelineSamples);
+        obj->setProperty ("colour", colourToHex (m.colour));
+        markersArr.add (juce::var (obj));
+    }
+    root->setProperty ("markers", markersArr);
+
     auto* master = new juce::DynamicObject();
     master->setProperty ("fader_db",     s.master().faderDb.load());
     master->setProperty ("tape_enabled", s.master().tapeEnabled.load());
@@ -481,6 +492,20 @@ bool SessionSerializer::load (Session& s, const juce::File& source)
                     lane.pluginStateBase64[(size_t) p]    = sv["plugin_state"]   .toString();
                 }
             }
+        }
+    }
+    if (auto markersArr = root["markers"]; markersArr.isArray())
+    {
+        s.getMarkers().clear();
+        for (int i = 0; i < markersArr.size(); ++i)
+        {
+            auto v = markersArr[i];
+            if (! v.isObject()) continue;
+            // Use the public addMarker so the inserted-sorted invariant
+            // holds even if the JSON happened to be out of order.
+            const auto idx = s.addMarker ((juce::int64) v["time"], v["name"].toString());
+            if (auto col = v["colour"].toString(); col.isNotEmpty())
+                s.getMarkers()[(size_t) idx].colour = hexToColour (col, juce::Colour (0xffe0a050));
         }
     }
     if (auto master = root["master"]; master.isObject())

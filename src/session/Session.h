@@ -264,6 +264,17 @@ struct AuxLaneParams
     mutable std::atomic<float> meterPostR { -100.0f };
 };
 
+// Timeline marker. Owned exclusively by the message thread; the audio
+// thread never reads markers (it only cares about playhead, loop, punch).
+// Markers are kept sorted by timelineSamples for predictable iteration in
+// the ruler painter and for binary-search hit-testing.
+struct Marker
+{
+    juce::String name;
+    juce::int64  timelineSamples = 0;
+    juce::Colour colour;
+};
+
 struct AuxLane
 {
     juce::String name;
@@ -406,6 +417,18 @@ public:
     AuxLane&       auxLane (int i)       noexcept { jassert (i >= 0 && i < kNumAuxLanes); return auxLanes[(size_t) i]; }
     const AuxLane& auxLane (int i) const noexcept { jassert (i >= 0 && i < kNumAuxLanes); return auxLanes[(size_t) i]; }
 
+    // Markers - message-thread-only timeline labels. addMarker returns the
+    // inserted index; removeMarker / renameMarker are no-ops on out-of-
+    // range indices. findMarkerNear returns -1 when nothing is within the
+    // tolerance window. Markers are kept sorted by timelineSamples so the
+    // ruler painter can iterate left-to-right without an extra sort.
+    std::vector<Marker>&       getMarkers()       noexcept { return markers; }
+    const std::vector<Marker>& getMarkers() const noexcept { return markers; }
+    int  addMarker     (juce::int64 timelineSamples, const juce::String& name = {});
+    void removeMarker  (int index);
+    void renameMarker  (int index, const juce::String& name);
+    int  findMarkerNear (juce::int64 timelineSamples, juce::int64 toleranceSamples) const noexcept;
+
     MasterBusParams& master() noexcept             { return masterParams; }
     const MasterBusParams& master() const noexcept { return masterParams; }
 
@@ -495,6 +518,7 @@ private:
     std::array<Track, kNumTracks> tracks;
     std::array<Bus, kNumBuses> buses;
     std::array<AuxLane, kNumAuxLanes> auxLanes;
+    std::vector<Marker> markers;
     MasterBusParams masterParams;
     MasteringParams masteringParams;
     juce::File sessionDir;

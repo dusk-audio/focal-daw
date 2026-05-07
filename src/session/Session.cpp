@@ -118,4 +118,52 @@ void Session::setSessionDirectory (const juce::File& dir)
     if (! audioDir.exists())
         audioDir.createDirectory();
 }
+
+int Session::addMarker (juce::int64 timelineSamples, const juce::String& name)
+{
+    Marker m;
+    m.timelineSamples = juce::jmax ((juce::int64) 0, timelineSamples);
+    m.name = name.isNotEmpty()
+                ? name
+                : juce::String ("Marker ") + juce::String ((int) markers.size() + 1);
+    // Soft amber - reads cleanly against the dark ruler band and doesn't
+    // collide with the green/blue/orange palette already used for tracks
+    // and loop/punch brackets.
+    m.colour = juce::Colour (0xffe0a050);
+
+    auto it = std::lower_bound (markers.begin(), markers.end(), m.timelineSamples,
+        [] (const Marker& lhs, juce::int64 t) { return lhs.timelineSamples < t; });
+    const int insertedIdx = (int) (it - markers.begin());
+    markers.insert (it, std::move (m));
+    return insertedIdx;
+}
+
+void Session::removeMarker (int index)
+{
+    if (index < 0 || index >= (int) markers.size()) return;
+    markers.erase (markers.begin() + index);
+}
+
+void Session::renameMarker (int index, const juce::String& name)
+{
+    if (index < 0 || index >= (int) markers.size()) return;
+    markers[(size_t) index].name = name;
+}
+
+int Session::findMarkerNear (juce::int64 timelineSamples,
+                              juce::int64 toleranceSamples) const noexcept
+{
+    int closest = -1;
+    juce::int64 closestDist = toleranceSamples;
+    for (int i = 0; i < (int) markers.size(); ++i)
+    {
+        const auto dist = std::abs (markers[(size_t) i].timelineSamples - timelineSamples);
+        if (dist <= closestDist)
+        {
+            closestDist = dist;
+            closest = i;
+        }
+    }
+    return closest;
+}
 } // namespace focal

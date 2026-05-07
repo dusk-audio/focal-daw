@@ -1542,6 +1542,17 @@ void ChannelStripComponent::paint (juce::Graphics& g)
         g.drawRoundedRectangle (compArea.toFloat().reduced (0.5f), 3.0f, 0.8f);
     }
 
+    // SEND box (Mixing stage only) - same framed-block shape as EQ/COMP
+    // with the AUX purple accent so the row reads as a coherent section
+    // instead of floating loose knobs above PAN.
+    if (! auxRowArea.isEmpty())
+    {
+        g.setColour (juce::Colour (0xff1f1d24));
+        g.fillRoundedRectangle (auxRowArea.toFloat(), 3.0f);
+        g.setColour (juce::Colour (0xff9080c0).withAlpha (0.40f));
+        g.drawRoundedRectangle (auxRowArea.toFloat().reduced (0.5f), 3.0f, 0.8f);
+    }
+
     // ── Channel input LED (next to the fader). Shows the pre-fader signal
     //    level so the engineer always sees what's hitting the strip.
     //    Threshold + GR meters live INSIDE the COMP section now, so this is
@@ -1918,15 +1929,25 @@ void ChannelStripComponent::resized()
     //    EQ → COMP → SENDS → PAN → fader.
     if (mixingMode)
     {
-        auxRowLabel.setBounds (area.removeFromTop (11));
-        area.removeFromTop (1);
+        constexpr int kAuxKnobSize  = 24;
+        constexpr int kAuxStaggerY  = 10;     // odd knobs offset down by this much
+        constexpr int kAuxValueH    = 10;
+        constexpr int kAuxBlockH    = kAuxStaggerY + kAuxKnobSize + 2 + kAuxValueH;
+        constexpr int kAuxLabelH    = 11;
+        constexpr int kAuxLabelGap  = 1;
+        constexpr int kAuxRowTotalH = kAuxLabelH + kAuxLabelGap + kAuxBlockH;
 
-        constexpr int kAuxKnobSize = 24;
-        constexpr int kAuxStaggerY = 10;     // odd knobs offset down by this much
-        constexpr int kAuxValueH   = 10;
-        constexpr int kAuxBlockH   = kAuxStaggerY + kAuxKnobSize + 2 + kAuxValueH;
+        // Capture the framed-box bounds for paint() (drawn in the same
+        // style as eqArea / compArea, with the SEND purple accent).
+        auxRowArea = area.removeFromTop (kAuxRowTotalH);
 
-        auto block = area.removeFromTop (kAuxBlockH);
+        // Lay out the label + knob block inside the box, with a small
+        // horizontal padding so the SEND knobs don't kiss the frame.
+        auto inner = auxRowArea.reduced (3, 0);
+        auxRowLabel.setBounds (inner.removeFromTop (kAuxLabelH));
+        inner.removeFromTop (kAuxLabelGap);
+
+        auto block = inner.removeFromTop (kAuxBlockH);
         const int colW = block.getWidth() / ChannelStripParams::kNumAuxSends;
 
         for (int i = 0; i < ChannelStripParams::kNumAuxSends; ++i)
@@ -1948,6 +1969,12 @@ void ChannelStripComponent::resized()
         }
 
         area.removeFromTop (3);
+    }
+    else
+    {
+        // Non-mixing stages don't show the SEND row, so the framed box
+        // disappears with it.
+        auxRowArea = juce::Rectangle<int>();
     }
 
     // The horizontal BUSES region used to live here. Bus toggles now sit in

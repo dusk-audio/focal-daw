@@ -322,6 +322,17 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
         return true;
     }
 
+    // ── Markers: 'M' (no modifiers) drops a marker at the current playhead.
+    // Common DAW shortcut. Skips when typing - the noMods guard means this
+    // only fires when no text editor has focus.
+    if (code == 'M' && noMods)
+    {
+        const auto playhead = engine.getTransport().getPlayhead();
+        session.addMarker (playhead);
+        if (tapeStrip != nullptr) tapeStrip->repaint();
+        return true;
+    }
+
     // ── Window: F11 toggles fullscreen. Walks up to the parent
     // ResizableWindow because that's the layer that owns the OS window
     // state, not MainComponent itself.

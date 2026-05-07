@@ -72,6 +72,9 @@ private:
         RegionOp op  = RegionOp::None;
     };
     RegionHit hitTestRegion (int x, int y) const noexcept;
+    // Marker flag hit-test. Returns the index of the marker whose flag
+    // sits under (x, y), or -1. Tested only inside the ruler band.
+    int hitTestMarker (int x, int y) const noexcept;
     void rebuildPlaybackIfStopped();
     void showRegionContextMenu (const RegionHit&, juce::Point<int> screenPos);
 
