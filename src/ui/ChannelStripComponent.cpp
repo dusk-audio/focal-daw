@@ -518,6 +518,14 @@ ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
     };
     addAndMakeVisible (phaseButton);
 
+    autoModeButton.setTooltip ("Automation mode (Phase 3c-i): OFF or READ. "
+                                "READ replays recorded fader automation and "
+                                "moves the fader on screen.");
+    autoModeButton.onClick = [this] { onAutoModeClicked(); };
+    addAndMakeVisible (autoModeButton);
+    refreshAutoModeButton();
+    displayedLiveFaderDb = track.strip.liveFaderDb.load (std::memory_order_relaxed);
+
     // ── Peak input level readout ──
     inputPeakLabel.setJustificationType (juce::Justification::centred);
     inputPeakLabel.setColour (juce::Label::textColourId, juce::Colour (0xffd0d0d0));
@@ -1333,6 +1341,70 @@ void ChannelStripComponent::timerCallback()
         grPeakLabel.setText ("0.0", juce::dontSendNotification);
         grPeakLabel.setColour (juce::Label::textColourId, juce::Colour (0xff606064));
     }
+
+    // Motor-fader animation: in Read mode, the audio engine writes the
+    // automated dB into liveFaderDb each block. Mirror that into the slider
+    // visually. We avoid driving setValue every tick when nothing is moving
+    // by gating on a 0.05 dB delta - cheap, prevents needless repaints, and
+    // 0.05 dB is well below visual resolution on the strip's vertical fader.
+    {
+        const int amode = track.automationMode.load (std::memory_order_relaxed);
+        const float live = track.strip.liveFaderDb.load (std::memory_order_relaxed);
+        if (amode == (int) AutomationMode::Read
+            && std::abs (live - displayedLiveFaderDb) > 0.05f)
+        {
+            displayedLiveFaderDb = live;
+            faderSlider.setValue (live, juce::dontSendNotification);
+        }
+        else if (amode == (int) AutomationMode::Off)
+        {
+            // Keep displayedLiveFaderDb tracking so a Read->Off transition
+            // doesn't trigger a one-shot bogus setValue on the next tick.
+            displayedLiveFaderDb = live;
+        }
+    }
+}
+
+void ChannelStripComponent::onAutoModeClicked()
+{
+    // 3c-i cycle: OFF -> READ -> OFF. 3c-ii will extend to Write/Touch.
+    const int cur = track.automationMode.load (std::memory_order_relaxed);
+    const int next = (cur == (int) AutomationMode::Off)
+                       ? (int) AutomationMode::Read
+                       : (int) AutomationMode::Off;
+    track.automationMode.store (next, std::memory_order_relaxed);
+    refreshAutoModeButton();
+}
+
+void ChannelStripComponent::refreshAutoModeButton()
+{
+    const int m = track.automationMode.load (std::memory_order_relaxed);
+    const char* label = "OFF";
+    juce::Colour bg (0xff222226);
+    juce::Colour fg (0xff909094);
+    switch (m)
+    {
+        case (int) AutomationMode::Read:
+            label = "READ";
+            bg = juce::Colour (0xff20603a);   // muted green
+            fg = juce::Colour (0xffd0e8d0);
+            break;
+        case (int) AutomationMode::Write:
+            label = "WRITE";
+            bg = juce::Colour (0xff803020);   // muted red - 3c-ii
+            fg = juce::Colour (0xfff0d0c8);
+            break;
+        case (int) AutomationMode::Touch:
+            label = "TOUCH";
+            bg = juce::Colour (0xff806020);   // muted amber - 3c-ii
+            fg = juce::Colour (0xfff0e0c0);
+            break;
+        case (int) AutomationMode::Off:
+        default: break;
+    }
+    autoModeButton.setButtonText (label);
+    autoModeButton.setColour (juce::TextButton::buttonColourId, bg);
+    autoModeButton.setColour (juce::TextButton::textColourOffId, fg);
 }
 
 void ChannelStripComponent::mouseDown (const juce::MouseEvent& e)
@@ -1996,6 +2068,12 @@ void ChannelStripComponent::resized()
     muteButton .setBounds (buttons.removeFromLeft (btnW).reduced (1));
     soloButton .setBounds (buttons.removeFromLeft (btnW).reduced (1));
     phaseButton.setBounds (buttons.reduced (1));
+    area.removeFromBottom (2);
+
+    // Automation mode button - sits as a thin full-width row directly above
+    // M/S/Ø. Single label that mirrors the current mode; click cycles.
+    auto autoRow = area.removeFromBottom (16);
+    autoModeButton.setBounds (autoRow.reduced (1, 0));
     area.removeFromBottom (4);
 
     // Fader + input meter pinned to the bottom of the strip. To the right of

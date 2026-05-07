@@ -138,6 +138,20 @@ private:
     juce::TextButton muteButton    { "M" };
     juce::TextButton soloButton    { "S" };
     juce::TextButton phaseButton   { juce::CharPointer_UTF8 ("\xc3\x98") };  // Ø - phase invert
+
+    // Automation mode cycle: OFF (dark) <-> READ (green). Phase 3c-i wires
+    // only Off/Read; the underlying enum already covers Write/Touch which
+    // 3c-ii will surface here. The label updates to mirror the current
+    // mode (e.g. "OFF", "READ"). Right-click reserved for future per-param
+    // mode picker (also 3c-ii).
+    juce::TextButton autoModeButton { "OFF" };
+    void onAutoModeClicked();
+    void refreshAutoModeButton();
+    // Last live fader dB rendered into the slider, polled in timerCallback
+    // from track.strip.liveFaderDb. We avoid driving setValue every tick
+    // by gating on a small delta - prevents UI churn when manual mode just
+    // mirrors the user's setpoint and nothing is moving.
+    float displayedLiveFaderDb = 0.0f;
     juce::TextButton armButton     { "ARM" };
     juce::TextButton monitorButton { "IN"  };
     juce::TextButton printButton   { "PRINT" };  // print EQ/comp to recording

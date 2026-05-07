@@ -495,6 +495,22 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                                   && session.track (t).printEffects.load (std::memory_order_relaxed);
         strips[(size_t) t].setNeedsProcessedMono (needPrintBuffer);
 
+        // Automation routing: write the effective fader dB into liveFaderDb
+        // BEFORE the strip processes. ChannelStrip reads liveFaderDb as its
+        // smoother target, so an Off-mode strip just sees the manual
+        // setpoint while a Read-mode strip with non-empty fader lane sees
+        // the interpolated automation value at this block's playhead. The
+        // UI fader-display timer also polls liveFaderDb, giving free motor-
+        // fader animation in Read mode without extra wiring.
+        {
+            const int amode = session.track (t).automationMode.load (std::memory_order_relaxed);
+            const auto& fLane = session.track (t).automationLanes[(size_t) AutomationParam::FaderDb];
+            const float effDb = (amode == (int) AutomationMode::Read && ! fLane.points.empty())
+                ? evaluateLane (fLane, blockStartSamples, AutomationParam::FaderDb)
+                : trackParams.faderDb.load (std::memory_order_relaxed);
+            trackParams.liveFaderDb.store (effDb, std::memory_order_relaxed);
+        }
+
         strips[(size_t) t].processAndAccumulate (monoIn,
                                                  mixL.data(), mixR.data(),
                                                  busLPtrs, busRPtrs,

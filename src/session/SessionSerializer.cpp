@@ -18,6 +18,26 @@ juce::Colour hexToColour (const juce::String& s, juce::Colour fallback)
     return juce::Colour (v);
 }
 
+// JSON key for each automation parameter. Stable across spec evolution -
+// renames break sessions on round-trip. Add new params at the end of the
+// enum AND here in the same order; never reuse a retired key.
+static const char* automationParamKey (AutomationParam p) noexcept
+{
+    switch (p)
+    {
+        case AutomationParam::FaderDb:   return "fader_db";
+        case AutomationParam::Pan:       return "pan";
+        case AutomationParam::Mute:      return "mute";
+        case AutomationParam::Solo:      return "solo";
+        case AutomationParam::AuxSend1:  return "aux_send_1";
+        case AutomationParam::AuxSend2:  return "aux_send_2";
+        case AutomationParam::AuxSend3:  return "aux_send_3";
+        case AutomationParam::AuxSend4:  return "aux_send_4";
+        case AutomationParam::kCount:    break;
+    }
+    return "";
+}
+
 juce::DynamicObject::Ptr trackToObject (const Track& t)
 {
     auto* obj = new juce::DynamicObject();
@@ -130,6 +150,33 @@ juce::DynamicObject::Ptr trackToObject (const Track& t)
         regions.add (juce::var (rObj));
     }
     obj->setProperty ("regions", regions);
+
+    // Automation: per-strip mode + one array per non-empty lane. Empty
+    // lanes are omitted to keep session.json compact for the common case
+    // (no automation recorded yet). The "automation" object is omitted
+    // entirely when nothing has been recorded.
+    obj->setProperty ("automation_mode", t.automationMode.load (std::memory_order_relaxed));
+    juce::DynamicObject::Ptr autoObj = new juce::DynamicObject();
+    bool anyLane = false;
+    for (int p = 0; p < kNumAutomationParams; ++p)
+    {
+        const auto& lane = t.automationLanes[(size_t) p];
+        if (lane.points.empty()) continue;
+        juce::Array<juce::var> pts;
+        pts.ensureStorageAllocated ((int) lane.points.size());
+        for (const auto& pt : lane.points)
+        {
+            auto* pObj = new juce::DynamicObject();
+            pObj->setProperty ("t",   (juce::int64) pt.timeSamples);
+            pObj->setProperty ("v",   (double) pt.value);
+            pObj->setProperty ("bpm", (double) pt.recordedAtBPM);
+            pts.add (juce::var (pObj));
+        }
+        autoObj->setProperty (automationParamKey ((AutomationParam) p), pts);
+        anyLane = true;
+    }
+    if (anyLane)
+        obj->setProperty ("automation", juce::var (autoObj.get()));
 
     return obj;
 }
@@ -274,6 +321,47 @@ void restoreTrack (Track& t, const juce::var& v)
         loadF ("vca_attack",    t.strip.compVcaAttack);
         loadF ("vca_release",   t.strip.compVcaRelease);
         loadF ("vca_output",    t.strip.compVcaOutput);
+    }
+
+    // Automation - per-strip mode + per-param point arrays. Lanes not in
+    // the JSON stay empty (default-constructed). 3c-i loads only; 3c-ii
+    // adds Write which mutates lanes mid-play via an atomic-swap pattern.
+    if (v.hasProperty ("automation_mode"))
+        t.automationMode.store ((int) v["automation_mode"], std::memory_order_relaxed);
+    for (auto& lane : t.automationLanes)
+        lane.points.clear();
+    if (auto autoVar = v["automation"]; autoVar.isObject())
+    {
+        for (int p = 0; p < kNumAutomationParams; ++p)
+        {
+            const char* key = automationParamKey ((AutomationParam) p);
+            auto pts = autoVar[key];
+            if (! pts.isArray()) continue;
+            auto& lane = t.automationLanes[(size_t) p];
+            lane.points.reserve ((size_t) pts.size());
+            for (int k = 0; k < pts.size(); ++k)
+            {
+                auto pv = pts[k];
+                if (! pv.isObject()) continue;
+                AutomationPoint pt;
+                pt.timeSamples   = (juce::int64) pv["t"];
+                pt.value         = juce::jlimit (0.0f, 1.0f, (float) (double) pv["v"]);
+                // Spec calls for migrating missing BPM to session BPM at
+                // load. 3c-i never reaches that case in practice (we only
+                // load what we just saved); 3c-iii's BPM-change retime
+                // dialog will tighten this when it lands.
+                pt.recordedAtBPM = pv.hasProperty ("bpm")
+                    ? (float) (double) pv["bpm"]
+                    : 120.0f;
+                lane.points.push_back (pt);
+            }
+            // Belt-and-braces sort - hand-edited JSON or out-of-order
+            // writers can't violate the binary-search invariant in
+            // evaluateLane().
+            std::sort (lane.points.begin(), lane.points.end(),
+                [] (const AutomationPoint& a, const AutomationPoint& b)
+                { return a.timeSamples < b.timeSamples; });
+        }
     }
 
     t.regions.clear();

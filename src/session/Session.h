@@ -9,6 +9,69 @@
 
 namespace focal
 {
+// Console-style automation. Parameters are recorded as performance gestures
+// in Write/Touch mode and replayed in Read mode - no curve drawing UI ever
+// (CLAUDE.md constraint #4). Values are stored normalized 0..1 so the same
+// lane format covers dB-ranged faders, pan, send levels, and binary mute /
+// solo states; per-param normalize / denormalize bridges the storage.
+enum class AutomationMode : int { Off = 0, Read = 1, Write = 2, Touch = 3 };
+
+// The fixed set of automatable per-channel parameters. EQ, Comp, HPF and bus
+// assigns are deliberately NOT automatable per Focal.md - the console
+// metaphor wants automation on dynamics gestures (level / position / on-off),
+// not on tone-shaping. AuxSend1..4 maps onto the existing 4 aux-send knobs.
+enum class AutomationParam : int
+{
+    FaderDb = 0,
+    Pan,
+    Mute,
+    Solo,
+    AuxSend1,
+    AuxSend2,
+    AuxSend3,
+    AuxSend4,
+    kCount
+};
+
+constexpr int kNumAutomationParams = (int) AutomationParam::kCount;
+
+// Continuous params (fader / pan / sends) are linearly interpolated on read
+// and RDP-thinned on write. Discrete params (mute / solo) have no
+// interpolation and skip RDP because intermediate values would break the
+// binary semantic. Used by the thinning pipeline that lands in 3c-iii.
+constexpr bool isContinuousParam (AutomationParam p) noexcept
+{
+    return p != AutomationParam::Mute && p != AutomationParam::Solo;
+}
+
+struct AutomationPoint
+{
+    juce::int64 timeSamples   = 0;
+    float       value         = 0.0f;     // normalized 0..1 (see normalize/denormalize helpers)
+    float       recordedAtBPM = 120.0f;   // canonical BPM for retime; on-load default = session BPM
+};
+
+// One lane per automatable param, per track. Points are kept sorted by
+// timeSamples; binary-search at lookup. For 3c-i this vector is mutated
+// only at session-load time (transport stopped), so the audio thread reads
+// it without synchronisation. When 3c-ii adds Write, the writer thread will
+// assemble a new vector off-thread and swap via an atomic pointer (the
+// PluginSlot::currentInstance pattern) so the audio thread always sees a
+// consistent snapshot.
+struct AutomationLane
+{
+    std::vector<AutomationPoint> points;
+};
+
+// Returns the denormalized value (dB / -1..+1 / 0-or-1 / dB+sentinel) at
+// the given timeline sample. Linear interpolation between bracketing points
+// for continuous params; step (hold-previous) for discrete params. Outside
+// the lane's range, holds the first / last point's value. An empty lane is
+// the caller's signal to skip the override; this function returns 0 in that
+// case but callers must gate on `lane.points.empty()` first.
+float evaluateLane (const AutomationLane& lane, juce::int64 t,
+                    AutomationParam param) noexcept;
+
 // Phase 1a-minimal channel strip parameters: fader, pan, mute, solo. The full
 // strip (HPF, 4-band EQ, FET/Opto compressor, sends, bus assigns) lands in
 // later chunks once the DSP cores are lifted out of the Dusk plugins repo.
@@ -96,6 +159,16 @@ struct ChannelStripParams
     // VCA / Opto don't need this dance - their makeup parameter is independent
     // of threshold - but we still write here for consistency / save-state.
     std::atomic<float> compMakeupDb    { 0.0f };
+
+    // Effective live fader value (dB) AFTER any automation routing. Written
+    // by AudioEngine at the top of every block: in Off mode it mirrors
+    // `faderDb`; in Read mode it carries the automated value from the lane.
+    // ChannelStrip reads THIS, not faderDb, so the Off/Read hand-off stays
+    // local to the engine. The UI's fader-display timer also polls this
+    // atom, giving free motor-fader animation in Read mode without extra
+    // wiring. `mutable` so a const ChannelStripParams* (the audio-thread
+    // const-ref) can still write it (same pattern as the meter atomics).
+    mutable std::atomic<float> liveFaderDb { 0.0f };
 
     static constexpr float kFaderMinDb       = -100.0f;
     static constexpr float kFaderMaxDb       =  12.0f;
@@ -201,6 +274,19 @@ struct Track
     // input is resolved; left at -100 for mono / midi tracks. The UI uses
     // this to render a 2nd LED bar alongside the fader for stereo tracks.
     std::atomic<float> meterInputRDb { -100.0f };
+
+    // Per-strip automation engagement. Stored as int because the atomic-bool
+    // pattern doesn't extend to 4 states, and we keep the same lock-free
+    // contract (UI mutates with relaxed; audio thread reads with relaxed).
+    // 3c-i wires Off + Read; Write/Touch reserved for 3c-ii (UI greys them).
+    std::atomic<int> automationMode { 0 };  // AutomationMode cast to int
+
+    // Per-parameter automation lanes. Indexed by AutomationParam. The points
+    // vector is mutated only on the message thread, and only while transport
+    // is stopped (3c-i: only via session load). The audio thread reads it
+    // through a const ref. When 3c-ii adds Write, this becomes a swap-load
+    // pattern with an atomic shared_ptr<const AutomationLane> like PluginSlot.
+    std::array<AutomationLane, kNumAutomationParams> automationLanes {};
 };
 
 // Aux bus surface. Phase 1a: fader + mute + solo + 3-band EQ + bus comp + pan

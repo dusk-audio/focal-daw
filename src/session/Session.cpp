@@ -166,4 +166,76 @@ int Session::findMarkerNear (juce::int64 timelineSamples,
     }
     return closest;
 }
+
+namespace
+{
+// Per-param normalize / denormalize. value lives in 0..1 in the lane so the
+// JSON schema and thinning constants stay range-independent.
+float denormalizeAutomation (AutomationParam p, float v) noexcept
+{
+    v = juce::jlimit (0.0f, 1.0f, v);
+    switch (p)
+    {
+        case AutomationParam::FaderDb:
+            return ChannelStripParams::kFaderMinDb
+                 + v * (ChannelStripParams::kFaderMaxDb - ChannelStripParams::kFaderMinDb);
+
+        case AutomationParam::Pan:
+            return v * 2.0f - 1.0f;
+
+        case AutomationParam::Mute:
+        case AutomationParam::Solo:
+            return v >= 0.5f ? 1.0f : 0.0f;
+
+        case AutomationParam::AuxSend1:
+        case AutomationParam::AuxSend2:
+        case AutomationParam::AuxSend3:
+        case AutomationParam::AuxSend4:
+            // Below the bottom of the visible range we snap to the off
+            // sentinel so the audio thread can short-circuit silent sends.
+            if (v <= 0.0f)
+                return ChannelStripParams::kAuxSendOffDb;
+            return ChannelStripParams::kAuxSendMinDb
+                 + v * (ChannelStripParams::kAuxSendMaxDb - ChannelStripParams::kAuxSendMinDb);
+
+        case AutomationParam::kCount:
+            break;
+    }
+    return 0.0f;
+}
+} // namespace
+
+float evaluateLane (const AutomationLane& lane, juce::int64 t,
+                    AutomationParam param) noexcept
+{
+    const auto& pts = lane.points;
+    if (pts.empty()) return 0.0f;
+
+    // Hold-first below the lane, hold-last above it.
+    if (t <= pts.front().timeSamples)
+        return denormalizeAutomation (param, pts.front().value);
+    if (t >= pts.back().timeSamples)
+        return denormalizeAutomation (param, pts.back().value);
+
+    // Binary search for the bracket [lo, hi] s.t. lo.t <= t < hi.t. Lane is
+    // sorted ascending by timeSamples (invariant maintained by the writer
+    // and by SessionSerializer::load); std::lower_bound gives the first
+    // point with timeSamples >= t, then back up by one for the lower side.
+    auto it = std::lower_bound (pts.begin(), pts.end(), t,
+        [] (const AutomationPoint& pt, juce::int64 q) { return pt.timeSamples < q; });
+    if (it == pts.begin())
+        return denormalizeAutomation (param, pts.front().value);
+    const auto& hi = *it;
+    const auto& lo = *(it - 1);
+
+    if (! isContinuousParam (param))
+        return denormalizeAutomation (param, lo.value);   // hold-previous for discrete
+
+    const auto span = hi.timeSamples - lo.timeSamples;
+    if (span <= 0)
+        return denormalizeAutomation (param, hi.value);
+    const float frac = (float) ((double) (t - lo.timeSamples) / (double) span);
+    const float v = lo.value + frac * (hi.value - lo.value);
+    return denormalizeAutomation (param, v);
+}
 } // namespace focal
