@@ -341,6 +341,7 @@ void FocalApp::initialise (const juce::String&)
         if (const auto* v = std::getenv ("FOCAL_ALSA_PERF_RATE"))        opts.sampleRate    = (unsigned int) juce::String (v).getIntValue();
         if (const auto* v = std::getenv ("FOCAL_ALSA_PERF_DURATION_MS")) opts.durationMs    = juce::String (v).getIntValue();
         if (const auto* v = std::getenv ("FOCAL_ALSA_PERF_LOAD_US"))     opts.fakeDspLoadUs = juce::String (v).getIntValue();
+        if (const auto* v = std::getenv ("FOCAL_ALSA_PERF_LOOPBACK"))    opts.runLoopback   = juce::String (v).getIntValue() != 0;
 
         const auto report = focal::AlsaPerformanceTest::runAll (opts);
         std::fprintf (stdout, "%s\n", report.toRawUTF8());

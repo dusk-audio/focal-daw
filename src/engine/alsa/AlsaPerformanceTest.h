@@ -48,16 +48,34 @@ public:
         int              fakeDspLoadUs   = 0;        // synthetic CPU work in callback
         int              openCloseCycles = 50;
         int              startStopCycles = 20;
+        bool             runLoopback     = false;    // require user-supplied loopback path
         juce::Array<int> bufferSizes;                // empty -> use default ladder
     };
 
+    // Loopback round-trip measurement. Only meaningful when there is a
+    // physical loopback cable plugged from the device's first output to its
+    // first input, OR snd-aloop is loaded and the deviceId points at the
+    // loopback card. Without loopback the burst goes nowhere and signalDetected
+    // stays false.
+    struct LoopbackResult
+    {
+        bool         signalDetected = false;
+        int          latencySamples = -1;
+        double       latencyMs      = 0.0;
+        int          burstStartSample = -1;
+        int          firstSignalSample = -1;
+        juce::String details;
+    };
+
     // Run the full Tier 1 suite (buffer sweep + open/close + start/stop)
-    // and return a markdown-style report.
+    // and return a markdown-style report. If opts.runLoopback is true,
+    // also runs the loopback probe and includes results.
     static juce::String runAll (const Options& opts);
 
     // Individual entry points - useful for targeted reruns.
     static juce::Array<Result> runBufferSweep    (const Options& opts);
     static Result              runOpenCloseStress (const Options& opts);
     static Result              runStartStopRace   (const Options& opts);
+    static LoopbackResult      runLoopbackProbe   (const Options& opts);
 };
 } // namespace focal

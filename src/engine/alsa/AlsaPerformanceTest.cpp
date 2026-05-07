@@ -136,20 +136,22 @@ private:
     double              secondsPerTick = 0.0;
 };
 
-// Open + start an AlsaAudioIODevice for an output-only run. Returns nullptr
-// (and sets errorOut) on failure. Caller owns the device, must stop+close.
-std::unique_ptr<AlsaAudioIODevice> openOutputOnly (const juce::String& deviceId,
-                                                     unsigned int sampleRate,
-                                                     int          bufferSize,
-                                                     juce::AudioIODeviceCallback* callback,
-                                                     juce::String& errorOut)
+// Open + start an AlsaAudioIODevice in duplex mode. Both directions opened
+// against the same hw: device id, two channels active each way. Exercises
+// snd_pcm_link, readi, and the deinterleave path - the input data isn't
+// analyzed by the buffer-sweep callback, but going through the code paths
+// is what catches duplex-only bugs (link drift, capture xrun, deinterleave
+// stride). Caller owns the device, must stop+close.
+std::unique_ptr<AlsaAudioIODevice> openDuplex (const juce::String& deviceId,
+                                                  unsigned int sampleRate,
+                                                  int          bufferSize,
+                                                  juce::AudioIODeviceCallback* callback,
+                                                  juce::String& errorOut)
 {
-    // Display name is just for the device's "name" field; the open itself
-    // resolves through outputId. Channel masks: 2 stereo outs, no inputs.
-    auto dev = std::make_unique<AlsaAudioIODevice> (deviceId, /*inId*/ "", /*outId*/ deviceId);
+    auto dev = std::make_unique<AlsaAudioIODevice> (deviceId, /*inId*/ deviceId, /*outId*/ deviceId);
     juce::BigInteger outMask, inMask;
-    outMask.setRange (0, 2, true);  // bits 0 + 1
-    // inMask stays empty
+    outMask.setRange (0, 2, true);  // bits 0 + 1 of output
+    inMask .setRange (0, 2, true);  // bits 0 + 1 of input
 
     const auto err = dev->open (inMask, outMask, (double) sampleRate, bufferSize);
     if (err.isNotEmpty())
@@ -212,7 +214,7 @@ AlsaPerformanceTest::runBufferSweep (const Options& opts)
 
         MeasuringCallback cb (opts.fakeDspLoadUs);
         juce::String openErr;
-        auto dev = openOutputOnly (opts.deviceId, opts.sampleRate, bs, &cb, openErr);
+        auto dev = openDuplex (opts.deviceId, opts.sampleRate, bs, &cb, openErr);
         if (dev == nullptr)
         {
             r.passed   = false;
@@ -256,9 +258,10 @@ AlsaPerformanceTest::runOpenCloseStress (const Options& opts)
 
     for (int i = 0; i < opts.openCloseCycles; ++i)
     {
-        AlsaAudioIODevice dev (opts.deviceId, /*inId*/ "", /*outId*/ opts.deviceId);
+        AlsaAudioIODevice dev (opts.deviceId, /*inId*/ opts.deviceId, /*outId*/ opts.deviceId);
         juce::BigInteger outMask, inMask;
         outMask.setRange (0, 2, true);
+        inMask .setRange (0, 2, true);
 
         const auto err = dev.open (inMask, outMask, (double) opts.sampleRate, 1024);
         if (err.isNotEmpty())
@@ -287,9 +290,10 @@ AlsaPerformanceTest::runStartStopRace (const Options& opts)
     r.testName = "start/stop race";
     r.configuration = juce::String::formatted ("cycles=%d", opts.startStopCycles);
 
-    AlsaAudioIODevice dev (opts.deviceId, /*inId*/ "", /*outId*/ opts.deviceId);
+    AlsaAudioIODevice dev (opts.deviceId, /*inId*/ opts.deviceId, /*outId*/ opts.deviceId);
     juce::BigInteger outMask, inMask;
     outMask.setRange (0, 2, true);
+    inMask .setRange (0, 2, true);
 
     const auto err = dev.open (inMask, outMask, (double) opts.sampleRate, 1024);
     if (err.isNotEmpty())
@@ -326,6 +330,143 @@ AlsaPerformanceTest::runStartStopRace (const Options& opts)
     r.verdict = failures == 0 ? "SAFE"
                                 : juce::String::formatted ("UNSAFE (failed at cycle %d)", failures);
     r.details = juce::String::formatted ("xruns over all cycles: %d", r.xruns);
+    return r;
+}
+
+// Loopback callback: writes silence by default, sends a short 1 kHz burst on
+// output channel 0 after a fixed warmup, scans input channel 0 for the first
+// sample crossing a threshold AFTER the burst was sent. Round-trip latency
+// is the difference between the burst-start sample frame and the first
+// detected input sample frame.
+//
+// Detection threshold of 0.1 (~ -20 dBFS) is well above any reasonable USB
+// interface noise floor (~ -90 dBFS for unconnected inputs). Burst amplitude
+// of 0.7 (~ -3 dBFS) is loud enough to survive a low-gain input stage and
+// short enough (one period) that it doesn't dominate the test runtime.
+namespace
+{
+class LoopbackCallback final : public juce::AudioIODeviceCallback
+{
+public:
+    void audioDeviceAboutToStart (juce::AudioIODevice* dev) override
+    {
+        sampleRate = dev->getCurrentSampleRate();
+        callbackCount.store (0, std::memory_order_relaxed);
+        burstStartSample.store (-1, std::memory_order_relaxed);
+        firstSignalSample.store (-1, std::memory_order_relaxed);
+    }
+
+    void audioDeviceStopped() override {}
+
+    void audioDeviceIOCallbackWithContext (const float* const* inputChannelData,
+                                            int numInputChannels,
+                                            float* const* outputChannelData,
+                                            int numOutputChannels,
+                                            int numSamples,
+                                            const juce::AudioIODeviceCallbackContext&) override
+    {
+        const int cb = callbackCount.fetch_add (1, std::memory_order_relaxed);
+        const int currentSampleStart = cb * numSamples;
+
+        // Output: silence everywhere except the burst callback.
+        for (int ch = 0; ch < numOutputChannels; ++ch)
+            if (outputChannelData[ch] != nullptr)
+                std::memset (outputChannelData[ch], 0, sizeof (float) * (size_t) numSamples);
+
+        if (cb == kBurstCallback && numOutputChannels > 0 && outputChannelData[0] != nullptr
+            && sampleRate > 0.0)
+        {
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const double t = (double) (currentSampleStart + i) / sampleRate;
+                const float  v = (float) (kBurstAmplitude * std::sin (2.0 * juce::MathConstants<double>::pi * 1000.0 * t));
+                outputChannelData[0][i] = v;
+            }
+            burstStartSample.store (currentSampleStart, std::memory_order_release);
+        }
+
+        // Input: only scan once a burst has been queued. acquire pairs with
+        // the release in the burst-send branch so we never see a partially-
+        // written burstStartSample.
+        if (firstSignalSample.load (std::memory_order_relaxed) < 0
+             && burstStartSample.load (std::memory_order_acquire) >= 0
+             && numInputChannels > 0
+             && inputChannelData[0] != nullptr)
+        {
+            for (int i = 0; i < numSamples; ++i)
+            {
+                if (std::abs (inputChannelData[0][i]) > kSignalThreshold)
+                {
+                    firstSignalSample.store (currentSampleStart + i, std::memory_order_relaxed);
+                    break;
+                }
+            }
+        }
+    }
+
+    int  getBurstStartSample()  const { return burstStartSample .load (std::memory_order_acquire); }
+    int  getFirstSignalSample() const { return firstSignalSample.load (std::memory_order_acquire); }
+    int  getTotalCallbacks()    const { return callbackCount    .load (std::memory_order_acquire); }
+
+private:
+    static constexpr int    kBurstCallback   = 100;   // ~2s warmup at 1024/48k
+    static constexpr float  kSignalThreshold = 0.1f;  // ~ -20 dBFS
+    static constexpr double kBurstAmplitude  = 0.7;   // ~ -3 dBFS
+
+    double sampleRate = 0.0;
+    std::atomic<int> callbackCount     { 0 };
+    std::atomic<int> burstStartSample  { -1 };
+    std::atomic<int> firstSignalSample { -1 };
+};
+} // namespace
+
+AlsaPerformanceTest::LoopbackResult
+AlsaPerformanceTest::runLoopbackProbe (const Options& opts)
+{
+    LoopbackResult r;
+
+    LoopbackCallback cb;
+    juce::String openErr;
+    // Use a moderate buffer (1024) so the warmup callback budget gives the
+    // device time to start streaming cleanly before we send the burst.
+    auto dev = openDuplex (opts.deviceId, opts.sampleRate, 1024, &cb, openErr);
+    if (dev == nullptr)
+    {
+        r.details = "open failed: " + openErr;
+        return r;
+    }
+
+    // Run long enough that we're well past the burst callback (100) plus
+    // round-trip latency plus a safety margin. 4 seconds at 1024/48k =
+    // ~187 callbacks; sends burst at #100, leaves ~87 callbacks to detect.
+    juce::Thread::sleep (4000);
+
+    dev->stop();
+    dev->close();
+
+    r.burstStartSample  = cb.getBurstStartSample();
+    r.firstSignalSample = cb.getFirstSignalSample();
+
+    if (r.burstStartSample < 0)
+    {
+        r.details = juce::String::formatted (
+            "burst was never sent (got only %d callbacks, needed >= 101)",
+            cb.getTotalCallbacks());
+        return r;
+    }
+
+    if (r.firstSignalSample < 0)
+    {
+        r.details = "burst sent, but no signal detected on input - check that "
+                    "a loopback path exists (physical cable from output 1 to "
+                    "input 1, or snd-aloop loaded with deviceId pointing at it)";
+        return r;
+    }
+
+    r.signalDetected = true;
+    r.latencySamples = r.firstSignalSample - r.burstStartSample;
+    r.latencyMs      = 1000.0 * (double) r.latencySamples / (double) opts.sampleRate;
+    r.details        = "1 kHz burst at -3 dBFS, threshold 0.1 (-20 dBFS)";
     return r;
 }
 
@@ -387,6 +528,28 @@ juce::String AlsaPerformanceTest::runAll (const Options& opts)
         if (r.details.isNotEmpty()) out.add (juce::String ("        ") + r.details);
     }
     out.add ("");
+
+    if (opts.runLoopback)
+    {
+        out.add ("--- Loopback round-trip probe ---");
+        const auto r = runLoopbackProbe (opts);
+        if (r.signalDetected)
+        {
+            out.add (juce::String::formatted (
+                "  Signal detected: latency %d samples (%.2f ms) at %u Hz",
+                r.latencySamples, r.latencyMs, opts.sampleRate));
+            out.add (juce::String::formatted (
+                "  Burst sent at sample %d, detected at sample %d",
+                r.burstStartSample, r.firstSignalSample));
+        }
+        else
+        {
+            out.add (juce::String ("  No round-trip signal detected"));
+        }
+        if (r.details.isNotEmpty())
+            out.add (juce::String ("  ") + r.details);
+        out.add ("");
+    }
 
     out.add ("=== End of Performance Test ===");
     return out.joinIntoString ("\n");
