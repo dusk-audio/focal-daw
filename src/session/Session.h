@@ -178,6 +178,11 @@ struct ChannelStripParams
     // natural glide back to the lane value.
     std::atomic<bool> faderTouched { false };
 
+    // Live pan value AFTER any automation routing. Same pattern as
+    // liveFaderDb / faderTouched but for the pan knob. Range -1..+1.
+    mutable std::atomic<float> livePan { 0.0f };
+    std::atomic<bool> panTouched { false };
+
     static constexpr float kFaderMinDb       = -100.0f;
     static constexpr float kFaderMaxDb       =  12.0f;
     static constexpr float kFaderInfThreshDb = -90.0f;  // below this we hard-mute

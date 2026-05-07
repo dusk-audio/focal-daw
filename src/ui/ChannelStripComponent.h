@@ -161,6 +161,8 @@ private:
     // by gating on a small delta - prevents UI churn when manual mode just
     // mirrors the user's setpoint and nothing is moving.
     float displayedLiveFaderDb = 0.0f;
+    // Same idea for the pan knob - polled from track.strip.livePan.
+    float displayedLivePan = 0.0f;
     juce::TextButton armButton     { "ARM" };
     juce::TextButton monitorButton { "IN"  };
     juce::TextButton printButton   { "PRINT" };  // print EQ/comp to recording

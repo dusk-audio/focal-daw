@@ -93,7 +93,9 @@ void ChannelStrip::updateGainTargets() noexcept
                        : juce::Decibels::decibelsToGain (faderDb);
     faderGain.setTargetValue (gain);
 
-    const float p     = juce::jlimit (-1.0f, 1.0f, paramsRef->pan.load (std::memory_order_relaxed));
+    // Read livePan (engine routes manual pan or lane value through it),
+    // matching the liveFaderDb pattern.
+    const float p     = juce::jlimit (-1.0f, 1.0f, paramsRef->livePan.load (std::memory_order_relaxed));
     const float angle = (p + 1.0f) * (juce::MathConstants<float>::halfPi * 0.5f);
     panGainL.setTargetValue (std::cos (angle));
     panGainR.setTargetValue (std::sin (angle));

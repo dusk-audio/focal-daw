@@ -469,6 +469,14 @@ ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
     {
         track.strip.pan.store ((float) panKnob.getValue(), std::memory_order_relaxed);
     };
+    panKnob.onDragStart = [this]
+    {
+        track.strip.panTouched.store (true, std::memory_order_release);
+    };
+    panKnob.onDragEnd = [this]
+    {
+        track.strip.panTouched.store (false, std::memory_order_release);
+    };
     addAndMakeVisible (panKnob);
 
     faderSlider.setRange (ChannelStripParams::kFaderMinDb, ChannelStripParams::kFaderMaxDb, 0.1);
@@ -535,13 +543,15 @@ ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
     };
     addAndMakeVisible (phaseButton);
 
-    autoModeButton.setTooltip ("Automation mode (Phase 3c-i): OFF or READ. "
-                                "READ replays recorded fader automation and "
-                                "moves the fader on screen.");
+    autoModeButton.setTooltip ("Automation: OFF -> READ -> WRITE -> TOUCH -> OFF. "
+                                "READ replays the recorded ride; WRITE captures "
+                                "fader+pan moves; TOUCH replays until you grab a "
+                                "control, then captures while held.");
     autoModeButton.onClick = [this] { onAutoModeClicked(); };
     addAndMakeVisible (autoModeButton);
     refreshAutoModeButton();
     displayedLiveFaderDb = track.strip.liveFaderDb.load (std::memory_order_relaxed);
+    displayedLivePan     = track.strip.livePan    .load (std::memory_order_relaxed);
 
     // ── Peak input level readout ──
     inputPeakLabel.setJustificationType (juce::Justification::centred);
@@ -1359,55 +1369,61 @@ void ChannelStripComponent::timerCallback()
         grPeakLabel.setColour (juce::Label::textColourId, juce::Colour (0xff606064));
     }
 
-    // Motor-fader animation: when the audio engine is feeding liveFaderDb
-    // from a lane (Read, or Touch when not grabbed), mirror that into the
-    // slider visually. We avoid driving setValue every tick when nothing
-    // is moving by gating on a 0.05 dB delta - cheap, prevents needless
-    // repaints, and 0.05 dB is well below visual resolution on the strip's
-    // vertical fader. While the user is actively touching the fader in
-    // Touch mode, their gesture IS the value source, so we don't fight it.
+    // Motor-fader / motor-pan animation: when the audio engine is feeding
+    // a live atom from the lane (Read, or Touch when not grabbed), mirror
+    // it into the slider/knob visually. Gate on a small delta to avoid
+    // setValue churn every tick when manual mode just mirrors the user's
+    // setpoint. While the user is grabbing in Touch mode, their gesture
+    // IS the value source, so we don't fight it.
     {
         const int amode = track.automationMode.load (std::memory_order_relaxed);
-        const float live = track.strip.liveFaderDb.load (std::memory_order_relaxed);
-        const bool touched = track.strip.faderTouched.load (std::memory_order_relaxed);
-        const bool animating =
-               amode == (int) AutomationMode::Read
-            || (amode == (int) AutomationMode::Touch && ! touched);
-        if (animating && std::abs (live - displayedLiveFaderDb) > 0.05f)
+        const bool isRead  = amode == (int) AutomationMode::Read;
+        const bool isWrite = amode == (int) AutomationMode::Write;
+        const bool isTouch = amode == (int) AutomationMode::Touch;
+        const bool playing = engine.getTransport().isPlaying();
+
+        // Fader animate / capture.
         {
-            displayedLiveFaderDb = live;
-            faderSlider.setValue (live, juce::dontSendNotification);
-        }
-        else if (! animating)
-        {
-            // Off / Write / Touch-while-grabbed: keep displayedLiveFaderDb
-            // tracking so any switch INTO an animating state doesn't trigger
-            // a one-shot bogus setValue on the next tick.
-            displayedLiveFaderDb = live;
+            const float live    = track.strip.liveFaderDb.load (std::memory_order_relaxed);
+            const bool  touched = track.strip.faderTouched.load (std::memory_order_relaxed);
+            const bool  animating = isRead || (isTouch && ! touched);
+            if (animating && std::abs (live - displayedLiveFaderDb) > 0.05f)
+            {
+                displayedLiveFaderDb = live;
+                faderSlider.setValue (live, juce::dontSendNotification);
+            }
+            else if (! animating)
+            {
+                displayedLiveFaderDb = live;
+            }
+
+            const bool capturing = playing && (isWrite || (isTouch && touched));
+            if (capturing)
+                captureWritePoint (AutomationParam::FaderDb,
+                                    track.strip.faderDb.load (std::memory_order_relaxed));
         }
 
-        // Write / Touch capture: append points to the lane while transport
-        // is playing AND we're in a recording mode. Write captures
-        // continuously; Touch captures only while the user is actively
-        // grabbing the fader (faderTouched). The audio thread routes
-        // manual faderDb whenever it'd be racing with us (Write always,
-        // Touch when faderTouched), so the in-flight vector mutation is
-        // race-free w.r.t. the audio thread for THIS strip's lane. A
-        // release-store on automationMode at mode-out time publishes
-        // the appended points before the audio thread next acquire-loads
-        // Read mode.
-        //
-        // 30 Hz capture is good enough for fader rides; 3c-iii will tighten
-        // to ~64 samples via an audio-thread sampler if gestures look
-        // chunky in practice.
-        const bool isCapturing =
-               amode == (int) AutomationMode::Write
-            || (amode == (int) AutomationMode::Touch
-                && track.strip.faderTouched.load (std::memory_order_relaxed));
-        if (isCapturing && engine.getTransport().isPlaying())
+        // Pan animate / capture. Same shape as fader; threshold is in
+        // pan units (-1..+1), so 0.005 = 0.25 % of the knob's travel,
+        // well below visible.
         {
-            captureWritePoint (AutomationParam::FaderDb,
-                                track.strip.faderDb.load (std::memory_order_relaxed));
+            const float live    = track.strip.livePan.load (std::memory_order_relaxed);
+            const bool  touched = track.strip.panTouched.load (std::memory_order_relaxed);
+            const bool  animating = isRead || (isTouch && ! touched);
+            if (animating && std::abs (live - displayedLivePan) > 0.005f)
+            {
+                displayedLivePan = live;
+                panKnob.setValue (live, juce::dontSendNotification);
+            }
+            else if (! animating)
+            {
+                displayedLivePan = live;
+            }
+
+            const bool capturing = playing && (isWrite || (isTouch && touched));
+            if (capturing)
+                captureWritePoint (AutomationParam::Pan,
+                                    track.strip.pan.load (std::memory_order_relaxed));
         }
     }
 }
@@ -1506,11 +1522,12 @@ void ChannelStripComponent::onAutoModeClicked()
     // thread's acquire-load of the new mode.
     track.automationMode.store (next, std::memory_order_release);
 
-    // Read mode disables the fader slider (spec: "User cannot override").
-    // Off / Write / Touch all leave it interactive: Off + Write are
-    // self-explanatory; Touch lets the user grab the fader to override
-    // the automated value at any moment.
-    faderSlider.setEnabled (next != (int) AutomationMode::Read);
+    // Read mode disables every automated control (spec: "User cannot
+    // override"). Off / Write / Touch leave them interactive so the
+    // user can either ride them (Write) or grab to override (Touch).
+    const bool interactive = next != (int) AutomationMode::Read;
+    faderSlider.setEnabled (interactive);
+    panKnob    .setEnabled (interactive);
 
     refreshAutoModeButton();
 }
