@@ -511,7 +511,18 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         {
             const int amode = session.track (t).automationMode.load (std::memory_order_acquire);
             const auto& fLane = session.track (t).automationLanes[(size_t) AutomationParam::FaderDb];
-            const float effDb = (amode == (int) AutomationMode::Read && ! fLane.points.empty())
+
+            // Touch mode plays the lane back like Read, but instantly
+            // switches to manual faderDb whenever the user grabs the
+            // fader (faderTouched). On release, the strip's existing
+            // 20 ms fader smoother glides from manual back to the lane
+            // value. Pure Read mode never falls back to manual.
+            const bool readsLane =
+                   (amode == (int) AutomationMode::Read)
+                || (amode == (int) AutomationMode::Touch
+                    && ! trackParams.faderTouched.load (std::memory_order_acquire));
+
+            const float effDb = (readsLane && ! fLane.points.empty())
                 ? evaluateLane (fLane, blockStartSamples, AutomationParam::FaderDb)
                 : trackParams.faderDb.load (std::memory_order_relaxed);
             trackParams.liveFaderDb.store (effDb, std::memory_order_relaxed);

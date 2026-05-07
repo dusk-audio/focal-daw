@@ -170,6 +170,14 @@ struct ChannelStripParams
     // const-ref) can still write it (same pattern as the meter atomics).
     mutable std::atomic<float> liveFaderDb { 0.0f };
 
+    // True while the user has the fader slider grabbed (between drag-start
+    // and drag-end). Drives Touch-mode behavior: the audio thread reads
+    // the lane normally, but switches to manual faderDb whenever
+    // faderTouched is true (and the UI captures into the lane during the
+    // touch). On release, the smoother's existing 20 ms ramp gives a
+    // natural glide back to the lane value.
+    std::atomic<bool> faderTouched { false };
+
     static constexpr float kFaderMinDb       = -100.0f;
     static constexpr float kFaderMaxDb       =  12.0f;
     static constexpr float kFaderInfThreshDb = -90.0f;  // below this we hard-mute

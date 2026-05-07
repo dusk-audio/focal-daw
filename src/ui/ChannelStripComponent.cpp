@@ -483,6 +483,22 @@ ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
     {
         track.strip.faderDb.store ((float) faderSlider.getValue(), std::memory_order_relaxed);
     };
+    // Touch-mode hooks: while the user has the fader grabbed, set the
+    // strip's faderTouched flag so the audio engine routes the manual
+    // setpoint instead of the lane (and the timerCallback captures into
+    // the lane while touched). On release, the existing fader smoother's
+    // 20 ms ramp blends from manual back to lane - a fast but smooth
+    // glide. The configurable 100 ms / 500 ms / 1 s glide-back from the
+    // spec is a refinement that lands later if 20 ms feels jarring in
+    // practice.
+    faderSlider.onDragStart = [this]
+    {
+        track.strip.faderTouched.store (true, std::memory_order_release);
+    };
+    faderSlider.onDragEnd = [this]
+    {
+        track.strip.faderTouched.store (false, std::memory_order_release);
+    };
     addAndMakeVisible (faderSlider);
 
     muteButton.setClickingTogglesState (true);
@@ -1343,42 +1359,52 @@ void ChannelStripComponent::timerCallback()
         grPeakLabel.setColour (juce::Label::textColourId, juce::Colour (0xff606064));
     }
 
-    // Motor-fader animation: in Read mode, the audio engine writes the
-    // automated dB into liveFaderDb each block. Mirror that into the slider
-    // visually. We avoid driving setValue every tick when nothing is moving
-    // by gating on a 0.05 dB delta - cheap, prevents needless repaints, and
-    // 0.05 dB is well below visual resolution on the strip's vertical fader.
+    // Motor-fader animation: when the audio engine is feeding liveFaderDb
+    // from a lane (Read, or Touch when not grabbed), mirror that into the
+    // slider visually. We avoid driving setValue every tick when nothing
+    // is moving by gating on a 0.05 dB delta - cheap, prevents needless
+    // repaints, and 0.05 dB is well below visual resolution on the strip's
+    // vertical fader. While the user is actively touching the fader in
+    // Touch mode, their gesture IS the value source, so we don't fight it.
     {
         const int amode = track.automationMode.load (std::memory_order_relaxed);
         const float live = track.strip.liveFaderDb.load (std::memory_order_relaxed);
-        if (amode == (int) AutomationMode::Read
-            && std::abs (live - displayedLiveFaderDb) > 0.05f)
+        const bool touched = track.strip.faderTouched.load (std::memory_order_relaxed);
+        const bool animating =
+               amode == (int) AutomationMode::Read
+            || (amode == (int) AutomationMode::Touch && ! touched);
+        if (animating && std::abs (live - displayedLiveFaderDb) > 0.05f)
         {
             displayedLiveFaderDb = live;
             faderSlider.setValue (live, juce::dontSendNotification);
         }
-        else if (amode != (int) AutomationMode::Read)
+        else if (! animating)
         {
-            // Keep displayedLiveFaderDb tracking so any non-Read -> Read
-            // transition doesn't trigger a one-shot bogus setValue on the
-            // next tick.
+            // Off / Write / Touch-while-grabbed: keep displayedLiveFaderDb
+            // tracking so any switch INTO an animating state doesn't trigger
+            // a one-shot bogus setValue on the next tick.
             displayedLiveFaderDb = live;
         }
 
-        // Write capture: while transport is playing AND the strip is in
-        // Write mode, sample the manual faderDb every Timer tick (~30 Hz)
-        // and append a point to the fader lane. The audio thread routes
-        // manual faderDb to liveFaderDb during Write (it does NOT read
-        // the lane), so the in-flight vector mutation is race-free w.r.t.
-        // the audio thread for THIS strip's lane. A release-store on
-        // automationMode at Write-out time publishes the appended points
-        // before the audio thread next acquire-loads Read mode.
+        // Write / Touch capture: append points to the lane while transport
+        // is playing AND we're in a recording mode. Write captures
+        // continuously; Touch captures only while the user is actively
+        // grabbing the fader (faderTouched). The audio thread routes
+        // manual faderDb whenever it'd be racing with us (Write always,
+        // Touch when faderTouched), so the in-flight vector mutation is
+        // race-free w.r.t. the audio thread for THIS strip's lane. A
+        // release-store on automationMode at mode-out time publishes
+        // the appended points before the audio thread next acquire-loads
+        // Read mode.
         //
         // 30 Hz capture is good enough for fader rides; 3c-iii will tighten
         // to ~64 samples via an audio-thread sampler if gestures look
         // chunky in practice.
-        if (amode == (int) AutomationMode::Write
-            && engine.getTransport().isPlaying())
+        const bool isCapturing =
+               amode == (int) AutomationMode::Write
+            || (amode == (int) AutomationMode::Touch
+                && track.strip.faderTouched.load (std::memory_order_relaxed));
+        if (isCapturing && engine.getTransport().isPlaying())
         {
             captureWritePoint (AutomationParam::FaderDb,
                                 track.strip.faderDb.load (std::memory_order_relaxed));
@@ -1462,28 +1488,28 @@ void ChannelStripComponent::captureWritePoint (AutomationParam param, float deno
 
 void ChannelStripComponent::onAutoModeClicked()
 {
-    // 3c-ii cycle: OFF -> READ -> WRITE -> OFF. Touch lands in 3c-ii(b).
+    // 3c-ii cycle: OFF -> READ -> WRITE -> TOUCH -> OFF.
     const int cur = track.automationMode.load (std::memory_order_relaxed);
     int next = (int) AutomationMode::Off;
     switch ((AutomationMode) cur)
     {
         case AutomationMode::Off:   next = (int) AutomationMode::Read;  break;
         case AutomationMode::Read:  next = (int) AutomationMode::Write; break;
-        case AutomationMode::Write: next = (int) AutomationMode::Off;   break;
+        case AutomationMode::Write: next = (int) AutomationMode::Touch; break;
         case AutomationMode::Touch: next = (int) AutomationMode::Off;   break;
     }
 
-    // When transitioning OUT of Write, the points just appended to the
-    // lane during the Write pass need to be visible to the audio thread
-    // BEFORE it starts reading from the lane (which it will under Read).
-    // The release-store on mode synchronizes those writes - any prior
-    // append to lane.points happens-before the audio thread's acquire-
-    // load of the new mode.
+    // When transitioning OUT of Write or Touch, the points just appended
+    // to the lane need to be visible to the audio thread BEFORE it starts
+    // reading from the lane. The release-store on mode synchronizes those
+    // writes - any prior append to lane.points happens-before the audio
+    // thread's acquire-load of the new mode.
     track.automationMode.store (next, std::memory_order_release);
 
-    // Read mode disables the fader slider (spec: "User cannot override"),
-    // Write mode re-enables it so the user can ride the fader. Off keeps
-    // the manual setpoint live.
+    // Read mode disables the fader slider (spec: "User cannot override").
+    // Off / Write / Touch all leave it interactive: Off + Write are
+    // self-explanatory; Touch lets the user grab the fader to override
+    // the automated value at any moment.
     faderSlider.setEnabled (next != (int) AutomationMode::Read);
 
     refreshAutoModeButton();
