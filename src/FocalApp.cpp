@@ -7,6 +7,7 @@
 #include "engine/AudioPipelineSelfTest.h"
 #if defined(__linux__)
  #include "engine/alsa/AlsaAudioIODeviceType.h"
+ #include "engine/alsa/AlsaPerformanceTest.h"
 #endif
 #include "session/Session.h"
 
@@ -327,6 +328,28 @@ void FocalApp::initialise (const juce::String&)
         quit();
         return;
     }
+
+   #if defined(__linux__)
+    if (envFlagSet ("FOCAL_RUN_ALSA_PERF"))
+    {
+        // Tier 1 ALSA backend perf test. Drives the backend directly (no
+        // AudioDeviceManager involvement, no engine), output-only, silent.
+        // Configurable via env vars - device picks default of hw:0,0 if
+        // none set.
+        focal::AlsaPerformanceTest::Options opts;
+        if (const auto* v = std::getenv ("FOCAL_ALSA_PERF_DEVICE"))      opts.deviceId      = v;
+        if (const auto* v = std::getenv ("FOCAL_ALSA_PERF_RATE"))        opts.sampleRate    = (unsigned int) juce::String (v).getIntValue();
+        if (const auto* v = std::getenv ("FOCAL_ALSA_PERF_DURATION_MS")) opts.durationMs    = juce::String (v).getIntValue();
+        if (const auto* v = std::getenv ("FOCAL_ALSA_PERF_LOAD_US"))     opts.fakeDspLoadUs = juce::String (v).getIntValue();
+
+        const auto report = focal::AlsaPerformanceTest::runAll (opts);
+        std::fprintf (stdout, "%s\n", report.toRawUTF8());
+        std::fflush (stdout);
+
+        quit();
+        return;
+    }
+   #endif
 
     if (envFlagSet ("FOCAL_RUN_PERF_TEST"))
     {
