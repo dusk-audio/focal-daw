@@ -49,7 +49,6 @@ private:
     // startup dialog. All run on the message thread.
     bool saveSessionTo (const juce::File& sessionDir);   // writes session.json, returns true on success
     void saveAsPrompt();                                 // 2-step: name + parent dir
-    void saveAsParentPrompt (const juce::String& sessionName);
     bool loadSessionFromJson (const juce::File& sessionJson);
     // Synchronous tail-half of loadSessionFromJson. Called either directly
     // (no autosave present) or from the autosave recovery prompt's callback

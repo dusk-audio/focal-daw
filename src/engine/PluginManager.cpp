@@ -19,7 +19,8 @@ juce::File PluginManager::getCacheFile() const
 {
     auto cfgDir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
                       .getChildFile ("Focal");
-    if (! cfgDir.exists()) cfgDir.createDirectory();
+    if (! cfgDir.isDirectory() && cfgDir.createDirectory().failed())
+        return {};   // fall back to empty File - load/saveCache become no-ops
     return cfgDir.getChildFile ("plugin-cache.xml");
 }
 

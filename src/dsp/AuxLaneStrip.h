@@ -24,7 +24,18 @@ public:
     AuxLaneStrip() = default;
 
     void prepare (double sampleRate, int blockSize);
-    void bind (const AuxLaneParams& params) noexcept { paramsRef = &params; }
+    void bind (const AuxLaneParams& params) noexcept
+    {
+        paramsRef = &params;
+        // Seed the smoother to the actual return level so the first block
+        // doesn't ramp from unity → bound value (audible level jump on
+        // session load when a lane was saved at e.g. -10 dB).
+        const float db = params.returnLevelDb.load (std::memory_order_relaxed);
+        const float gain = (db <= ChannelStripParams::kFaderInfThreshDb)
+                             ? 0.0f
+                             : juce::Decibels::decibelsToGain (db);
+        returnGain.setCurrentAndTargetValue (gain);
+    }
 
     // Bind the per-app PluginManager so this lane's slots can resolve plugin
     // files. Mirrors the channel-strip binding done at engine construction.

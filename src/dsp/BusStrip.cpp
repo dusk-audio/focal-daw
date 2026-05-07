@@ -34,7 +34,7 @@ void BusStrip::prepare (double sampleRate, int blockSize, int oversamplingFactor
 }
 
 #if FOCAL_HAS_DUSK_DSP
-void BusStrip::bindCompParams()
+void BusStrip::bindCompParams() noexcept
 {
     auto& apvts = busComp.getParameters();
     compModeAtom       = apvts.getRawParameterValue ("mode");
@@ -122,6 +122,9 @@ void BusStrip::updateGainTargets() noexcept
 
 void BusStrip::processInPlace (float* L, float* R, int numSamples) noexcept
 {
+    juce::ScopedNoDenormals noDenormals;
+    if (numSamples == 0) return;
+
    #if FOCAL_HAS_DUSK_DSP
     // Contract: numSamples must fit the buffer prepare() sized for the comp.
     // The chunk loop below is the production safety net.

@@ -216,17 +216,57 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
     auto col = tracksColumnBounds();
     auto ruler = rulerBounds();
 
-    // Left-click on a marker flag → seek to that marker. Checked before
-    // the region hit-test so a flag overlapping a track row still wins.
+    // Left-click on a marker flag → start a marker drag. We DON'T seek
+    // here - that's deferred to mouseUp so a click-without-movement seeks
+    // and a click-with-movement repositions the marker.
     if (! e.mods.isRightButtonDown())
     {
         if (const int markerIdx = hitTestMarker (e.x, e.y); markerIdx >= 0)
         {
-            const auto& m = session.getMarkers()[(size_t) markerIdx];
-            engine.getTransport().setPlayhead (m.timelineSamples);
-            repaint();
+            markerDrag.active           = true;
+            markerDrag.moved            = false;
+            markerDrag.index            = markerIdx;
+            markerDrag.originSample     = session.getMarkers()[(size_t) markerIdx]
+                                                .timelineSamples;
+            markerDrag.mouseDownSample  = sampleAtX (e.x);
             return;
         }
+    }
+
+    // Left-click on an existing loop / punch pill or bar → start a
+    // bracket drag. Endpoint pills move that endpoint; the bar in the
+    // middle translates the whole range by the drag delta. Tested
+    // before ruler-selection so dragging on top of an existing bracket
+    // doesn't accidentally start a new selection.
+    if (! e.mods.isRightButtonDown())
+    {
+        if (const auto bh = hitTestBracket (e.x, e.y); bh != BracketHit::None)
+        {
+            auto& transport = engine.getTransport();
+            bracketDrag.active = true;
+            bracketDrag.type   = bh;
+            bracketDrag.mouseDownSample = sampleAtX (e.x);
+            const bool isPunch = (bh == BracketHit::PunchIn
+                                || bh == BracketHit::PunchOut
+                                || bh == BracketHit::PunchBar);
+            bracketDrag.origStart = isPunch ? transport.getPunchIn()  : transport.getLoopStart();
+            bracketDrag.origEnd   = isPunch ? transport.getPunchOut() : transport.getLoopEnd();
+            return;
+        }
+    }
+
+    // Left-click in the ruler band (not on a marker / bracket) → start
+    // a neutral selection drag. The range is painted as a translucent
+    // highlight during drag; on mouseUp we show a popup that asks
+    // whether to make it a loop range or a punch range. We don't touch
+    // transport state until the user picks.
+    if (! e.mods.isRightButtonDown() && ruler.contains (e.x, e.y))
+    {
+        rulerSelection.active        = true;
+        rulerSelection.originSample  = sampleAtX (e.x);
+        rulerSelection.currentSample = rulerSelection.originSample;
+        repaint();
+        return;
     }
 
     // Right-click on a region opens a region-specific menu (delete, split).
@@ -314,12 +354,15 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
                     });
         if (! session.getMarkers().empty())
         {
+            const double sr = engine.getCurrentSampleRate();
             juce::PopupMenu jumpSub;
             for (int i = 0; i < (int) session.getMarkers().size(); ++i)
             {
                 const auto& mk = session.getMarkers()[(size_t) i];
-                jumpSub.addItem (mk.name + "  ("
-                                  + juce::String ((int) (mk.timelineSamples / 44100)) + "s)",
+                const int secs = sr > 0.0
+                                   ? (int) ((double) mk.timelineSamples / sr)
+                                   : 0;
+                jumpSub.addItem (mk.name + "  (" + juce::String (secs) + "s)",
                                   [safeThis = juce::Component::SafePointer<TapeStrip> (this),
                                    i]
                                   {
@@ -338,7 +381,11 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
         {
             transport.setPlayhead (clickedSample);
         });
-        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this),
+        // Anchor the menu at the cursor instead of the TapeStrip's
+        // top-left corner. Same fix as the plugin picker.
+        const auto cursor = e.getScreenPosition();
+        m.showMenuAsync (juce::PopupMenu::Options()
+                            .withTargetScreenArea (juce::Rectangle<int> (cursor.x, cursor.y, 1, 1)),
                           [safeThis = juce::Component::SafePointer<TapeStrip> (this)] (int)
                           {
                               if (safeThis != nullptr) safeThis->repaint();
@@ -408,6 +455,103 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
 
 void TapeStrip::mouseDrag (const juce::MouseEvent& e)
 {
+    // Marker drag - reposition a marker once the cursor moves more than
+    // a small threshold from the click. Below threshold, it's still a
+    // click (mouseUp will seek). The marker's array index stays valid
+    // throughout because we re-sort only on mouseUp.
+    if (markerDrag.active)
+    {
+        const auto cur = sampleAtX (e.x);
+        constexpr juce::int64 kDragThresholdSamples = 256;   // ~5 ms @ 48k
+        if (! markerDrag.moved
+            && std::abs (cur - markerDrag.mouseDownSample) > kDragThresholdSamples)
+        {
+            markerDrag.moved = true;
+        }
+        if (markerDrag.moved
+            && markerDrag.index >= 0
+            && markerDrag.index < (int) session.getMarkers().size())
+        {
+            session.getMarkers()[(size_t) markerDrag.index].timelineSamples =
+                juce::jmax ((juce::int64) 0, cur);
+            repaint();
+        }
+        return;
+    }
+
+    // Bracket drag - reposition loop/punch endpoints or translate the
+    // whole range. Endpoint drags clamp to keep start ≤ end - 1024
+    // samples (the same useful-range floor we use elsewhere) so the
+    // user can't accidentally collapse a bracket to zero length by
+    // dragging one end through the other.
+    if (bracketDrag.active)
+    {
+        constexpr juce::int64 kMinUsefulRangeSamples = 1024;
+        const auto cur = juce::jmax ((juce::int64) 0, sampleAtX (e.x));
+        const auto delta = cur - bracketDrag.mouseDownSample;
+        auto& transport = engine.getTransport();
+        switch (bracketDrag.type)
+        {
+            case BracketHit::LoopIn:
+            {
+                const auto newStart = juce::jlimit ((juce::int64) 0,
+                                                       bracketDrag.origEnd - kMinUsefulRangeSamples,
+                                                       cur);
+                transport.setLoopRange (newStart, bracketDrag.origEnd);
+                break;
+            }
+            case BracketHit::LoopOut:
+            {
+                const auto newEnd = juce::jmax (bracketDrag.origStart + kMinUsefulRangeSamples, cur);
+                transport.setLoopRange (bracketDrag.origStart, newEnd);
+                break;
+            }
+            case BracketHit::LoopBar:
+            {
+                const auto newStart = juce::jmax ((juce::int64) 0,
+                                                    bracketDrag.origStart + delta);
+                const auto length   = bracketDrag.origEnd - bracketDrag.origStart;
+                transport.setLoopRange (newStart, newStart + length);
+                break;
+            }
+            case BracketHit::PunchIn:
+            {
+                const auto newStart = juce::jlimit ((juce::int64) 0,
+                                                       bracketDrag.origEnd - kMinUsefulRangeSamples,
+                                                       cur);
+                transport.setPunchRange (newStart, bracketDrag.origEnd);
+                break;
+            }
+            case BracketHit::PunchOut:
+            {
+                const auto newEnd = juce::jmax (bracketDrag.origStart + kMinUsefulRangeSamples, cur);
+                transport.setPunchRange (bracketDrag.origStart, newEnd);
+                break;
+            }
+            case BracketHit::PunchBar:
+            {
+                const auto newStart = juce::jmax ((juce::int64) 0,
+                                                    bracketDrag.origStart + delta);
+                const auto length   = bracketDrag.origEnd - bracketDrag.origStart;
+                transport.setPunchRange (newStart, newStart + length);
+                break;
+            }
+            case BracketHit::None: break;
+        }
+        repaint();
+        return;
+    }
+
+    // Ruler selection - sweep the highlight range as the user drags.
+    // Range start is min(origin, current); end is max - works whether
+    // the user drags left-to-right or right-to-left.
+    if (rulerSelection.active)
+    {
+        rulerSelection.currentSample = juce::jmax ((juce::int64) 0, sampleAtX (e.x));
+        repaint();
+        return;
+    }
+
     if (drag.op == RegionOp::None) return;
 
     auto& regions = session.track (drag.track).regions;
@@ -481,8 +625,118 @@ void TapeStrip::mouseDrag (const juce::MouseEvent& e)
     repaint();
 }
 
-void TapeStrip::mouseUp (const juce::MouseEvent&)
+void TapeStrip::mouseUp (const juce::MouseEvent& e)
 {
+    // Bracket drag finalisation. Transport state is already up-to-date
+    // from each mouseDrag call; nothing to do beyond clearing the drag
+    // so future mouseDrags route through the right path.
+    if (bracketDrag.active)
+    {
+        bracketDrag = {};
+        return;
+    }
+
+    // Marker drag finalisation. A click without movement seeks; a real
+    // drag commits the new marker position (and re-sorts the vector so
+    // hit-testing stays consistent next time).
+    if (markerDrag.active)
+    {
+        if (markerDrag.moved
+            && markerDrag.index >= 0
+            && markerDrag.index < (int) session.getMarkers().size())
+        {
+            // Re-sort by timelineSamples so the painter still iterates
+            // left-to-right after the drag.
+            auto& mks = session.getMarkers();
+            std::stable_sort (mks.begin(), mks.end(),
+                [] (const Marker& a, const Marker& b)
+                { return a.timelineSamples < b.timelineSamples; });
+        }
+        else if (! markerDrag.moved
+                 && markerDrag.index >= 0
+                 && markerDrag.index < (int) session.getMarkers().size())
+        {
+            // Pure click on a flag → seek to the marker.
+            const auto& m = session.getMarkers()[(size_t) markerDrag.index];
+            engine.getTransport().setPlayhead (m.timelineSamples);
+        }
+        markerDrag = {};
+        repaint();
+        return;
+    }
+
+    // Ruler-selection finalisation. A drag shorter than ~24ms is
+    // treated as a click and just dismisses the selection. Otherwise we
+    // offer a context menu so the user picks whether the range is for
+    // loop or punch - dragging itself doesn't auto-commit.
+    //
+    // Important: we DON'T clear rulerSelection here. Keeping it active
+    // means the grey highlight stays painted while the menu is open;
+    // each menu lambda clears it as part of the same setLoopRange/
+    // setPunchRange call, so the very next paint shows the committed
+    // green/red range instead of the grey - no blink between states.
+    if (rulerSelection.active)
+    {
+        const auto a = juce::jmin (rulerSelection.originSample,
+                                     rulerSelection.currentSample);
+        const auto b = juce::jmax (rulerSelection.originSample,
+                                     rulerSelection.currentSample);
+
+        constexpr juce::int64 kMinUsefulRangeSamples = 1024;
+        if (b - a <= kMinUsefulRangeSamples)
+        {
+            rulerSelection = {};
+            repaint();
+            return;
+        }
+
+        const auto cursor = e.getScreenPosition();
+        juce::PopupMenu m;
+        m.addItem ("Set loop here",
+                    [safeThis = juce::Component::SafePointer<TapeStrip> (this), a, b]
+                    {
+                        if (safeThis == nullptr) return;
+                        auto& transport = safeThis->engine.getTransport();
+                        transport.setLoopRange (a, b);
+                        transport.setLoopEnabled (true);
+                        safeThis->rulerSelection = {};
+                        safeThis->repaint();
+                    });
+        m.addItem ("Set punch in / out here",
+                    [safeThis = juce::Component::SafePointer<TapeStrip> (this), a, b]
+                    {
+                        if (safeThis == nullptr) return;
+                        auto& transport = safeThis->engine.getTransport();
+                        transport.setPunchRange (a, b);
+                        transport.setPunchEnabled (true);
+                        safeThis->rulerSelection = {};
+                        safeThis->repaint();
+                    });
+        m.addSeparator();
+        m.addItem ("Cancel",
+                    [safeThis = juce::Component::SafePointer<TapeStrip> (this)]
+                    {
+                        if (safeThis == nullptr) return;
+                        safeThis->rulerSelection = {};
+                        safeThis->repaint();
+                    });
+        // Menu-dismiss callback catches escape / click-outside (no item
+        // chosen) so the grey highlight still goes away in those paths.
+        m.showMenuAsync (juce::PopupMenu::Options()
+                            .withTargetScreenArea (
+                                juce::Rectangle<int> (cursor.x, cursor.y, 1, 1)),
+                          [safeThis = juce::Component::SafePointer<TapeStrip> (this)] (int)
+                          {
+                              if (safeThis == nullptr) return;
+                              if (safeThis->rulerSelection.active)
+                              {
+                                  safeThis->rulerSelection = {};
+                                  safeThis->repaint();
+                              }
+                          });
+        return;
+    }
+
     if (drag.op == RegionOp::None) return;
 
     auto& regions = session.track (drag.track).regions;
@@ -524,7 +778,19 @@ void TapeStrip::mouseMove (const juce::MouseEvent& e)
     // clicking blindly.
     if (hitTestMarker (e.x, e.y) >= 0)
     {
-        setMouseCursor (juce::MouseCursor::PointingHandCursor);
+        // Markers are click-to-seek and drag-to-reposition - "dragging
+        // hand" reads as both clickable and draggable.
+        setMouseCursor (juce::MouseCursor::DraggingHandCursor);
+        return;
+    }
+
+    if (const auto bh = hitTestBracket (e.x, e.y); bh != BracketHit::None)
+    {
+        // Endpoint pills get a horizontal-resize cursor; bar drags get
+        // a "moving" hand. Same pattern as region trim vs region move.
+        const bool isBar = (bh == BracketHit::LoopBar || bh == BracketHit::PunchBar);
+        setMouseCursor (isBar ? juce::MouseCursor::DraggingHandCursor
+                              : juce::MouseCursor::LeftRightResizeCursor);
         return;
     }
 
@@ -588,8 +854,9 @@ void TapeStrip::showRegionContextMenu (const RegionHit& hit, juce::Point<int> sc
                     safeThis->repaint();
                 });
 
-    juce::ignoreUnused (screenPos);  // popup uses target component anchoring
-    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this));
+    m.showMenuAsync (juce::PopupMenu::Options()
+                        .withTargetScreenArea (
+                            juce::Rectangle<int> (screenPos.x, screenPos.y, 1, 1)));
 }
 
 void TapeStrip::paint (juce::Graphics& g)
@@ -625,12 +892,14 @@ void TapeStrip::paint (juce::Graphics& g)
         for (double sec = 0.0; sec <= endSec; sec += tickEverySec)
         {
             const int x = col.getX() + (int) (sec * px);
-            g.drawVerticalLine (x, (float) ruler.getY() + 8.0f, (float) ruler.getBottom());
-            // Format seconds as mm:ss for readability
+            // Tick marks span only the upper "tick band" so they don't
+            // visually clash with marker flags + loop/punch pills below.
+            g.drawVerticalLine (x, (float) ruler.getY() + 6.0f,
+                                  (float) ruler.getY() + (float) kRulerTickBandH);
             const int mins = (int) (sec / 60.0);
             const int secs = (int) sec % 60;
             const auto timeLabel = juce::String::formatted ("%d:%02d", mins, secs);
-            g.drawText (timeLabel, x + 3, ruler.getY(), 60, ruler.getHeight() - 1,
+            g.drawText (timeLabel, x + 3, ruler.getY(), 60, kRulerTickBandH - 1,
                          juce::Justification::centredLeft, false);
         }
     }
@@ -745,32 +1014,37 @@ void TapeStrip::paint (juce::Graphics& g)
         const int x1 = juce::jmin (col.getRight(), x1Raw);
         if (x1 <= x0) return;
 
-        const float alpha = enabled ? 0.20f : 0.10f;
-        g.setColour (colour.withAlpha (alpha));
+        // Translucent fill across the track area so the range reads as
+        // "this stretch is the loop/punch zone" without competing with
+        // recorded regions. Brighter when the toggle's on.
+        g.setColour (colour.withAlpha (enabled ? 0.18f : 0.08f));
         g.fillRect (x0, kRulerH, x1 - x0, getHeight() - kRulerH);
 
-        // Solid bar in the lower 6 px of the ruler - full opacity if enabled,
-        // dimmed otherwise so the user can still see disabled bounds.
-        const int barH = 6;
-        g.setColour (colour.withAlpha (enabled ? 1.0f : 0.5f));
-        g.fillRect (x0, kRulerH - barH, x1 - x0, barH);
+        // Solid bracket bar across the bottom of the ruler. Full opacity
+        // when enabled; half-opacity when the bounds are set but the
+        // toggle is off, so the user can still see where the range will
+        // jump to when they re-enable.
+        constexpr int kBarH = 4;
+        g.setColour (colour.withAlpha (enabled ? 1.0f : 0.55f));
+        g.fillRect (x0, ruler.getBottom() - kBarH, x1 - x0, kBarH);
 
-        // Endpoint pill labels (e.g. "Punch" at in + out). Skipped for
-        // disabled regions to keep the visual quieter.
-        if (pillLabel.isNotEmpty() && enabled)
+        // Endpoint pills - sit in the pill band of the ruler, above the
+        // bracket bar, with rounded "tail" pointing down into the bar so
+        // the pill+bar reads as a single bracket shape.
+        if (pillLabel.isNotEmpty())
         {
-            g.setFont (juce::Font (juce::FontOptions (10.0f, juce::Font::bold)));
-            const int textW = juce::jmax (44, g.getCurrentFont().getStringWidth (pillLabel) + 10);
-            const int pillH = 14;
-            const int pillY = kRulerH;  // sits just below the tick band
+            g.setFont (juce::Font (juce::FontOptions (10.5f, juce::Font::bold)));
+            const int textW = juce::jmax (40,
+                g.getCurrentFont().getStringWidth (pillLabel) + 10);
+            const int pillH = kRulerPillBandH - 2;     // small gap above the bar
+            const int pillY = ruler.getY() + kRulerTickBandH;
 
             auto drawPill = [&] (int xCentre)
             {
-                // Clamp pill so it doesn't slide off the visible track area.
                 int pillX = xCentre - textW / 2;
                 pillX = juce::jlimit (col.getX(), col.getRight() - textW, pillX);
                 juce::Rectangle<int> r (pillX, pillY, textW, pillH);
-                g.setColour (colour.withAlpha (0.95f));
+                g.setColour (colour.withAlpha (enabled ? 1.0f : 0.7f));
                 g.fillRoundedRectangle (r.toFloat(), 3.0f);
                 g.setColour (juce::Colours::white);
                 g.drawText (pillLabel, r, juce::Justification::centred, false);
@@ -785,6 +1059,27 @@ void TapeStrip::paint (juce::Graphics& g)
         }
     };
 
+    // ── In-flight ruler selection ──
+    // Painted under loop/punch so a freshly-finished drag's highlight
+    // doesn't overpaint the result the user just chose. Neutral grey so
+    // it doesn't misleadingly look like a committed loop or punch range.
+    if (rulerSelection.active)
+    {
+        const auto sa = juce::jmin (rulerSelection.originSample,
+                                      rulerSelection.currentSample);
+        const auto sb = juce::jmax (rulerSelection.originSample,
+                                      rulerSelection.currentSample);
+        const int x0 = juce::jmax (col.getX(),     xForSample (sa));
+        const int x1 = juce::jmin (col.getRight(), xForSample (sb));
+        if (x1 > x0)
+        {
+            g.setColour (juce::Colour (0xffd0d0d8).withAlpha (0.18f));
+            g.fillRect (x0, kRulerH, x1 - x0, getHeight() - kRulerH);
+            g.setColour (juce::Colour (0xffd0d0d8).withAlpha (0.85f));
+            g.fillRect (x0, ruler.getBottom() - 4, x1 - x0, 4);
+        }
+    }
+
     auto& transport = engine.getTransport();
     // Loop in green (visually distinct from punch's red), punch in red -
     // matches the colour language the user expects from pro DAWs.
@@ -794,27 +1089,29 @@ void TapeStrip::paint (juce::Graphics& g)
                 juce::Colour (0xffd05a5a), transport.isPunchEnabled(), "Punch");
 
     // ── Markers ──
-    // Vertical guideline + flag at the top of the ruler. The line is
-    // drawn before the playhead so the playhead's red sits on top when
-    // they coincide.
+    // Flag in the ruler's pill band + vertical guideline through tracks.
+    // Drawn after loop/punch so a marker that lands exactly on a loop/punch
+    // boundary is still readable on top.
     {
-        g.setFont (juce::Font (juce::FontOptions (10.0f, juce::Font::bold)));
+        g.setFont (juce::Font (juce::FontOptions (10.5f, juce::Font::bold)));
         for (const auto& marker : session.getMarkers())
         {
             const int x = xForSample (marker.timelineSamples);
             if (x < col.getX() - 80 || x > col.getRight()) continue;
 
             // Guideline through the track area.
-            g.setColour (marker.colour.withAlpha (0.30f));
+            g.setColour (marker.colour.withAlpha (0.35f));
             g.drawVerticalLine (x, (float) col.getY(), (float) getHeight());
 
-            // Flag at the top of the ruler. Width fits the name plus a
-            // small padding; clamp so the flag doesn't go off the right.
+            // Flag positioned in the pill band of the ruler so it sits at
+            // the same y as loop/punch pills - one consistent "ruler
+            // overlay" zone.
             const int textW  = g.getCurrentFont().getStringWidth (marker.name) + 10;
-            const int flagW  = juce::jlimit (28, 160, textW);
-            const int flagH  = 12;
+            const int flagW  = juce::jlimit (32, 160, textW);
+            const int flagH  = kRulerPillBandH - 2;
             const int flagX  = juce::jmin (x, getWidth() - flagW - 2);
-            juce::Rectangle<int> flag (flagX, 2, flagW, flagH);
+            const int flagY  = ruler.getY() + kRulerTickBandH;
+            juce::Rectangle<int> flag (flagX, flagY, flagW, flagH);
 
             g.setColour (marker.colour);
             g.fillRoundedRectangle (flag.toFloat(), 2.0f);
@@ -834,11 +1131,81 @@ void TapeStrip::paint (juce::Graphics& g)
     }
 }
 
+TapeStrip::BracketHit TapeStrip::hitTestBracket (int x, int y) const noexcept
+{
+    auto ruler = rulerBounds();
+    if (! ruler.contains (x, y)) return BracketHit::None;
+
+    // Pill band sits below the tick band; bar sits in the bottom 4px of
+    // the ruler. Outside both → no hit.
+    const int pillTop  = ruler.getY() + kRulerTickBandH;
+    const int barTop   = ruler.getBottom() - 4;
+    const bool inPills = (y >= pillTop && y < barTop);
+    const bool inBar   = (y >= barTop  && y < ruler.getBottom());
+    if (! inPills && ! inBar) return BracketHit::None;
+
+    auto& transport = engine.getTransport();
+
+    auto pillBounds = [this] (juce::int64 sample, const juce::String& label)
+    {
+        // Same width math the painter uses; exposes a forgiving 6px hit
+        // gutter on each side of the pill so users don't have to land
+        // pixel-perfect on the label.
+        auto col = tracksColumnBounds();
+        const int xMid = xForSample (sample);
+        const int textW = juce::jmax (40, label.length() * 7 + 14);
+        int pillX = juce::jlimit (col.getX(), col.getRight() - textW,
+                                    xMid - textW / 2);
+        return juce::Rectangle<int> (pillX - 6, 0, textW + 12, 0);
+    };
+
+    auto inXRange = [] (int xx, juce::Rectangle<int> r)
+    { return xx >= r.getX() && xx <= r.getRight(); };
+
+    // Loop pills + bar (checked first so "loop" wins on overlap with
+    // punch when both happen to share an endpoint).
+    if (transport.getLoopEnd() > transport.getLoopStart())
+    {
+        if (inPills)
+        {
+            if (inXRange (x, pillBounds (transport.getLoopStart(), "Loop")))
+                return BracketHit::LoopIn;
+            if (inXRange (x, pillBounds (transport.getLoopEnd(),   "Loop")))
+                return BracketHit::LoopOut;
+        }
+        if (inBar)
+        {
+            const int x0 = xForSample (transport.getLoopStart());
+            const int x1 = xForSample (transport.getLoopEnd());
+            if (x >= x0 && x <= x1) return BracketHit::LoopBar;
+        }
+    }
+
+    if (transport.getPunchOut() > transport.getPunchIn())
+    {
+        if (inPills)
+        {
+            if (inXRange (x, pillBounds (transport.getPunchIn(),  "Punch")))
+                return BracketHit::PunchIn;
+            if (inXRange (x, pillBounds (transport.getPunchOut(), "Punch")))
+                return BracketHit::PunchOut;
+        }
+        if (inBar)
+        {
+            const int x0 = xForSample (transport.getPunchIn());
+            const int x1 = xForSample (transport.getPunchOut());
+            if (x >= x0 && x <= x1) return BracketHit::PunchBar;
+        }
+    }
+    return BracketHit::None;
+}
+
 int TapeStrip::hitTestMarker (int x, int y) const noexcept
 {
     auto ruler = rulerBounds();
-    // Flags occupy the top ~14px of the ruler band; ignore clicks below.
-    if (! ruler.contains (x, y) || y > ruler.getY() + 14) return -1;
+    if (! ruler.contains (x, y)) return -1;
+    // Flags sit in the pill band of the ruler (below the tick band).
+    if (y < ruler.getY() + kRulerTickBandH) return -1;
 
     const auto& markers = session.getMarkers();
     // Iterate back-to-front so a later (rightmost) marker wins on overlap,

@@ -333,6 +333,59 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
         return true;
     }
 
+    // ── Loop / punch: bracket keys set the current playhead as in/out;
+    // L and P toggle the corresponding mode on/off. Shift+bracket switches
+    // to punch boundaries; the unshifted form sets loop boundaries.
+    auto& transport = engine.getTransport();
+    if (code == '[' && ! cmd && ! mods.isAltDown())
+    {
+        const auto playhead = transport.getPlayhead();
+        if (shift)
+        {
+            const auto end = transport.getPunchOut();
+            transport.setPunchRange (playhead,
+                                       end > playhead ? end : playhead);
+        }
+        else
+        {
+            const auto end = transport.getLoopEnd();
+            transport.setLoopRange (playhead,
+                                      end > playhead ? end : playhead);
+        }
+        if (tapeStrip != nullptr) tapeStrip->repaint();
+        return true;
+    }
+    if (code == ']' && ! cmd && ! mods.isAltDown())
+    {
+        const auto playhead = transport.getPlayhead();
+        if (shift)
+        {
+            const auto start = transport.getPunchIn();
+            transport.setPunchRange (start < playhead ? start : playhead,
+                                       playhead);
+        }
+        else
+        {
+            const auto start = transport.getLoopStart();
+            transport.setLoopRange (start < playhead ? start : playhead,
+                                      playhead);
+        }
+        if (tapeStrip != nullptr) tapeStrip->repaint();
+        return true;
+    }
+    if (code == 'L' && noMods)
+    {
+        transport.setLoopEnabled (! transport.isLoopEnabled());
+        if (tapeStrip != nullptr) tapeStrip->repaint();
+        return true;
+    }
+    if (code == 'P' && noMods)
+    {
+        transport.setPunchEnabled (! transport.isPunchEnabled());
+        if (tapeStrip != nullptr) tapeStrip->repaint();
+        return true;
+    }
+
     // ── Window: F11 toggles fullscreen. Walks up to the parent
     // ResizableWindow because that's the layer that owns the OS window
     // state, not MainComponent itself.
@@ -789,12 +842,6 @@ void MainComponent::saveAsPrompt()
             if (chosen == juce::File()) return;
             saveSessionTo (chosen);
         });
-}
-
-void MainComponent::saveAsParentPrompt (const juce::String& /*sessionName*/)
-{
-    // Retained as a no-op for any caller that still references the old
-    // two-step flow. saveAsPrompt now does the whole job in one dialog.
 }
 
 bool MainComponent::loadSessionFromJson (const juce::File& sessionJson)

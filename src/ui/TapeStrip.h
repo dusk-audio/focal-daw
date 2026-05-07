@@ -31,7 +31,14 @@ public:
     void mouseMove  (const juce::MouseEvent&) override;
 
     static constexpr int kTrackLabelW = 44;
-    static constexpr int kRulerH      = 20;
+    // Ruler is split into three vertical bands:
+    //   y=0..kRulerTickBandH        - time-label row + tick marks
+    //   y=kRulerTickBandH..kRulerH  - markers row + loop/punch pills
+    // Loop/punch's solid bracket bar paints the bottom 4 px of the lower
+    // band so it visually attaches the pills to the timeline.
+    static constexpr int kRulerTickBandH = 14;
+    static constexpr int kRulerPillBandH = 16;
+    static constexpr int kRulerH         = kRulerTickBandH + kRulerPillBandH;  // 30
     static constexpr int kTrackRowH   = 14;
     static constexpr int kRowGap      = 1;
 
@@ -75,6 +82,17 @@ private:
     // Marker flag hit-test. Returns the index of the marker whose flag
     // sits under (x, y), or -1. Tested only inside the ruler band.
     int hitTestMarker (int x, int y) const noexcept;
+
+    // Loop / punch bracket hit-test. Pills (in/out) and the bar between
+    // them are draggable: pill drags reposition that endpoint; bar drags
+    // translate the whole range while preserving its length.
+    enum class BracketHit
+    {
+        None,
+        LoopIn, LoopOut, LoopBar,
+        PunchIn, PunchOut, PunchBar,
+    };
+    BracketHit hitTestBracket (int x, int y) const noexcept;
     void rebuildPlaybackIfStopped();
     void showRegionContextMenu (const RegionHit&, juce::Point<int> screenPos);
 
@@ -114,6 +132,46 @@ private:
         juce::int64 origSourceOffset  = 0;
     };
     ActiveDrag drag;
+
+    // In-flight ruler selection. Click+drag on the ruler defines a
+    // candidate range that's painted as a neutral highlight. On mouseUp
+    // we offer a menu ("Set loop here" / "Set punch in/out here") so the
+    // user picks what the range is for - dragging itself doesn't
+    // commit anything to transport state.
+    struct RulerSelection
+    {
+        bool active     = false;
+        juce::int64 originSample  = 0;
+        juce::int64 currentSample = 0;
+    };
+    RulerSelection rulerSelection;
+
+    // In-flight marker drag. Click on a flag captures the marker; if the
+    // user moves before releasing, we treat it as a drag (update marker
+    // position); otherwise it's a click (seek to marker on mouseUp).
+    struct MarkerDrag
+    {
+        bool active   = false;
+        bool moved    = false;     // true once drag delta exceeds threshold
+        int  index    = -1;
+        juce::int64 originSample = 0;
+        juce::int64 mouseDownSample = 0;
+    };
+    MarkerDrag markerDrag;
+
+    // In-flight loop / punch bracket drag. type identifies which endpoint
+    // (or whole-bar) is being moved; origStart/origEnd are the bracket's
+    // pre-drag bounds, captured at mouseDown so a "move whole bar" drag
+    // can translate by delta without compounding rounding.
+    struct BracketDrag
+    {
+        bool       active = false;
+        BracketHit type   = BracketHit::None;
+        juce::int64 mouseDownSample = 0;
+        juce::int64 origStart = 0;
+        juce::int64 origEnd   = 0;
+    };
+    BracketDrag bracketDrag;
 
     // The most recently clicked region - selection target for keyboard
     // copy/cut/paste/delete. -1 / -1 means nothing selected. Cleared on

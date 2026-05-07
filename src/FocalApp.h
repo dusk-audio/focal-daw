@@ -4,8 +4,6 @@
 
 namespace focal
 {
-class MainComponent;
-
 class FocalApp final : public juce::JUCEApplication
 {
 public:

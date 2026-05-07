@@ -74,7 +74,7 @@ BusComponent::BusComponent (Bus& b, Session& s, int idx)
     eqButton.setTooltip ("3-band British-style EQ on/off");
     eqButton.onClick = [this]
     {
-        bus.strip.eqEnabled.store (eqButton.getToggleState(), std::memory_order_relaxed);
+        bus.strip.eqEnabled.store (eqButton.getToggleState(), std::memory_order_release);
     };
     addAndMakeVisible (eqButton);
 
@@ -100,7 +100,7 @@ BusComponent::BusComponent (Bus& b, Session& s, int idx)
     compButton.setTooltip ("Bus compressor on/off (UniversalCompressor in Bus mode)");
     compButton.onClick = [this]
     {
-        bus.strip.compEnabled.store (compButton.getToggleState(), std::memory_order_relaxed);
+        bus.strip.compEnabled.store (compButton.getToggleState(), std::memory_order_release);
     };
     addAndMakeVisible (compButton);
 
@@ -148,7 +148,7 @@ BusComponent::BusComponent (Bus& b, Session& s, int idx)
     muteButton.setClickingTogglesState (true);
     muteButton.setColour (juce::TextButton::buttonOnColourId, juce::Colours::orangered);
     muteButton.setToggleState (bus.strip.mute.load (std::memory_order_relaxed), juce::dontSendNotification);
-    muteButton.onClick = [this] { bus.strip.mute.store (muteButton.getToggleState(), std::memory_order_relaxed); };
+    muteButton.onClick = [this] { bus.strip.mute.store (muteButton.getToggleState(), std::memory_order_release); };
     addAndMakeVisible (muteButton);
 
     soloButton.setClickingTogglesState (true);

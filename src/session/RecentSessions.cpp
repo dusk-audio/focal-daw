@@ -6,7 +6,8 @@ juce::File RecentSessions::getStoreFile()
 {
     auto cfgDir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
                       .getChildFile ("Focal");
-    if (! cfgDir.exists()) cfgDir.createDirectory();
+    if (! cfgDir.isDirectory() && cfgDir.createDirectory().failed())
+        return {};   // empty File - load() returns empty, add() drops the write
     return cfgDir.getChildFile ("recent.txt");
 }
 

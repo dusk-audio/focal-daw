@@ -1,8 +1,8 @@
 #pragma once
 
 #include <juce_audio_basics/juce_audio_basics.h>
-#include <atomic>
 #include "../session/Session.h"
+#include <atomic>
 
 #if FOCAL_HAS_DUSK_DSP
   #include "BritishEQProcessor.h"
@@ -58,7 +58,7 @@ private:
     std::atomic<float>* compBusMakeupAtom   = nullptr;
     std::atomic<float>* compBusMixAtom      = nullptr;
 
-    void bindCompParams();
+    void bindCompParams() noexcept;
     void updateEqParameters() noexcept;
     void updateCompParameters() noexcept;
     static inline void storeAtom (std::atomic<float>* a, float v) noexcept

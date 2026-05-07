@@ -229,6 +229,9 @@ bool PluginSlot::restoreFromSavedState (const juce::String& descriptionXml,
 
 void PluginSlot::processMonoBlock (float* monoData, int numSamples) noexcept
 {
+    juce::ScopedNoDenormals noDenormals;
+    if (numSamples == 0) return;
+
     if (bypassed.load (std::memory_order_relaxed)
         || autoBypassed.load (std::memory_order_relaxed))
         return;
@@ -290,6 +293,9 @@ void PluginSlot::processMonoBlock (float* monoData, int numSamples) noexcept
 
 void PluginSlot::processStereoBlock (float* L, float* R, int numSamples) noexcept
 {
+    juce::ScopedNoDenormals noDenormals;
+    if (numSamples == 0) return;
+
     if (bypassed.load (std::memory_order_relaxed)
         || autoBypassed.load (std::memory_order_relaxed))
         return;
@@ -317,7 +323,7 @@ void PluginSlot::processStereoBlock (float* L, float* R, int numSamples) noexcep
     }
     else if (numIn == 1 && numOut >= 1)
     {
-        // Mono-only plugin on a stereo bus: collapse to mono, run, then fan
+        // Mono-input plugin on a stereo bus: collapse to mono, run, then fan
         // out the (possibly stereo) output back across L/R. Use the
         // pre-allocated stereoScratch as the working buffer.
         if (numSamples > stereoScratch.getNumSamples()) return;
@@ -326,10 +332,13 @@ void PluginSlot::processStereoBlock (float* L, float* R, int numSamples) noexcep
         for (int i = 0; i < numSamples; ++i)
             mono[i] = (L[i] + R[i]) * 0.5f;
 
-        // Use a 1-channel view sized to whatever the plugin reports.
-        // Wide single-channel plugins (rare) still work because we only feed
-        // numIn channels.
-        const int procCh = juce::jmax (1, juce::jmin (numIn, numOut));
+        // Buffer width must be max(numIn, numOut) so the plugin can write
+        // its stereo output. Pre-fill the extra channel with the mono mix
+        // — JUCE's contract is that the plugin only reads numIn channels,
+        // but copying mono there is harmless and avoids leaving uninit
+        // memory in the buffer (which we otherwise read back as outR).
+        const int procCh = juce::jmin (juce::jmax (numIn, numOut),
+                                         stereoScratch.getNumChannels());
         for (int c = 1; c < procCh; ++c)
             stereoScratch.copyFrom (c, 0, mono, numSamples);
 
@@ -340,7 +349,8 @@ void PluginSlot::processStereoBlock (float* L, float* R, int numSamples) noexcep
         p->processBlock (buf, emptyMidi);
 
         const float* outL = stereoScratch.getReadPointer (0);
-        const float* outR = (numOut >= 2) ? stereoScratch.getReadPointer (1) : outL;
+        const float* outR = (numOut >= 2 && procCh >= 2)
+                              ? stereoScratch.getReadPointer (1) : outL;
         std::memcpy (L, outL, sizeof (float) * (size_t) numSamples);
         std::memcpy (R, outR, sizeof (float) * (size_t) numSamples);
     }

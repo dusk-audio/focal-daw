@@ -11,8 +11,8 @@ namespace focal
 // paint() functions so the labels and ticks always line up.
 struct FaderTick { float db; const char* label; };
 inline constexpr std::array<FaderTick, 9> kFaderTicks {{
-    {  6.0f,  "6"  },
-    {  3.0f,  "3"  },
+    {  6.0f,  "+6" },
+    {  3.0f,  "+3" },
     {  0.0f,  "0"  },
     { -3.0f,  "3"  },
     { -6.0f,  "6"  },
@@ -22,13 +22,18 @@ inline constexpr std::array<FaderTick, 9> kFaderTicks {{
     { -90.0f, "90" },
 }};
 
-// Y-coord (in the slider's local coords) for a given dB value, matching the
-// LookAndFeel's track-padding so labels in the parent's paint() align with
-// the LookAndFeel-drawn ticks. Uses the slider's NormalisableRange so the
-// skew (e.g. SkewFactorFromMidPoint(-12)) is respected.
+// Y-coord, in the FADER's PARENT coordinate system, for a given dB value.
+// fader.getBounds() returns parent-relative bounds, so the result is meant
+// to be drawn from the parent's paint() (next to the fader). Do NOT call
+// from inside the slider's own paint() or after g.setOrigin() shifts the
+// graphics origin - the math won't match. Uses the slider's NormalisableRange
+// so SkewFactorFromMidPoint(-12) etc. are respected, and the 6-px padding
+// matches drawLinearSlider's track-padding so labels align with the ticks.
 // Slider::valueToProportionOfLength is non-const in JUCE (mutable cache),
 // so the parameter is non-const here too even though we don't mutate it.
-inline float faderYForDb (juce::Slider& fader, float dB) noexcept
+// Not noexcept - valueToProportionOfLength can call user-supplied
+// NormalisableRange lambdas which JUCE doesn't promise are noexcept.
+inline float faderYForDb (juce::Slider& fader, float dB)
 {
     const auto b = fader.getBounds();
     const float prop = (float) fader.valueToProportionOfLength (dB);
@@ -96,12 +101,12 @@ public:
             // Skip ticks outside the slider's range (e.g. -90 on a 0..+12 slider).
             if (t.db < range.start - 0.01f || t.db > range.end + 0.01f) continue;
             const float prop = (float) range.convertTo0to1 (t.db);
-            const float y = bounds.getBottom() - padTopBot - prop * trackH;
+            const float tickY = bounds.getBottom() - padTopBot - prop * trackH;
             const bool isZero = (std::abs (t.db) < 0.01f);
             const float xOver = isZero ? 6.0f : 3.0f;
             g.setColour (isZero ? juce::Colour (0x90ffffff) : juce::Colour (0x40ffffff));
-            g.drawLine (trackRect.getX() - xOver, y,
-                         trackRect.getRight() + xOver, y,
+            g.drawLine (trackRect.getX() - xOver, tickY,
+                         trackRect.getRight() + xOver, tickY,
                          isZero ? 1.2f : 0.7f);
         }
 

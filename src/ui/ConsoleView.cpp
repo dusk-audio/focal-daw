@@ -28,10 +28,10 @@ ConsoleView::ConsoleView (Session& session, AudioEngine& engine) : sessionRef (s
 
 int ConsoleView::minimumContentWidth()
 {
-    const int gaps = (Session::kBankSize - 1) * kStripGap         // gaps between channels
-                   + kSectionGap                                  // channel block -> aux block
-                   + (Session::kNumBuses - 1) * kStripGap      // gaps between aux strips
-                   + kSectionGap;                                 // aux block -> master
+    const int gaps = (Session::kBankSize - 1) * kStripGap
+                   + kSectionGap
+                   + (Session::kNumBuses - 1) * kStripGap
+                   + kSectionGap;
     return Session::kBankSize * kMinChannelWidth
          + Session::kNumBuses * kMinBusWidth
          + kMinMasterWidth

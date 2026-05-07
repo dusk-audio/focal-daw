@@ -26,6 +26,8 @@ void AuxLaneStrip::updateGainTarget() noexcept
 
 void AuxLaneStrip::processStereoBlock (float* L, float* R, int numSamples) noexcept
 {
+    juce::ScopedNoDenormals noDenormals;
+    if (numSamples == 0) return;
     if (paramsRef == nullptr) return;
 
     // Mute path: clear in-place so the engine's accumulator into master
