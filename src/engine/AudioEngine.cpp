@@ -90,6 +90,27 @@ AudioEngine::~AudioEngine()
 void AudioEngine::play()
 {
     if (transport.isPlaying() || transport.isRecording()) return;
+
+    // When loop is enabled and the playhead sits outside the loop range,
+    // snap to loopStart so playback always begins inside the loop. The
+    // audio-callback wraparound (in audioDeviceIOCallbackWithContext)
+    // already handles `playhead >= loopEnd` by snapping back, which is
+    // why pressing Play with the playhead AFTER the loop "just works".
+    // The before-loop case has no symmetric guard there - linear playback
+    // would audibly run through the pre-loop area until reaching loopEnd.
+    // Snapping here at Play-press matches the intent of "loop is engaged".
+    if (transport.isLoopEnabled())
+    {
+        const auto lStart = transport.getLoopStart();
+        const auto lEnd   = transport.getLoopEnd();
+        if (lEnd > lStart)
+        {
+            const auto ph = transport.getPlayhead();
+            if (ph < lStart || ph >= lEnd)
+                transport.setPlayhead (lStart);
+        }
+    }
+
     playbackEngine.preparePlayback();
     transport.setState (Transport::State::Playing);
 }
