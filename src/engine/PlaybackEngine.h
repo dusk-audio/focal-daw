@@ -40,11 +40,13 @@ public:
     void stopPlayback();
 
     // Audio thread: mix all active regions' audio for `trackIndex` at the
-    // given playhead into `output`. `output` is overwritten with silence
-    // first; later regions (in the per-track region order) overwrite earlier
-    // ones if they overlap.
+    // given playhead into the output buffer(s). `outL` is always written
+    // (cleared first). `outR` is optional — pass nullptr for mono tracks.
+    // For stereo regions, both channels are read; for mono regions, the
+    // single source channel is duplicated to outR when outR is non-null.
+    // Regions sum additively into the output (allowing punch crossfades).
     void readForTrack (int trackIndex, juce::int64 playheadSamples,
-                       float* output, int numSamples) noexcept;
+                       float* outL, float* outR, int numSamples) noexcept;
 
 private:
     Session& session;
@@ -65,6 +67,10 @@ private:
         juce::int64 timelineStart   = 0;
         juce::int64 lengthInSamples = 0;
         juce::int64 sourceOffset    = 0;
+        juce::int64 fadeInSamples   = 0;
+        juce::int64 fadeOutSamples  = 0;
+        int         numChannels     = 1;  // 1 = mono region (duplicate to R when stereo strip),
+                                           // 2 = stereo region (read L+R from file).
     };
 
     struct PerTrackStream

@@ -9,11 +9,13 @@
 // The default value is 4 to match upstream JUCE; UI writes here before
 // triggering an AudioDeviceManager re-open so the new period count takes
 // effect on the next snd_pcm_hw_params_set_periods_near call.
+#if defined(__linux__)
 namespace juce
 {
     JUCE_API void setALSARequestedPeriods (int p) noexcept;
     JUCE_API int  getALSARequestedPeriods() noexcept;
 }
+#endif
 
 namespace focal
 {
@@ -45,8 +47,10 @@ private:
     Session& session;
     std::unique_ptr<juce::AudioDeviceSelectorComponent> selector;
 
+#if defined(__linux__)
     juce::Label    periodsLabel  { {}, "Periods (ALSA)" };
     juce::ComboBox periodsCombo;
+#endif
     juce::TextButton selfTestButton { "Run Self-Test..." };
 
     // Global effect oversampling - single source of truth for "1× / 2× / 4×
@@ -61,7 +65,9 @@ private:
     juce::Label  uiScaleHint;
     bool         uiScaleDragging = false;
 
+#if defined(__linux__)
     void applyPeriodsChange();
+#endif
     void applyOversamplingChange();
     void applyUiScaleChange();
     void openSelfTest();

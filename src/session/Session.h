@@ -251,6 +251,27 @@ struct AudioRegion
     juce::int64 timelineStart = 0;    // sample position on the timeline
     juce::int64 lengthInSamples = 0;
     juce::int64 sourceOffset = 0;     // future: trim from left
+    int          numChannels    = 1;  // 1 = mono WAV, 2 = stereo WAV. Set by
+                                      // RecordManager when committing the take
+                                      // (matches the writer's channel count)
+                                      // and persisted in the session.json.
+
+    // Crossfade ramps in samples. PlaybackEngine applies a linear envelope
+    // when reading: 0..1 across [timelineStart, +fadeInSamples), and 1..0
+    // across [end - fadeOutSamples, end). Zero (default) = no fade,
+    // hard edge. Set by RecordManager when committing a punched take so
+    // the new region crossfades against trimmed outer fragments of the
+    // existing region without an audible click at the punch boundary.
+    //
+    // Invariants (enforced by RecordManager when these are written, and
+    // defensively re-clamped by PlaybackEngine::preparePlayback):
+    //   • fadeInSamples >= 0 && fadeOutSamples >= 0
+    //   • fadeInSamples + fadeOutSamples <= lengthInSamples
+    // Without the second invariant, the fade-in and fade-out ramps would
+    // overlap in the middle of the region and the multiplied gain would
+    // produce a notch instead of a flat 1.0 hold.
+    juce::int64 fadeInSamples  = 0;
+    juce::int64 fadeOutSamples = 0;
 
     // Older takes that occupied this region's timeline range, captured by
     // RecordManager::stopRecording when the new take's range fully contains
@@ -419,6 +440,13 @@ struct MasterBusParams
     // requested in the spec.
     std::atomic<bool>  tapeEnabled { false };
     std::atomic<bool>  tapeHQ      { false };
+
+    // TapeMachine plugin state (APVTS XML, base64-encoded). Populated by
+    // AudioEngine::publishPluginStateForSave from the live processor's
+    // getStateInformation() and consumed by consumePluginStateAfterLoad
+    // back into setStateInformation. Empty string = use the donor's
+    // built-in defaults. Mirrors the per-track / per-aux-slot string.
+    juce::String tapeStateBase64;
 
     // Pultec-style Tube EQ ("Pultec" in the spec, exposed as "Tube" mode in
     // multi-q). Minimal control surface: LF boost, HF boost, tube drive,

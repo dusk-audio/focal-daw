@@ -80,7 +80,7 @@ For plugin instances, audio file readers, or any heavy resource — never block 
 
 ## Common DSP patterns
 
-- **Oversampling** — Focal's master tape sat and bus comp use the donor plugins' internal oversampling (`UniversalCompressor::setInternalOversamplingEnabled`). Per-channel comp runs at native rate via `dusk::ChannelComp` (the minimal-processing fast path) — 16 strips × oversampled comp would dominate CPU.
+- **Oversampling** — All oversampling (donor plugins and otherwise) is controlled globally by the **Effect Oversampling** dropdown in the Audio Device settings panel. Individual DSP units must NOT enable internal oversampling on their own; the engine drives the chosen factor through to every processor that supports it. Don't call `setInternalOversamplingEnabled` (or equivalent) at the DSP-class level — wire new processors to read the engine-wide setting instead.
 - **Filters** — `juce::dsp::IIR::Filter` and `BritishEQProcessor` (vendored). Always `.prepare(spec)` in `prepare`. **No EQ cramping ever** — IIR filters near Nyquist need oversampling; pre-warping alone is insufficient. The vendored EQs handle this.
 - **Metering** — `std::atomic<float>` with `relaxed`, written from the audio thread, polled by the UI on a 30 Hz `juce::Timer`. SIMD-friendly peak detection via `juce::FloatVectorOperations::findMinAndMax`.
 - **Smoothing** — `juce::SmoothedValue` with a 20 ms ramp is the default for any continuous control (faders, pans, gains). Bus toggles smooth 0..1 over 20 ms to avoid clicks on assign/unassign.

@@ -18,6 +18,7 @@ AudioSettingsPanel::AudioSettingsPanel (juce::AudioDeviceManager& dm,
         /*stereoPairs*/ false, /*hideAdvanced*/ false);
     addAndMakeVisible (*selector);
 
+#if defined(__linux__)
     addAndMakeVisible (periodsLabel);
     periodsLabel.setJustificationType (juce::Justification::centredRight);
 
@@ -32,6 +33,7 @@ AudioSettingsPanel::AudioSettingsPanel (juce::AudioDeviceManager& dm,
                               "buffer sizes; decrease for lower latency.");
     periodsCombo.onChange = [this] { applyPeriodsChange(); };
     addAndMakeVisible (periodsCombo);
+#endif
 
     selfTestButton.onClick = [this] { openSelfTest(); };
     selfTestButton.setTooltip (juce::CharPointer_UTF8 (
@@ -110,8 +112,10 @@ void AudioSettingsPanel::resized()
 
     // Bottom row: Periods + Oversampling + Self-Test button.
     auto bottom = area.removeFromBottom (32);
+#if defined(__linux__)
     periodsLabel.setBounds       (bottom.removeFromLeft (180).reduced (4, 4));
     periodsCombo.setBounds       (bottom.removeFromLeft (100).reduced (4, 4));
+#endif
     oversamplingLabel.setBounds  (bottom.removeFromLeft (160).reduced (4, 4));
     oversamplingCombo.setBounds  (bottom.removeFromLeft (120).reduced (4, 4));
     selfTestButton.setBounds     (bottom.removeFromRight (160).reduced (4, 4));
@@ -137,7 +141,7 @@ void AudioSettingsPanel::openSelfTest()
     opts.escapeKeyTriggersCloseButton = true;
     opts.useNativeTitleBar = true;
     opts.resizable = true;
-    opts.launchAsync();
+    if (auto* dw = opts.launchAsync()) dw->toFront (true);
 }
 
 void AudioSettingsPanel::applyUiScaleChange()
@@ -147,6 +151,7 @@ void AudioSettingsPanel::applyUiScaleChange()
     juce::Desktop::getInstance().setGlobalScaleFactor (scale);
 }
 
+#if defined(__linux__)
 void AudioSettingsPanel::applyPeriodsChange()
 {
     const int p = periodsCombo.getSelectedId();
@@ -160,6 +165,7 @@ void AudioSettingsPanel::applyPeriodsChange()
     auto setup = deviceManager.getAudioDeviceSetup();
     deviceManager.setAudioDeviceSetup (setup, /*treatAsChosenDevice*/ true);
 }
+#endif
 
 void AudioSettingsPanel::applyOversamplingChange()
 {

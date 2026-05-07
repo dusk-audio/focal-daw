@@ -31,7 +31,7 @@ public:
         setResizable (true, true);  // resizable + corner resizer
         // Min height keeps the console usable; the tape strip is collapsible
         // so we don't need to budget for it in the floor.
-        setResizeLimits (ConsoleView::minimumContentWidth() + 24, 880, 32768, 32768);
+        setResizeLimits (ConsoleView::minimumContentWidth() + 24, 750, 32768, 32768);
 
         // Restore prior session's window geometry. JUCE's
         // restoreWindowStateFromString rebuilds bounds + fullscreen state

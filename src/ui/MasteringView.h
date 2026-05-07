@@ -114,11 +114,13 @@ private:
 
     // Embedded editors for the bottom row (EQ | Multiband Comp | Limiter).
     // EQ uses a custom curve display + band controls (MasteringEqEditor).
-    // Multiband Comp embeds the UniversalCompressor's own AudioProcessorEditor.
+    // Multiband Comp embeds ONLY the multi-comp donor's MultibandCompressor-
+    // Panel — not the full UniversalCompressor editor (which would include
+    // the mode selector for Opto/FET/VCA/Bus/etc., irrelevant here).
     // Limiter uses a Waves L4-style custom MasteringLimiterEditor.
     // Each panel hosts its own ON toggle in its header.
     std::unique_ptr<class MasteringEqEditor>      eqEditor;
-    std::unique_ptr<juce::AudioProcessorEditor>   compEditor;
+    std::unique_ptr<juce::Component>              compEditor;
     std::unique_ptr<class MasteringLimiterEditor> limiterEditor;
 
     // Wrapper component that hosts the embedded plugin editor and adds a

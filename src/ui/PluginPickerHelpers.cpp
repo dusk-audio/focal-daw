@@ -54,13 +54,21 @@ void openFileChooser (PluginSlot& slot,
                        std::unique_ptr<juce::FileChooser>& chooserOwner,
                        std::function<void()> onChange)
 {
-    // Linux VST3 plugins are bundles (directories), so the chooser allows
-    // both files and directories. canSelectDirectories lets the user pick
-    // the .vst3 bundle root.
+    // VST3 plugins are bundles (directories), so the chooser allows both
+    // files and directories. canSelectDirectories lets the user pick the
+    // .vst3 bundle root. Default location is platform-specific - macOS
+    // installs to ~/Library/Audio/Plug-Ins/VST3; Linux uses ~/.vst3.
+#if defined(__APPLE__)
+    const auto defaultDir = juce::File::getSpecialLocation (juce::File::userHomeDirectory)
+                                .getChildFile ("Library/Audio/Plug-Ins/VST3");
+#else
+    const auto defaultDir = juce::File::getSpecialLocation (juce::File::userHomeDirectory)
+                                .getChildFile (".vst3");
+#endif
     chooserOwner = std::make_unique<juce::FileChooser> (
         "Select a plugin",
-        juce::File::getSpecialLocation (juce::File::userHomeDirectory).getChildFile (".vst3"),
-        "*.vst3;*.so;*.lv2");
+        defaultDir,
+        "*.vst3;*.component;*.so;*.lv2");
 
     auto* chooserPtr = chooserOwner.get();
     chooserPtr->launchAsync (

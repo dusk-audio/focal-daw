@@ -2,6 +2,7 @@
 #include "FocalLookAndFeel.h"
 #include "ChannelEqEditor.h"
 #include "ChannelCompEditor.h"
+#include "DimOverlay.h"
 #include "../engine/AudioEngine.h"
 #include "../engine/PluginSlot.h"
 #include "../engine/PluginManager.h"
@@ -903,6 +904,12 @@ void ChannelStripComponent::setCompSectionVisible (bool visible)
     threshMeterLabel.setVisible (false);   // legacy "THR" header, no longer used
     grPeakLabel    .setVisible (false);    // numeric GR readout retired - the
                                             // meter bar already shows GR clearly
+
+    // Re-apply the per-mode filter so only the active mode's knobs are
+    // shown. Without this, flipping out of SUMMARY (or any path that
+    // re-shows the section) leaves all 13 per-mode knobs visible at the
+    // same physical positions and they overlap.
+    if (visible) refreshCompModeButtons();
 }
 
 void ChannelStripComponent::setCompactMode (bool compact)
@@ -1047,14 +1054,22 @@ void ChannelStripComponent::runPluginScanModal()
 
 void ChannelStripComponent::openPluginFileChooser()
 {
-    // Linux VST3 plugins are directories (.vst3 bundles). The chooser uses
+    // VST3 plugins are directories (.vst3 bundles). The chooser uses
     // canSelectDirectories so the user can pick the bundle root. AsyncWork
     // shape: the chooser owns itself in `activePluginChooser` so it survives
-    // the showAsync return, and we delete it on the callback.
+    // the showAsync return, and we delete it on the callback. Default
+    // location is platform-specific.
+#if defined(__APPLE__)
+    const auto defaultDir = juce::File::getSpecialLocation (juce::File::userHomeDirectory)
+                                .getChildFile ("Library/Audio/Plug-Ins/VST3");
+#else
+    const auto defaultDir = juce::File::getSpecialLocation (juce::File::userHomeDirectory)
+                                .getChildFile (".vst3");
+#endif
     activePluginChooser = std::make_unique<juce::FileChooser> (
         "Select a plugin",
-        juce::File::getSpecialLocation (juce::File::userHomeDirectory).getChildFile (".vst3"),
-        "*.vst3;*.so;*.lv2");
+        defaultDir,
+        "*.vst3;*.component;*.so;*.lv2");
 
     juce::Component::SafePointer<ChannelStripComponent> safe (this);
     activePluginChooser->launchAsync (
@@ -1187,6 +1202,7 @@ void ChannelStripComponent::openPluginEditor()
     opts.useNativeTitleBar = true;
     opts.resizable = editor->isResizable();
     activePluginEditorDialog = opts.launchAsync();
+    if (activePluginEditorDialog != nullptr) activePluginEditorDialog->toFront (true);
 }
 
 void ChannelStripComponent::closePluginEditor()
@@ -1220,6 +1236,7 @@ void ChannelStripComponent::openEqEditorPopup()
     if (topLevel == nullptr) topLevel = this;
     const auto anchor = topLevel->getLocalArea (this, eqCompactButton.getBounds());
 
+    attachDimOverlay();
     auto& box = juce::CallOutBox::launchAsynchronously (
         std::move (panel), anchor, topLevel);
     box.setDismissalMouseClicksAreAlwaysConsumed (true);
@@ -1253,6 +1270,7 @@ void ChannelStripComponent::openCompEditorPopup()
     if (topLevel == nullptr) topLevel = this;
     const auto anchor = topLevel->getLocalArea (this, compCompactButton.getBounds());
 
+    attachDimOverlay();
     auto& box = juce::CallOutBox::launchAsynchronously (
         std::move (panel), anchor, topLevel);
     box.setDismissalMouseClicksAreAlwaysConsumed (true);
@@ -1265,11 +1283,45 @@ void ChannelStripComponent::openCompEditorPopup()
     activeCompBox = &box;
 }
 
+void ChannelStripComponent::attachDimOverlay()
+{
+    if (activeDimOverlay != nullptr) return;
+
+    auto* topLevel = getTopLevelComponent();
+    if (topLevel == nullptr) return;
+
+    activeDimOverlay = std::make_unique<DimOverlay>();
+    activeDimOverlay->setBounds (topLevel->getLocalBounds());
+    activeDimOverlay->onClick = [this]
+    {
+        if (auto* eq  = activeEqBox.getComponent())   eq->dismiss();
+        if (auto* cmp = activeCompBox.getComponent()) cmp->dismiss();
+    };
+    topLevel->addAndMakeVisible (activeDimOverlay.get());
+    // CallOutBox::launchAsynchronously adds the box to the desktop / top
+    // level after this call returns; since it's added later, it ends up
+    // above the dim in z-order — exactly what we want.
+}
+
+void ChannelStripComponent::detachDimOverlay()
+{
+    activeDimOverlay.reset();
+}
+
 void ChannelStripComponent::timerCallback()
 {
     // Plugin-slot button reflects the slot's current load state. Cheap -
     // just an atomic-pointer read + string compare against the cached name.
     refreshPluginSlotButton();
+
+    // Tear down the dim overlay once both popups have closed. Polling at
+    // 30 Hz is cheaper than wiring a ComponentListener on each CallOutBox.
+    if (activeDimOverlay != nullptr
+        && activeEqBox.getComponent() == nullptr
+        && activeCompBox.getComponent() == nullptr)
+    {
+        detachDimOverlay();
+    }
 
     // Sync the inline COMP on/off button with the underlying atom so it
     // reflects writes made from other surfaces - the meter-strip threshold

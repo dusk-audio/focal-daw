@@ -128,6 +128,18 @@ void StartupDialog::resized()
 
 void StartupDialog::closeDialog (int returnCode)
 {
+    // Embedded-modal hosts wire onDismiss to delete the dialog + its dim
+    // overlay. juce::DialogWindow hosts (legacy path) reach the dialog via
+    // exitModalState; kept here so the dialog still works either way.
+    juce::ignoreUnused (returnCode);
+    // Move the callback into a local before invoking — host's onDismiss
+    // typically deletes `this`, after which touching any member (including
+    // returning to a member function frame that re-reads `this`) is UB.
+    if (auto cb = std::move (onDismiss))
+    {
+        cb();
+        return;
+    }
     if (auto* parent = findParentComponentOfClass<juce::DialogWindow>())
         parent->exitModalState (returnCode);
 }

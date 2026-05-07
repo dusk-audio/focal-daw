@@ -1,4 +1,5 @@
 #include "TapeStrip.h"
+#include "../session/MarkerEditActions.h"
 #include "../session/RegionEditActions.h"
 
 namespace focal
@@ -340,7 +341,10 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
                          hoveredMarkerIdx]
                         {
                             if (safeThis == nullptr) return;
-                            safeThis->session.removeMarker (hoveredMarkerIdx);
+                            auto& um = safeThis->engine.getUndoManager();
+                            um.beginNewTransaction ("Delete marker");
+                            um.perform (new RemoveMarkerAction (
+                                safeThis->session, hoveredMarkerIdx));
                             safeThis->repaint();
                         });
         }
@@ -349,7 +353,10 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
                      clickedSample]
                     {
                         if (safeThis == nullptr) return;
-                        safeThis->session.addMarker (clickedSample);
+                        auto& um = safeThis->engine.getUndoManager();
+                        um.beginNewTransaction ("Add marker");
+                        um.perform (new AddMarkerAction (
+                            safeThis->session, clickedSample));
                         safeThis->repaint();
                     });
         if (! session.getMarkers().empty())
@@ -645,12 +652,26 @@ void TapeStrip::mouseUp (const juce::MouseEvent& e)
             && markerDrag.index >= 0
             && markerDrag.index < (int) session.getMarkers().size())
         {
+            // Capture the drag's after-state, build the matching
+            // MoveMarkerAction so the swap is one undo transaction. The
+            // action's perform() finds the marker at toSamples and is
+            // a no-op (drag already mutated it); undo() flips it back.
+            auto& mks = session.getMarkers();
+            const auto& m = mks[(size_t) markerDrag.index];
+            const auto toSamples = m.timelineSamples;
+            const auto name      = m.name;
+
             // Re-sort by timelineSamples so the painter still iterates
             // left-to-right after the drag.
-            auto& mks = session.getMarkers();
             std::stable_sort (mks.begin(), mks.end(),
                 [] (const Marker& a, const Marker& b)
                 { return a.timelineSamples < b.timelineSamples; });
+
+            auto& um = engine.getUndoManager();
+            um.beginNewTransaction ("Move marker");
+            um.perform (new MoveMarkerAction (session, name,
+                                                markerDrag.originSample,
+                                                toSamples));
         }
         else if (! markerDrag.moved
                  && markerDrag.index >= 0
@@ -991,6 +1012,45 @@ void TapeStrip::paint (juce::Graphics& g)
                                  badge, juce::Justification::centred, false);
                 }
             }
+        }
+
+        // ── Automation ribbon (overlay) ──────────────────────────────
+        // Plots the FaderDb lane's normalised points across the row as a
+        // thin polyline. Drawn AFTER region blocks so it reads on top of
+        // them. Empty lane = nothing rendered (zero-cost when the user
+        // hasn't recorded automation). Future: per-track param picker so
+        // pan / sends / mute / solo can swap in here.
+        const auto& fadeLane = session.track (t)
+                                   .automationLanes[(size_t) AutomationParam::FaderDb];
+        if (! fadeLane.points.empty())
+        {
+            const auto rowF = row.toFloat();
+            const auto leftX  = (float) col.getX();
+            const auto rightX = (float) col.getRight();
+            const auto pointPx = [&] (const AutomationPoint& p) -> juce::Point<float>
+            {
+                const float x = (float) xForSample (p.timeSamples);
+                // Normalised value 0..1 → row top..bottom (inverted: 1.0
+                // sits at the top so a higher fader reads as "up").
+                const float y = rowF.getBottom()
+                              - juce::jlimit (0.0f, 1.0f, p.value) * rowF.getHeight();
+                return { x, y };
+            };
+
+            juce::Path curve;
+            const auto first = pointPx (fadeLane.points.front());
+            // Hold from row-left edge to the first point so the curve
+            // doesn't appear to fade in from nowhere.
+            curve.startNewSubPath (leftX, first.y);
+            curve.lineTo (first.x, first.y);
+            for (size_t i = 1; i < fadeLane.points.size(); ++i)
+                curve.lineTo (pointPx (fadeLane.points[i]));
+            // Hold the final value out to the row's right edge.
+            const auto last = pointPx (fadeLane.points.back());
+            curve.lineTo (rightX, last.y);
+
+            g.setColour (juce::Colour (0xff7fdfff).withAlpha (0.85f));  // soft cyan
+            g.strokePath (curve, juce::PathStrokeType (1.2f));
         }
     }
 

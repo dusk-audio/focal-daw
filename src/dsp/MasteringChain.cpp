@@ -8,7 +8,7 @@ void MasteringChain::bind (const MasteringParams& params) noexcept
     paramsRef = &params;
 }
 
-void MasteringChain::prepare (double sampleRate, int blockSize)
+void MasteringChain::prepare (double sampleRate, int blockSize, int oversamplingFactor)
 {
     const int bs = juce::jmax (1, blockSize);
 
@@ -18,6 +18,12 @@ void MasteringChain::prepare (double sampleRate, int blockSize)
 #if FOCAL_HAS_DUSK_DSP
     busComp.setPlayConfigDetails (2, 2, sampleRate, bs);
     busComp.prepareToPlay (sampleRate, bs);
+    // Honor the global Effect Oversampling setting. The donor defaults to
+    // internal-oversampling=ON, so without this the mastering bus comp
+    // always oversamples regardless of the user's pick. 1× → off; 2× / 4× →
+    // engages the donor's internal 2× (it doesn't expose 4× at the comp
+    // level today, but enables anti-aliasing for the saturation stage).
+    busComp.setInternalOversamplingEnabled (oversamplingFactor > 1);
     compStereoBuffer.setSize (2, bs, false, false, true);
     compMidi.clear();
     bindCompParams();
@@ -103,7 +109,10 @@ void MasteringChain::updateLimiterParameters() noexcept
 
 void MasteringChain::processInPlace (float* L, float* R, int numSamples) noexcept
 {
+    juce::ScopedNoDenormals noDenormals;
+
     jassert (numSamples <= preparedBlockSize);
+    if (numSamples == 0) return;
 
     // 5-band digital EQ - replaces the Tube EQ that the master strip
     // uses in Mixing. Mastering wants a clean parametric EQ.
@@ -127,7 +136,7 @@ void MasteringChain::processInPlace (float* L, float* R, int numSamples) noexcep
                          sizeof (float) * (size_t) n);
         }
         if (paramsRef != nullptr)
-            paramsRef->meterCompGrDb.store (-busComp.getGainReduction(),
+            paramsRef->meterCompGrDb.store (busComp.getGainReduction(),
                                              std::memory_order_relaxed);
     }
 #endif

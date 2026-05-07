@@ -258,6 +258,7 @@ void AuxLaneComponent::togglePopoutForSlot (int slotIdx)
     opts.resizable = true;
 
     ui.popoutWindow = opts.launchAsync();
+    if (ui.popoutWindow != nullptr) ui.popoutWindow->toFront (true);
     refreshSlotControls (slotIdx);
 }
 

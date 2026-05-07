@@ -29,7 +29,9 @@ juce_add_gui_app(Focal
     PRODUCT_NAME       "Focal"
     COMPANY_NAME       "Marc Korte"
     BUNDLE_ID          "com.marckorte.focal"
-    VERSION            ${PROJECT_VERSION})
+    VERSION            ${PROJECT_VERSION}
+    MICROPHONE_PERMISSION_ENABLED TRUE
+    MICROPHONE_PERMISSION_TEXT    "Focal needs microphone access to record audio from your inputs.")
 
 # Dusk Audio plugins repo — donor for the analog DSP cores (4K EQ filter chain,
 # FET/Opto compressor, Pultec EQ, tape saturation, console saturation, plus the
@@ -68,6 +70,7 @@ target_sources(Focal PRIVATE
     src/dsp/MasteringChain.cpp
     src/dsp/MasteringDigitalEq.cpp
     src/dsp/Metronome.cpp
+    src/session/MarkerEditActions.cpp
     src/session/RecentSessions.cpp
     src/session/RegionEditActions.cpp
     src/session/Session.cpp
@@ -86,6 +89,7 @@ target_sources(Focal PRIVATE
     src/ui/StartupDialog.cpp
     src/engine/AudioPipelineSelfTest.cpp
     src/ui/ConsoleView.cpp
+    src/ui/DimOverlay.cpp
     src/ui/MainComponent.cpp
     src/ui/MasteringEqEditor.cpp
     src/ui/MasteringLimiterEditor.cpp
@@ -128,7 +132,11 @@ if(DEFINED DUSK_PLUGINS_PATH)
     #                 used here as a juce::AudioProcessor; only its DSP path is
     #                 active — the plugin editor is compiled-in but never
     #                 instantiated by Focal's UI)
-    #   - tape-echo  (TapeEchoDSP::TapeSaturation — master bus tape sat)
+    #   - tape-echo    (TapeEchoDSP::TapeSaturation — legacy master bus tape sat,
+    #                   being replaced by TapeMachine; still vendored while the
+    #                   migration completes)
+    #   - TapeMachine  (full-featured tape emulation hosted on the master bus;
+    #                   editor opened via the gear button next to TAPE)
     target_include_directories(Focal PRIVATE
         "${DUSK_PLUGINS_PATH}/plugins/shared"
         "${DUSK_PLUGINS_PATH}/plugins/shared/AnalogEmulation"
@@ -136,7 +144,9 @@ if(DEFINED DUSK_PLUGINS_PATH)
         "${DUSK_PLUGINS_PATH}/plugins/multi-q"
         "${DUSK_PLUGINS_PATH}/plugins/multi-comp"
         "${DUSK_PLUGINS_PATH}/plugins/multi-comp/HardwareEmulation"
-        "${DUSK_PLUGINS_PATH}/plugins/tape-echo/Source/DSP")
+        "${DUSK_PLUGINS_PATH}/plugins/tape-echo/Source/DSP"
+        "${DUSK_PLUGINS_PATH}/plugins/TapeMachine/Source"
+        "${DUSK_PLUGINS_PATH}/plugins/TapeMachine/Source/GUI")
 
     # Compile multi-comp's processor + editor + shared LEDMeter so
     # UniversalCompressor links cleanly. Editor sources are linked but not
@@ -146,7 +156,33 @@ if(DEFINED DUSK_PLUGINS_PATH)
         "${DUSK_PLUGINS_PATH}/plugins/multi-comp/multicomp.cpp"
         "${DUSK_PLUGINS_PATH}/plugins/multi-comp/AnalogLookAndFeel.cpp"
         "${DUSK_PLUGINS_PATH}/plugins/multi-comp/EnhancedCompressorEditor.cpp"
-        "${DUSK_PLUGINS_PATH}/plugins/shared/LEDMeter.cpp")
+        "${DUSK_PLUGINS_PATH}/plugins/shared/LEDMeter.cpp"
+        "${DUSK_PLUGINS_PATH}/plugins/TapeMachine/Source/PluginProcessor.cpp"
+        "${DUSK_PLUGINS_PATH}/plugins/TapeMachine/Source/PluginEditor.cpp"
+        "${DUSK_PLUGINS_PATH}/plugins/TapeMachine/Source/ImprovedTapeEmulation.cpp"
+        "${DUSK_PLUGINS_PATH}/plugins/TapeMachine/Source/GUI/AnalogVUMeter.cpp"
+        "${DUSK_PLUGINS_PATH}/plugins/TapeMachine/Source/GUI/TapeReelComponent.cpp"
+        "${DUSK_PLUGINS_PATH}/plugins/TapeMachine/Source/GUI/TapeMachineLookAndFeel.cpp")
+
+    # Both multi-comp's editor and TapeMachine's editor declare a class named
+    # AnalogVUMeter in the global namespace, which collides at link time.
+    # Rename the multi-comp one in-translation-unit so the donors stay
+    # unmodified. Applied to every multi-comp .cpp that pulls in
+    # AnalogLookAndFeel.h (directly or via EnhancedCompressorEditor.h).
+    set_source_files_properties(
+        "${DUSK_PLUGINS_PATH}/plugins/multi-comp/multicomp.cpp"
+        "${DUSK_PLUGINS_PATH}/plugins/multi-comp/AnalogLookAndFeel.cpp"
+        "${DUSK_PLUGINS_PATH}/plugins/multi-comp/EnhancedCompressorEditor.cpp"
+        PROPERTIES
+        COMPILE_DEFINITIONS "AnalogVUMeter=MultiCompAnalogVUMeter")
+
+    # Both donors define createPluginFilter() as their JUCE plugin entry
+    # point. Focal instantiates them directly so neither is called, but the
+    # global symbol still collides at link. Rename the TapeMachine one.
+    set_source_files_properties(
+        "${DUSK_PLUGINS_PATH}/plugins/TapeMachine/Source/PluginProcessor.cpp"
+        PROPERTIES
+        COMPILE_DEFINITIONS "createPluginFilter=createTapeMachinePluginFilter")
 
     target_compile_definitions(Focal PRIVATE FOCAL_HAS_DUSK_DSP=1)
 endif()
@@ -165,10 +201,21 @@ target_compile_definitions(Focal PRIVATE
     # plug-in format exists for this plug-in".
     JUCE_PLUGINHOST_VST3=1
     JUCE_PLUGINHOST_LV2=1
-    # Projucer-style macros that vendored multi-comp sources expect.
+    # AU is the dominant native plugin format on macOS; without this
+    # define the format is silently absent from addDefaultFormats().
+    JUCE_PLUGINHOST_AU=$<IF:$<PLATFORM_ID:Darwin>,1,0>
+    # Projucer-style macros that vendored plugin sources expect. multi-comp
+    # uses VersionString / Name / Manufacturer; TapeMachine additionally
+    # references the IsMidiEffect / IsSynth / WantsMidiInput / ProducesMidiOutput
+    # toggles from inside #if blocks, so we provide defaults (all 0) globally
+    # rather than per-source.
     JucePlugin_VersionString="${PROJECT_VERSION}"
     JucePlugin_Name="Focal_Comp"
-    JucePlugin_Manufacturer="Marc Korte")
+    JucePlugin_Manufacturer="Marc Korte"
+    JucePlugin_IsMidiEffect=0
+    JucePlugin_IsSynth=0
+    JucePlugin_WantsMidiInput=0
+    JucePlugin_ProducesMidiOutput=0)
 
 target_link_libraries(Focal PRIVATE
     juce::juce_audio_basics

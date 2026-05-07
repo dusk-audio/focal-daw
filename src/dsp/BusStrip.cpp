@@ -18,16 +18,41 @@ void BusStrip::prepare (double sampleRate, int blockSize, int oversamplingFactor
     panGainL .setCurrentAndTargetValue (1.0f);
     panGainR .setCurrentAndTargetValue (1.0f);
 
+    // Bus oversampling: wrap (EQ + UC) externally. UC's internal toggle is
+    // disabled because Focal does the up/downsample around the chain — having
+    // UC oversample on top would compound. EQ has no internal toggle, so the
+    // external wrap is the only way to suppress its console-saturation
+    // aliasing. Two stages = 4×, one stage = 2×, none = 1× (no oversampling).
+    const int factor = (oversamplingFactor == 2 || oversamplingFactor == 4)
+                            ? oversamplingFactor : 1;
+    oversamplerStages = (factor == 4) ? 2 : (factor == 2) ? 1 : 0;
+    const int bsClamped = juce::jmax (1, blockSize);
+    if (oversamplerStages > 0)
+    {
+        oversampler = std::make_unique<juce::dsp::Oversampling<float>> (
+            2, (size_t) oversamplerStages,
+            juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR,
+            /*isMaximumQuality*/ true);
+        oversampler->initProcessing ((size_t) bsClamped);
+        oversampler->reset();
+    }
+    else
+    {
+        oversampler.reset();
+    }
+
+    const double prepSr = sampleRate * (double) factor;
+    const int    prepBs = bsClamped * factor;
+
 #if FOCAL_HAS_DUSK_DSP
-    eq.prepare (sampleRate, juce::jmax (1, blockSize), 2);
+    eq.prepare (prepSr, prepBs, 2);
     eq.reset();
 
-    busComp.setPlayConfigDetails (2, 2, sampleRate, juce::jmax (1, blockSize));
-    busComp.prepareToPlay (sampleRate, juce::jmax (1, blockSize));
-    // Internal oversampling tracks the global factor - same approach as
-    // MasterBus. 1× → off (default), 2× / 4× → on (donor's internal 2×).
-    busComp.setInternalOversamplingEnabled (oversamplingFactor > 1);
-    compStereoBuffer.setSize (2, juce::jmax (1, blockSize), false, false, true);
+    busComp.setPlayConfigDetails (2, 2, prepSr, prepBs);
+    busComp.prepareToPlay (prepSr, prepBs);
+    // External wrap handles oversampling; UC's internal toggle is OFF.
+    busComp.setInternalOversamplingEnabled (false);
+    compStereoBuffer.setSize (2, prepBs, false, false, true);
     compMidi.clear();
     bindCompParams();
 #endif
@@ -134,21 +159,47 @@ void BusStrip::processInPlace (float* L, float* R, int numSamples) noexcept
     updateGainTargets();
 
 #if FOCAL_HAS_DUSK_DSP
+    updateEqParameters();
+    updateCompParameters();
+
+    if (oversamplerStages > 0 && oversampler != nullptr)
     {
+        // Oversampled chain: upsample (L, R), run EQ + UC at oversampled
+        // rate, downsample back into (L, R). EQ and UC were prepared at
+        // sampleRate × factor in prepare() so their coefficients are
+        // correct for the upsampled rate.
+        const float* readPtrs[2]  = { L, R };
+        float*       writePtrs[2] = { L, R };
+        juce::dsp::AudioBlock<const float> nativeIn  (readPtrs,  2, (size_t) numSamples);
+        juce::dsp::AudioBlock<float>       nativeOut (writePtrs, 2, (size_t) numSamples);
+
+        auto upBlock = oversampler->processSamplesUp (nativeIn);
+        const int upN = (int) upBlock.getNumSamples();
+        float* upPtrs[2] = { upBlock.getChannelPointer (0),
+                              upBlock.getChannelPointer (1) };
+        juce::AudioBuffer<float> upBuf (upPtrs, 2, upN);
+        eq.process (upBuf);
+
+        const int compBufSize = compStereoBuffer.getNumSamples();
+        for (int offset = 0; offset < upN; offset += compBufSize)
+        {
+            const int n = juce::jmin (compBufSize, upN - offset);
+            float* compView[2] = { upPtrs[0] + offset, upPtrs[1] + offset };
+            juce::AudioBuffer<float> compBuf (compView, 2, n);
+            compMidi.clear();
+            busComp.processBlock (compBuf, compMidi);
+        }
+
+        oversampler->processSamplesDown (nativeOut);
+    }
+    else
+    {
+        // Native-rate path (factor == 1).
         float* channels[2] = { L, R };
         juce::AudioBuffer<float> buf (channels, 2, numSamples);
-        updateEqParameters();
         eq.process (buf);
-    }
 
-    // Wrap L/R directly as a 2-channel AudioBuffer view and let the comp
-    // process in place - UniversalCompressor::processBlock only mutates
-    // internal scratch, not the input buffer's structure. Chunk by prepared
-    // block size to keep the comp's internal buffers from overflowing on
-    // host-driven oversized blocks.
-    {
         const int bufSize = compStereoBuffer.getNumSamples();
-        updateCompParameters();
         for (int offset = 0; offset < numSamples; offset += bufSize)
         {
             const int n = juce::jmin (bufSize, numSamples - offset);
@@ -157,9 +208,11 @@ void BusStrip::processInPlace (float* L, float* R, int numSamples) noexcept
             compMidi.clear();
             busComp.processBlock (compBuf, compMidi);
         }
+    }
 
+    {
         if (paramsRef != nullptr)
-            paramsRef->meterGrDb.store (-busComp.getGainReduction(),
+            paramsRef->meterGrDb.store (busComp.getGainReduction(),
                                          std::memory_order_relaxed);
     }
 #endif

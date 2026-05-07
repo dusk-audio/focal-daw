@@ -17,6 +17,7 @@
 #include "PluginManager.h"
 #include "RecordManager.h"
 #include "Transport.h"
+#include "FocalPlayHead.h"
 
 namespace focal
 {
@@ -46,6 +47,7 @@ public:
     PluginManager&    getPluginManager()   noexcept { return pluginManager; }
     MasteringPlayer&  getMasteringPlayer() noexcept { return masteringPlayer; }
     MasteringChain&   getMasteringChain()  noexcept { return masteringChain; }
+    MasterBus&        getMasterBus()       noexcept { return master; }
     Metronome&        getMetronome()       noexcept { return metronome; }
 
     Stage getStage() const noexcept { return stage.load (std::memory_order_relaxed); }
@@ -148,6 +150,7 @@ private:
     juce::AudioDeviceManager deviceManager;
 
     Transport       transport;
+    FocalPlayHead   playHead        { transport };
     RecordManager   recordManager   { session };
     PlaybackEngine  playbackEngine  { session };
     PluginManager   pluginManager;  // shared across all per-channel PluginSlots
@@ -167,7 +170,8 @@ private:
     std::vector<float> mixL, mixR;
     std::array<std::vector<float>, Session::kNumBuses> busL, busR;
     std::array<std::vector<float>, Session::kNumAuxLanes> auxLaneL, auxLaneR;
-    std::vector<float> playbackScratch;  // per-track playback read scratch
+    std::vector<float> playbackScratch;   // per-track playback L (or mono)
+    std::vector<float> playbackScratchR;  // per-track playback R (stereo regions only)
 
     std::atomic<double> currentSampleRate { 0.0 };
     std::atomic<int>    currentBlockSize  { 0 };

@@ -3,10 +3,11 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_dsp/juce_dsp.h>
 #include <atomic>
+#include <memory>
 #include "../session/Session.h"
 
 #if FOCAL_HAS_DUSK_DSP
-  #include "TapeSaturation.h"     // tape-echo/Source/DSP - TapeEchoDSP::TapeSaturation
+  #include "PluginProcessor.h"    // TapeMachine/Source - master tape emulation (full plugin processor + editor)
   #include "TubeEQProcessor.h"    // multi-q - Pultec-style EQ
   #include "UniversalCompressor.h"// multi-comp - Bus mode for the master comp
 #endif
@@ -29,14 +30,21 @@ public:
 
     void processInPlace (float* L, float* R, int numSamples) noexcept;
 
+#if FOCAL_HAS_DUSK_DSP
+    // Live access to the hosted TapeMachine processor. Used by the master
+    // strip's gear button to spawn its editor on demand.
+    TapeMachineAudioProcessor& getTapeProcessor() noexcept { return tape; }
+#endif
+
 private:
     const MasterBusParams* paramsRef = nullptr;
     juce::SmoothedValue<float> faderGain { 1.0f };
 
-    static constexpr float kTapeDrive = 0.5f;
-
 #if FOCAL_HAS_DUSK_DSP
-    TapeEchoDSP::TapeSaturation tape;
+    TapeMachineAudioProcessor   tape;
+    juce::AudioBuffer<float>    tapeStereoBuffer;    // pre-allocated; tape processBlock target
+    juce::MidiBuffer            tapeMidi;            // unused but required by processBlock
+    std::atomic<float>*         tapeBypassAtom = nullptr;
     TubeEQProcessor             tubeEQ;
     TubeEQProcessor::Parameters lastTubeEqParams {};   // see ChannelStrip equivalent
     UniversalCompressor         busComp;
@@ -66,13 +74,20 @@ private:
     }
 #endif
 
-    // Tape-saturation oversampler. Rebuilt at prepare() time based on the
-    // global oversampling factor: nullptr = 1× (no oversampling), 1 stage =
-    // 2×, 2 stages = 4×. unique_ptr because juce::dsp::Oversampling has no
-    // default constructor and the stage count must change between prepares.
-    std::unique_ptr<juce::dsp::Oversampling<float>> oversampler;
-    int oversamplerStages    = 0;     // mirrors what oversampler was built with; 0 = 1×, 1 = 2×, 2 = 4×
     int preparedBlockSize    = 0;
-    int currentOxFactor      = 1;     // 1, 2 or 4 - set in prepare()
+    int currentOxFactor      = 1;     // 1, 2 or 4 - set in prepare(); drives the
+                                       // Focal-side oversampler around (TubeEQ +
+                                       // UC) and the TapeMachine "oversampling"
+                                       // APVTS choice atom. UC's internal toggle
+                                       // is OFF on the master bus because the
+                                       // Focal-side wrap handles oversampling.
+
+    // Master oversampler around (TubeEQ + bus comp). Both stages have
+    // saturation (tube + UC) that aliases at native rate; running them at
+    // oversampled rate inside this wrap suppresses it. TapeMachine has
+    // its own internal oversampling (driven via APVTS) so it's processed
+    // at native rate AFTER this wrap.
+    std::unique_ptr<juce::dsp::Oversampling<float>> oversampler;
+    int oversamplerStages    = 0;
 };
 } // namespace focal

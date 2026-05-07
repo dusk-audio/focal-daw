@@ -1,8 +1,10 @@
 #pragma once
 
 #include <juce_audio_basics/juce_audio_basics.h>
+#include <juce_dsp/juce_dsp.h>
 #include "../session/Session.h"
 #include <atomic>
+#include <memory>
 
 #if FOCAL_HAS_DUSK_DSP
   #include "BritishEQProcessor.h"
@@ -25,8 +27,12 @@ class BusStrip
 public:
     BusStrip() = default;
 
-    // oversamplingFactor: 1 (native, default), 2 or 4. Toggles internal
-    // oversampling on the bus comp.
+    // oversamplingFactor: 1 (native, default), 2 or 4. Drives the per-bus
+    // Focal-side juce::dsp::Oversampling wrapper that this strip applies
+    // around BOTH the BritishEQ and the UniversalCompressor (UC). UC's own
+    // internal-oversampling toggle is intentionally left OFF here — the
+    // external wrapper covers both stages, and engaging UC's internal OS
+    // would compound and double-oversample the comp path.
     void prepare (double sampleRate, int blockSize, int oversamplingFactor = 1);
     void bind (const BusParams& params) noexcept;
 
@@ -46,6 +52,13 @@ private:
     UniversalCompressor      busComp;
     juce::MidiBuffer         compMidi;
     juce::AudioBuffer<float> compStereoBuffer;
+
+    // Per-bus Focal-side oversampler wrapping (EQ + UC). The donor's
+    // BritishEQ has console saturation and UC has saturation - both alias
+    // hard at native rate. UC's internal-oversampling toggle is left OFF
+    // here because we wrap externally; doubling oversampling would compound.
+    std::unique_ptr<juce::dsp::Oversampling<float>> oversampler;
+    int oversamplerStages = 0;
 
     std::atomic<float>* compModeAtom        = nullptr;
     std::atomic<float>* compBypassAtom      = nullptr;

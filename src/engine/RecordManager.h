@@ -29,9 +29,17 @@ public:
     void stopRecording (juce::int64 endSample);
 
     // Audio-thread: write `numSamples` of input N for the corresponding armed
-    // track. `inputData` is the audio device's input pointer (or nullptr for
-    // unmapped tracks).
-    void writeInputBlock (int trackIndex, const float* inputData, int numSamples) noexcept;
+    // track. `L` is the left/mono channel; `R` is the right channel for
+    // stereo tracks (nullptr for mono). The writer was created with the
+    // matching channel count in startRecording; the implementation builds the
+    // channel-pointer array to satisfy ThreadedWriter::write's contract that
+    // exactly numChannels pointers are non-null. Passing R != nullptr on a
+    // mono-armed track is a programming error (asserted; only L is written).
+    // Empty blocks (numSamples == 0) early-return without touching the writer.
+    void writeInputBlock (int trackIndex,
+                            const float* L,
+                            const float* R,
+                            int numSamples) noexcept;
 
     bool isActive() const noexcept { return active.load (std::memory_order_relaxed); }
 
@@ -43,6 +51,10 @@ private:
         std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> writer;
         juce::File file;
         juce::int64 framesWritten = 0;
+        int numChannels = 1;  // matches the writer's channel count: 1 for mono
+                              // tracks, 2 for stereo. Stamped onto the committed
+                              // AudioRegion so PlaybackEngine reads back the
+                              // right number of channels.
     };
 
     juce::TimeSliceThread diskThread { "Focal recorder" };

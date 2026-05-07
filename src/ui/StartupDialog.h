@@ -27,6 +27,12 @@ public:
     std::function<void()>            onOpenFile;      // file picker handled by host
     std::function<void()>            onSkip;
 
+    // Fired when the dialog wants to be torn down (after any of the action
+    // callbacks above). Set by hosts that embed the dialog as a child
+    // component instead of a juce::DialogWindow — the embedded path has
+    // no exitModalState equivalent, so the host must do its own cleanup.
+    std::function<void()>            onDismiss;
+
 private:
     void closeDialog (int returnCode);
     void rebuildRecentButtons();

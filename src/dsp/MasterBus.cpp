@@ -21,47 +21,69 @@ void MasterBus::prepare (double sampleRate, int blockSize, int oversamplingFacto
                        ? oversamplingFactor : 1;
 
 #if FOCAL_HAS_DUSK_DSP
-    tape.prepare (sampleRate, juce::jmax (1, blockSize));
-    tape.setDrive (kTapeDrive);
-    tape.reset();
+    // TapeMachine is a full juce::AudioProcessor instance. Configure its bus
+    // layout, prepare it for the working SR/block size, and pre-size the
+    // scratch buffer used to feed processBlock each callback. The bypass
+    // APVTS atom is cached here so the audio thread can flip it lock-free.
+    tape.setPlayConfigDetails (2, 2, sampleRate, juce::jmax (1, blockSize));
+    tape.prepareToPlay (sampleRate, juce::jmax (1, blockSize));
+    tapeStereoBuffer.setSize (2, juce::jmax (1, blockSize), false, false, true);
+    tapeMidi.clear();
+    tapeBypassAtom = tape.getAPVTS().getRawParameterValue ("bypass");
 
-    tubeEQ.prepare (sampleRate, juce::jmax (1, blockSize), 2);
+    // Drive TapeMachine's internal oversampling from the global Audio Settings
+    // factor (Session::oversamplingFactor). The donor's "oversampling" param
+    // is a 3-choice (1x / 2x / 4x); map Focal's 1/2/4 factor to indices 0/1/2.
+    // Use AudioParameterChoice::operator= so JUCE's APVTS listeners fire and
+    // any open editor's combo-box attachment updates — writing the raw atom
+    // directly would skip the notification and leave the UI showing stale
+    // state (combo would still read 4x even after we set 1x in MasterBus).
+    if (auto* osParam = dynamic_cast<juce::AudioParameterChoice*> (
+            tape.getAPVTS().getParameter ("oversampling")))
+    {
+        const int idx = (currentOxFactor == 4) ? 2
+                     : (currentOxFactor == 2) ? 1
+                                              : 0;
+        *osParam = idx;
+    }
+
+    // Master oversampler around (TubeEQ + busComp). Both stages have donor
+    // saturation that aliases at native rate; the wrap moves them to
+    // oversampled rate. UC's internal toggle is OFF here because Focal
+    // does the up/downsample around the chain. TapeMachine has its own
+    // internal oversampling (driven via APVTS above) so it processes at
+    // native rate AFTER this wrap.
+    oversamplerStages = (currentOxFactor == 4) ? 2 : (currentOxFactor == 2) ? 1 : 0;
+    const int bsClamped = juce::jmax (1, blockSize);
+    if (oversamplerStages > 0)
+    {
+        oversampler = std::make_unique<juce::dsp::Oversampling<float>> (
+            2, (size_t) oversamplerStages,
+            juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR,
+            /*isMaximumQuality*/ true);
+        oversampler->initProcessing ((size_t) bsClamped);
+        oversampler->reset();
+    }
+    else
+    {
+        oversampler.reset();
+    }
+
+    const double prepSr = sampleRate * (double) currentOxFactor;
+    const int    prepBs = bsClamped * currentOxFactor;
+
+    tubeEQ.prepare (prepSr, prepBs, 2);
     tubeEQ.reset();
 
-    busComp.setPlayConfigDetails (2, 2, sampleRate, juce::jmax (1, blockSize));
-    busComp.prepareToPlay (sampleRate, juce::jmax (1, blockSize));
-    // UC is the standard path here (Bus mode benefits from sidechain HP at
-    // 60 Hz et al.) - only its internal oversampling is gated by the global
-    // factor. 1× turns the donor's internal 2× off; 2× / 4× both engage the
-    // donor's internal 2× (it doesn't expose 4× at the comp level today).
-    busComp.setInternalOversamplingEnabled (currentOxFactor > 1);
-    compStereoBuffer.setSize (2, juce::jmax (1, blockSize), false, false, true);
+    busComp.setPlayConfigDetails (2, 2, prepSr, prepBs);
+    busComp.prepareToPlay (prepSr, prepBs);
+    busComp.setInternalOversamplingEnabled (false);  // External wrap handles oversampling.
+    compStereoBuffer.setSize (2, prepBs, false, false, true);
     compMidi.clear();
     bindCompParams();
 #endif
 
     preparedBlockSize = blockSize;
-
-    // Tape oversampler - build once per prepare with the right stage count.
-    // 1× → no oversampler instance. 2× → 1 stage. 4× → 2 stages.
-    const int wantStages = (currentOxFactor == 4) ? 2
-                          : (currentOxFactor == 2) ? 1 : 0;
-    if (wantStages == 0)
-    {
-        oversampler.reset();
-        oversamplerStages = 0;
-    }
-    else
-    {
-        oversampler = std::make_unique<juce::dsp::Oversampling<float>> (
-            2 /*channels*/,
-            (size_t) wantStages,
-            juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR,
-            /*isMaximumQuality*/ true);
-        oversampler->initProcessing ((size_t) juce::jmax (1, blockSize));
-        oversampler->reset();
-        oversamplerStages = wantStages;
-    }
 }
 
 #if FOCAL_HAS_DUSK_DSP
@@ -140,10 +162,6 @@ void MasterBus::processInPlace (float* L, float* R, int numSamples) noexcept
 
     const bool tapeOn = paramsRef != nullptr
                        && paramsRef->tapeEnabled.load (std::memory_order_relaxed);
-    // Tape oversampling now follows the global factor set at prepare() time.
-    // Per-effect tapeHQ is no longer consulted - Session::oversamplingFactor
-    // is the single source of truth for "1× / 2× / 4× across all effects".
-    const bool useOversampler = (oversampler != nullptr);
 
     if (paramsRef != nullptr)
     {
@@ -155,65 +173,88 @@ void MasterBus::processInPlace (float* L, float* R, int numSamples) noexcept
     }
 
 #if FOCAL_HAS_DUSK_DSP
-    // EQ first - tube saturation in TubeEQ feels musical pre-comp.
-    // Chunk by preparedBlockSize so a host-driven numSamples > preparedBlockSize
-    // never overflows TubeEQ's internal scratch (mirrors the comp chunking
-    // below).
-    {
-        updateEqParameters();
-        const int bufSize = juce::jmax (1, preparedBlockSize);
-        for (int offset = 0; offset < numSamples; offset += bufSize)
-        {
-            const int n = juce::jmin (bufSize, numSamples - offset);
-            float* channels[2] = { L + offset, R + offset };
-            juce::AudioBuffer<float> buf (channels, 2, n);
-            tubeEQ.process (buf);
-        }
-    }
+    updateEqParameters();
+    updateCompParameters();
 
-    // Bus compressor - wrap L/R as a 2-channel AudioBuffer view and process
-    // in place. UniversalCompressor::processBlock only resizes internal
-    // sidechain/lookahead scratch; it never replaces the input pointers, so
-    // the prior copy-in/copy-out through compStereoBuffer was wasted cache
-    // pressure. We still chunk by preparedBlockSize so an oversized
-    // host-driven numSamples can't overflow the comp's internals.
+    if (oversamplerStages > 0 && oversampler != nullptr)
     {
-        const int bufSize = compStereoBuffer.getNumSamples();
-        updateCompParameters();
-        for (int offset = 0; offset < numSamples; offset += bufSize)
+        // Oversampled path. Wrap (TubeEQ + busComp) inside the up/down so
+        // their saturation is band-limited before downsampling. EQ and UC
+        // were prepped at oversampled rate / block size in prepare().
+        const float* readPtrs[2]  = { L, R };
+        float*       writePtrs[2] = { L, R };
+        juce::dsp::AudioBlock<const float> nativeIn  (readPtrs,  2, (size_t) numSamples);
+        juce::dsp::AudioBlock<float>       nativeOut (writePtrs, 2, (size_t) numSamples);
+
+        auto upBlock = oversampler->processSamplesUp (nativeIn);
+        const int upN = (int) upBlock.getNumSamples();
+        float* upPtrs[2] = { upBlock.getChannelPointer (0),
+                              upBlock.getChannelPointer (1) };
+        juce::AudioBuffer<float> upBuf (upPtrs, 2, upN);
+        tubeEQ.process (upBuf);
+
+        const int compBufSize = compStereoBuffer.getNumSamples();
+        for (int offset = 0; offset < upN; offset += compBufSize)
         {
-            const int n = juce::jmin (bufSize, numSamples - offset);
-            float* lrView[2] = { L + offset, R + offset };
-            juce::AudioBuffer<float> compBuf (lrView, 2, n);
+            const int n = juce::jmin (compBufSize, upN - offset);
+            float* compView[2] = { upPtrs[0] + offset, upPtrs[1] + offset };
+            juce::AudioBuffer<float> compBuf (compView, 2, n);
             compMidi.clear();
             busComp.processBlock (compBuf, compMidi);
         }
 
+        oversampler->processSamplesDown (nativeOut);
+    }
+    else
+    {
+        // Native-rate path. EQ + comp run at sample rate; chunk both passes
+        // to honor preparedBlockSize / compStereoBuffer sizes.
+        const int eqBuf = juce::jmax (1, preparedBlockSize);
+        for (int offset = 0; offset < numSamples; offset += eqBuf)
+        {
+            const int n = juce::jmin (eqBuf, numSamples - offset);
+            float* channels[2] = { L + offset, R + offset };
+            juce::AudioBuffer<float> buf (channels, 2, n);
+            tubeEQ.process (buf);
+        }
+        const int compBuf = compStereoBuffer.getNumSamples();
+        for (int offset = 0; offset < numSamples; offset += compBuf)
+        {
+            const int n = juce::jmin (compBuf, numSamples - offset);
+            float* lrView[2] = { L + offset, R + offset };
+            juce::AudioBuffer<float> cb (lrView, 2, n);
+            compMidi.clear();
+            busComp.processBlock (cb, compMidi);
+        }
+    }
+
+    {
+
         if (paramsRef != nullptr)
-            paramsRef->meterGrDb.store (-busComp.getGainReduction(),
+            paramsRef->meterGrDb.store (busComp.getGainReduction(),
                                          std::memory_order_relaxed);
     }
 #endif
 
 #if FOCAL_HAS_DUSK_DSP
-    if (tapeOn && useOversampler)
+    // TapeMachine handles its own internal oversampling (driven from the
+    // global factor via its `oversampling` APVTS param, written in
+    // prepare()). The TAPE button toggles the donor's `bypass` atom -
+    // when bypassed, the donor's processBlock returns the dry signal.
+    // Always call processBlock so the donor's bypass crossfade machinery
+    // produces clean transitions; chunk by preparedBlockSize because the
+    // donor's internal scratch is sized to that.
+    storeAtom (tapeBypassAtom, tapeOn ? 0.0f : 1.0f);
     {
-        float* channels[2] = { L, R };
-        juce::dsp::AudioBlock<float> block (channels, 2, (size_t) numSamples);
-        auto upBlock = oversampler->processSamplesUp (block);
-
-        const auto upSamples = (int) upBlock.getNumSamples();
-        float* upChannels[2] = { upBlock.getChannelPointer (0),
-                                  upBlock.getChannelPointer (1) };
-        juce::AudioBuffer<float> upBuf (upChannels, 2, upSamples);
-        tape.process (upBuf);
-        oversampler->processSamplesDown (block);
-    }
-    else if (tapeOn)
-    {
-        float* channels[2] = { L, R };
-        juce::AudioBuffer<float> tapeBuf (channels, 2, numSamples);
-        tape.process (tapeBuf);
+        const int bufSize = tapeStereoBuffer.getNumSamples();
+        for (int offset = 0; offset < numSamples; offset += bufSize)
+        {
+            const int n = juce::jmin (bufSize, numSamples - offset);
+            float* lrView[2] = { L + offset, R + offset };
+            juce::AudioBuffer<float> tapeBuf (lrView, 2, n);
+            tapeMidi.clear();
+            tape.processBlock (tapeBuf, tapeMidi);
+        }
     }
 #endif
 

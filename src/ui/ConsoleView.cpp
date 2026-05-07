@@ -16,7 +16,13 @@ ConsoleView::ConsoleView (Session& session, AudioEngine& engine) : sessionRef (s
             session.bus (i), session, i);
         addAndMakeVisible (busStrips[(size_t) i].get());
     }
-    masterStrip = std::make_unique<MasterStripComponent> (session.master());
+    masterStrip = std::make_unique<MasterStripComponent> (
+        session.master(),
+#if FOCAL_HAS_DUSK_DSP
+        &engine.getMasterBus().getTapeProcessor());
+#else
+        nullptr);
+#endif
     addAndMakeVisible (masterStrip.get());
 
     // BANK A/B controls were previously rendered here as a 28-px row at the
@@ -160,10 +166,32 @@ void ConsoleView::resized()
 
     x += kSectionGap;
     masterStrip->setBounds (x, y, masterW, h);
+
+    // Auto-engage SUMMARY when the strip's vertical space is too short for
+    // the fader (EQ + COMP eat fixed pixels), or when the strip width has
+    // been pushed well below the kMin floor by the secondary scaling pass.
+    // Recomputed every layout pass; fires only when the auto flag actually
+    // changes so we don't thrash applyCompactState() (which calls
+    // setCompactMode on every strip) each resize. Visibility of EQ/COMP
+    // children is an internal detail of ChannelStripComponent.
+    const bool wantAutoCompact = (h < kAutoCompactStripHeight)
+                              || (channelW < kAutoCompactChannelWidth);
+    if (autoCompact != wantAutoCompact)
+    {
+        autoCompact = wantAutoCompact;
+        applyCompactState();
+    }
 }
 
 void ConsoleView::setStripsCompactMode (bool compact)
 {
+    userWantsCompact = compact;
+    applyCompactState();
+}
+
+void ConsoleView::applyCompactState()
+{
+    const bool compact = userWantsCompact || autoCompact;
     for (auto& strip : strips)
         if (strip != nullptr)
             strip->setCompactMode (compact);

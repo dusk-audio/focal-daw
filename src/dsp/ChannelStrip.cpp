@@ -4,7 +4,7 @@
 
 namespace focal
 {
-void ChannelStrip::prepare (double sampleRate, int blockSize)
+void ChannelStrip::prepare (double sampleRate, int blockSize, int oversamplingFactor)
 {
     constexpr double rampSeconds = 0.020;
     faderGain.reset (sampleRate, rampSeconds);
@@ -26,6 +26,7 @@ void ChannelStrip::prepare (double sampleRate, int blockSize)
     for (auto& b : auxSendPre) b = false;
 
     tempMono.assign ((size_t) juce::jmax (1, blockSize), 0.0f);
+    tempStereoBuffer.setSize (2, juce::jmax (1, blockSize), false, false, true);
 
     // Plugin slot - prepared at the same SR/BS so the audio thread never
     // sees an unprepared instance. If the slot has no plugin loaded, this
@@ -33,15 +34,54 @@ void ChannelStrip::prepare (double sampleRate, int blockSize)
     // change, the slot re-preps it for the new config.
     pluginSlot.prepareToPlay (sampleRate, juce::jmax (1, blockSize));
 
+    // Oversampling: build a Focal-side wrapper around (EQ + Comp) when the
+    // user picks 2× / 4× in Audio Settings. The donor's BritishEQ console
+    // saturation and ChannelComp/UC saturation alias hard at native rate;
+    // wrapping the chain with juce::dsp::Oversampling moves the entire
+    // per-channel DSP to oversampled rate so the saturation is band-limited
+    // before downsampling. EQ + Comp are then prepared at the OVERSAMPLED
+    // sample rate / block size so their coefficients and scratch are sized
+    // correctly. Two oversampler instances (1ch + 2ch) so mono / stereo
+    // tracks each get the right channel count without wasted DSP.
+    const int factor = (oversamplingFactor == 2 || oversamplingFactor == 4)
+                            ? oversamplingFactor : 1;
+    oversamplerStages = (factor == 4) ? 2 : (factor == 2) ? 1 : 0;
+    const int bsClamped = juce::jmax (1, blockSize);
+    if (oversamplerStages > 0)
+    {
+        const auto stages = (size_t) oversamplerStages;
+        oversamplerMono = std::make_unique<juce::dsp::Oversampling<float>> (
+            1, stages,
+            juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR,
+            /*isMaximumQuality*/ true);
+        oversamplerStereo = std::make_unique<juce::dsp::Oversampling<float>> (
+            2, stages,
+            juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR,
+            /*isMaximumQuality*/ true);
+        oversamplerMono  ->initProcessing ((size_t) bsClamped);
+        oversamplerStereo->initProcessing ((size_t) bsClamped);
+        oversamplerMono  ->reset();
+        oversamplerStereo->reset();
+    }
+    else
+    {
+        oversamplerMono.reset();
+        oversamplerStereo.reset();
+    }
+
+    const double prepSr = sampleRate * (double) factor;
+    const int    prepBs = bsClamped * factor;
+
 #if FOCAL_HAS_DUSK_DSP
-    // BritishEQProcessor.prepare expects (sampleRate, blockSize, numChannels).
-    eq.prepare (sampleRate, juce::jmax (1, blockSize), 1);
+    // EQ + Comp prep at the OVERSAMPLED rate / block size so their internal
+    // filter coefficients + scratch sizes track the upsampled buffer the
+    // chain processes when factor > 1. At factor == 1 this collapses to
+    // (sampleRate, blockSize), preserving the legacy path.
+    eq.prepare (prepSr, prepBs, 2);
     eq.reset();
 
-    // ChannelComp: thin facade over UniversalCompressor with minimal-processing
-    // fast path enabled at construction. One instance per channel.
-    compressor.prepare (sampleRate, juce::jmax (1, blockSize), 1);
-    compMonoBuffer.setSize (1, juce::jmax (1, blockSize), false, false, true);
+    compressor.prepare (prepSr, prepBs, 2);
+    compMonoBuffer.setSize (1, prepBs, false, false, true);
     bindCompParams();
 #endif
 }
@@ -196,7 +236,8 @@ void ChannelStrip::updateCompParameters() noexcept
 #endif
 }
 
-void ChannelStrip::processAndAccumulate (const float* monoIn,
+void ChannelStrip::processAndAccumulate (const float* inL,
+                                         const float* inR,
                                          float* masterL, float* masterR,
                                          const std::array<float*, kNumBuses>& busL,
                                          const std::array<float*, kNumBuses>& busR,
@@ -205,13 +246,20 @@ void ChannelStrip::processAndAccumulate (const float* monoIn,
                                          int numSamples,
                                          bool passByGate) noexcept
 {
+    juce::ScopedNoDenormals noDenormals;
+
     lastProcessedPtr = nullptr;
+    lastProcessedR   = nullptr;
     lastProcessedSamples = 0;
+
+    if (numSamples == 0) return;
+
+    const bool stereo = (inR != nullptr);
 
     // No params or no input → tick the smoothers down (so M/S transitions
     // sound smooth) and bail. The strip produces silence and exposes no
     // processed buffer to the recorder.
-    if (paramsRef == nullptr || monoIn == nullptr)
+    if (paramsRef == nullptr || inL == nullptr)
     {
         faderGain.setTargetValue (0.0f);
         for (auto& s : busGain)     s.setTargetValue (0.0f);
@@ -227,6 +275,8 @@ void ChannelStrip::processAndAccumulate (const float* monoIn,
 
     if ((int) tempMono.size() < numSamples)
         return;  // can't allocate on the audio thread; bail safely (silence)
+    if (stereo && tempStereoBuffer.getNumSamples() < numSamples)
+        return;
 
     // Skip the heavy DSP when the strip isn't passing to master and the
     // recorder doesn't need a processed buffer either. With 16 channels each
@@ -250,54 +300,154 @@ void ChannelStrip::processAndAccumulate (const float* monoIn,
     updateEqParameters();
     updateCompParameters();
 
-    std::memcpy (tempMono.data(), monoIn, sizeof (float) * (size_t) numSamples);
+    // Source-pointer set used by the accumulation loop below. For mono,
+    // both point at tempMono (so srcL[i] and srcR[i] are the same sample —
+    // the existing equal-power pan distributes the mono signal to L/R).
+    // For stereo, they point at the two channels of tempStereoBuffer; the
+    // pan gains then act as a per-channel balance.
+    const float* srcL = nullptr;
+    const float* srcR = nullptr;
 
-    // Phase invert (Ø) - flip polarity before EQ/comp/fader so the rest of
-    // the chain sees the corrected-polarity signal. SIMD'd negate via JUCE
-    // saves a per-sample scalar multiply when phase invert is engaged.
-    if (paramsRef->phaseInvert.load (std::memory_order_relaxed))
-        juce::FloatVectorOperations::negate (tempMono.data(), tempMono.data(), numSamples);
+    if (! stereo)
+    {
+        std::memcpy (tempMono.data(), inL, sizeof (float) * (size_t) numSamples);
 
-    // Per-channel insert plugin (post-phase-invert, pre-EQ). No-op when no
-    // plugin loaded or slot bypassed; lock-free atomic read of the instance
-    // pointer otherwise.
-    pluginSlot.processMonoBlock (tempMono.data(), numSamples);
+        // Phase invert (Ø) - flip polarity before EQ/comp/fader so the rest of
+        // the chain sees the corrected-polarity signal. SIMD'd negate via JUCE
+        // saves a per-sample scalar multiply when phase invert is engaged.
+        if (paramsRef->phaseInvert.load (std::memory_order_relaxed))
+            juce::FloatVectorOperations::negate (tempMono.data(), tempMono.data(), numSamples);
+
+        // Per-channel insert plugin (post-phase-invert, pre-EQ). No-op when no
+        // plugin loaded or slot bypassed; lock-free atomic read of the instance
+        // pointer otherwise.
+        pluginSlot.processMonoBlock (tempMono.data(), numSamples);
 
 #if FOCAL_HAS_DUSK_DSP
-    // Wrap our mono scratch buffer as a 1-channel juce::AudioBuffer<float>
-    // (no allocation - referenceTo points at the existing storage).
-    float* monoChannel[1] = { tempMono.data() };
-    juce::AudioBuffer<float> monoBuf (monoChannel, 1, numSamples);
-    eq.process (monoBuf);
-
-    // Compressor: UniversalCompressor::processBlock only mutates internal
-    // sidechain/lookahead scratch - never the input buffer's size or channel
-    // pointers. So we wrap tempMono directly as a 1-channel AudioBuffer view
-    // and let the comp process in place, skipping the per-channel copy-in /
-    // copy-out that used to push 2 × numSamples × 4 B through cache for
-    // every active strip every callback.
-    //
-    // We still chunk by the prepared block size so a host-driven
-    // numSamples > preparedBlockSize can't overflow the comp's internally
-    // sized scratch buffers - the chunking loop below covers the oversized
-    // case correctly, so no jassert here.
-    {
-        const int bufSize = compMonoBuffer.getNumSamples();
-        for (int offset = 0; offset < numSamples; offset += bufSize)
+        if (oversamplerStages > 0 && oversamplerMono != nullptr)
         {
-            const int n = juce::jmin (bufSize, numSamples - offset);
-            float* monoView[1] = { tempMono.data() + offset };
-            juce::AudioBuffer<float> compBuf (monoView, 1, n);
-            compressor.processBlock (compBuf);
+            // Oversampled chain: upsample tempMono, run EQ + Comp on the
+            // upsampled view, then downsample back into tempMono. Donor
+            // saturation aliasing is suppressed by the half-band filters
+            // inside juce::dsp::Oversampling.
+            const float* readPtrs[1]  = { tempMono.data() };
+            float*       writePtrs[1] = { tempMono.data() };
+            juce::dsp::AudioBlock<const float> nativeIn  (readPtrs,  1, (size_t) numSamples);
+            juce::dsp::AudioBlock<float>       nativeOut (writePtrs, 1, (size_t) numSamples);
+
+            auto upBlock = oversamplerMono->processSamplesUp (nativeIn);
+            const int upN = (int) upBlock.getNumSamples();
+            float* upPtrs[1] = { upBlock.getChannelPointer (0) };
+            juce::AudioBuffer<float> upBuf (upPtrs, 1, upN);
+            eq.process (upBuf);
+
+            const int compBufSize = compMonoBuffer.getNumSamples();
+            for (int offset = 0; offset < upN; offset += compBufSize)
+            {
+                const int n = juce::jmin (compBufSize, upN - offset);
+                float* compView[1] = { upPtrs[0] + offset };
+                juce::AudioBuffer<float> compBuf (compView, 1, n);
+                compressor.processBlock (compBuf);
+            }
+
+            oversamplerMono->processSamplesDown (nativeOut);
         }
-    }
-    currentGrDb.store (-compressor.getGainReductionDb(), std::memory_order_relaxed);
+        else
+        {
+            // Native-rate path (factor == 1).
+            float* monoChannel[1] = { tempMono.data() };
+            juce::AudioBuffer<float> monoBuf (monoChannel, 1, numSamples);
+            eq.process (monoBuf);
+
+            const int bufSize = compMonoBuffer.getNumSamples();
+            for (int offset = 0; offset < numSamples; offset += bufSize)
+            {
+                const int n = juce::jmin (bufSize, numSamples - offset);
+                float* monoView[1] = { tempMono.data() + offset };
+                juce::AudioBuffer<float> compBuf (monoView, 1, n);
+                compressor.processBlock (compBuf);
+            }
+        }
+        currentGrDb.store (compressor.getGainReductionDb(), std::memory_order_relaxed);
 #endif
 
-    // Expose the post-EQ/post-comp buffer for the recorder. Valid until the
-    // next call to processAndAccumulate().
-    lastProcessedPtr = tempMono.data();
-    lastProcessedSamples = numSamples;
+        srcL = tempMono.data();
+        srcR = tempMono.data();
+        lastProcessedPtr = tempMono.data();
+        lastProcessedSamples = numSamples;
+    }
+    else
+    {
+        // Stereo path. Copy inL / inR into the pre-allocated stereo scratch,
+        // then run EQ + Comp on a 2-channel AudioBuffer view. Plugin slot
+        // processes stereo. Phase invert flips both channels (preserves the
+        // L/R relative phase relationship).
+        auto* L = tempStereoBuffer.getWritePointer (0);
+        auto* R = tempStereoBuffer.getWritePointer (1);
+        std::memcpy (L, inL, sizeof (float) * (size_t) numSamples);
+        std::memcpy (R, inR, sizeof (float) * (size_t) numSamples);
+
+        if (paramsRef->phaseInvert.load (std::memory_order_relaxed))
+        {
+            juce::FloatVectorOperations::negate (L, L, numSamples);
+            juce::FloatVectorOperations::negate (R, R, numSamples);
+        }
+
+        pluginSlot.processStereoBlock (L, R, numSamples);
+
+#if FOCAL_HAS_DUSK_DSP
+        if (oversamplerStages > 0 && oversamplerStereo != nullptr)
+        {
+            const float* readPtrs[2]  = { L, R };
+            float*       writePtrs[2] = { L, R };
+            juce::dsp::AudioBlock<const float> nativeIn  (readPtrs,  2, (size_t) numSamples);
+            juce::dsp::AudioBlock<float>       nativeOut (writePtrs, 2, (size_t) numSamples);
+
+            auto upBlock = oversamplerStereo->processSamplesUp (nativeIn);
+            const int upN = (int) upBlock.getNumSamples();
+            float* upPtrs[2] = { upBlock.getChannelPointer (0),
+                                  upBlock.getChannelPointer (1) };
+            juce::AudioBuffer<float> upBuf (upPtrs, 2, upN);
+            eq.process (upBuf);
+
+            const int compBufSize = compMonoBuffer.getNumSamples();
+            for (int offset = 0; offset < upN; offset += compBufSize)
+            {
+                const int n = juce::jmin (compBufSize, upN - offset);
+                float* compView[2] = { upPtrs[0] + offset, upPtrs[1] + offset };
+                juce::AudioBuffer<float> compBuf (compView, 2, n);
+                compressor.processBlock (compBuf);
+            }
+
+            oversamplerStereo->processSamplesDown (nativeOut);
+        }
+        else
+        {
+            float* stereoChannels[2] = { L, R };
+            juce::AudioBuffer<float> stereoBuf (stereoChannels, 2, numSamples);
+            eq.process (stereoBuf);
+
+            const int bufSize = compMonoBuffer.getNumSamples();
+            for (int offset = 0; offset < numSamples; offset += bufSize)
+            {
+                const int n = juce::jmin (bufSize, numSamples - offset);
+                float* stView[2] = { L + offset, R + offset };
+                juce::AudioBuffer<float> compBuf (stView, 2, n);
+                compressor.processBlock (compBuf);
+            }
+        }
+        currentGrDb.store (compressor.getGainReductionDb(), std::memory_order_relaxed);
+#endif
+
+        srcL = L;
+        srcR = R;
+        // Recorder reads getLastProcessedMono() / getLastProcessedR() —
+        // both pointers are valid for stereo tracks so the recorder can
+        // capture both channels when printEffects is engaged.
+        lastProcessedPtr = L;
+        lastProcessedR   = R;
+        lastProcessedSamples = numSamples;
+    }
 
     if (! passByGate)
     {
@@ -343,15 +493,17 @@ void ChannelStrip::processAndAccumulate (const float* monoIn,
     if (! anyBusActive && ! anyBusSmoothing && ! anyAuxActive && ! anyAuxSmoothing)
     {
         // Master-only fast path - no bus, no aux. The common steady state
-        // for a track that's just summing direct to master.
+        // for a track that's just summing direct to master. srcL == srcR
+        // for mono (existing equal-power pan distributes mono → L/R); for
+        // stereo, srcL / srcR are the two channels of tempStereoBuffer
+        // and pan acts as a per-channel balance.
         for (int i = 0; i < numSamples; ++i)
         {
             const float fg = faderGain.getNextValue();
             const float gL = panGainL.getNextValue() * fg;
             const float gR = panGainR.getNextValue() * fg;
-            const float sIn = tempMono[(size_t) i];
-            masterL[i] += sIn * gL;
-            masterR[i] += sIn * gR;
+            masterL[i] += srcL[i] * gL;
+            masterR[i] += srcR[i] * gR;
         }
         return;
     }
@@ -367,11 +519,12 @@ void ChannelStrip::processAndAccumulate (const float* monoIn,
         const float pR = panGainR.getNextValue();
         const float gL = pL * fg;
         const float gR = pR * fg;
-        const float sIn = tempMono[(size_t) i];
-        const float wetLPre = sIn * pL;
-        const float wetRPre = sIn * pR;
-        const float wetL = sIn * gL;
-        const float wetR = sIn * gR;
+        const float sL = srcL[i];
+        const float sR = srcR[i];
+        const float wetLPre = sL * pL;
+        const float wetRPre = sR * pR;
+        const float wetL = sL * gL;
+        const float wetR = sR * gR;
 
         // Bus routing is EXCLUSIVE with master routing: a track assigned to
         // any bus must not also hit the master direct, otherwise the signal

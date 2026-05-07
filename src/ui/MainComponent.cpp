@@ -2,11 +2,13 @@
 #include "AudioSettingsPanel.h"
 #include "AuxView.h"
 #include "BounceDialog.h"
+#include "DimOverlay.h"
 #include "MasteringView.h"
 #include "StartupDialog.h"
 #include "SystemStatusBar.h"
 #include "TapeStrip.h"
 #include "TransportBar.h"
+#include "../session/MarkerEditActions.h"
 #include "../session/RecentSessions.h"
 #include "../session/SessionSerializer.h"
 #include "ConsoleView.h"  // (already included transitively, kept explicit)
@@ -328,7 +330,8 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     if (code == 'M' && noMods)
     {
         const auto playhead = engine.getTransport().getPlayhead();
-        session.addMarker (playhead);
+        um.beginNewTransaction ("Add marker");
+        um.perform (new AddMarkerAction (session, playhead));
         if (tapeStrip != nullptr) tapeStrip->repaint();
         return true;
     }
@@ -507,6 +510,16 @@ void MainComponent::resized()
     {
         if (auxView != nullptr) auxView->setBounds (area);
     }
+
+    // Re-centre the startup modal + its dim backdrop when the main window
+    // resizes while the dialog is up. DimOverlay::parentSizeChanged handles
+    // its own resize, but we still drive the centred dialog bounds.
+    if (startupDialog != nullptr)
+    {
+        startupDialog->setBounds (getLocalBounds()
+                                       .withSizeKeepingCentre (startupDialog->getWidth(),
+                                                                  startupDialog->getHeight()));
+    }
 }
 
 void MainComponent::openAudioSettings()
@@ -533,6 +546,7 @@ void MainComponent::openAudioSettings()
     opts.useNativeTitleBar = true;
     opts.resizable = true;
     activeAudioDialog = opts.launchAsync();
+    if (activeAudioDialog != nullptr) activeAudioDialog->toFront (true);
 }
 
 void MainComponent::switchToStage (AudioEngine::Stage s)
@@ -626,33 +640,60 @@ void MainComponent::doMixdown()
     opts.escapeKeyTriggersCloseButton = false;
     opts.useNativeTitleBar = true;
     opts.resizable = false;
-    opts.launchAsync();
+    if (auto* dw = opts.launchAsync()) dw->toFront (true);
 }
 
 void MainComponent::launchStartupDialog()
 {
     auto recents = RecentSessions::load();
 
-    auto* panel = new StartupDialog (recents);
-    panel->setSize (560, juce::jlimit (220, 520,
-                                         140 + (recents.isEmpty() ? 60 : recents.size() * 30)));
+    startupDialog = std::make_unique<StartupDialog> (recents);
+    startupDialog->setSize (560, juce::jlimit (220, 520,
+                                                 140 + (recents.isEmpty() ? 60 : recents.size() * 30)));
 
-    panel->onOpenRecent = [this] (juce::File dir)
+    startupDialog->onOpenRecent = [this] (juce::File dir)
     {
         loadSessionFromJson (dir.getChildFile ("session.json"));
     };
-    panel->onNewSession = [this] { newSessionPrompt(); };
-    panel->onOpenFile   = [this] { openFromFilePrompt(); };
-    panel->onSkip       = [] {};  // nothing - the bootstrap default dir stays
+    startupDialog->onNewSession = [this] { newSessionPrompt(); };
+    startupDialog->onOpenFile   = [this] { openFromFilePrompt(); };
+    startupDialog->onSkip       = [] {};  // nothing - the bootstrap default dir stays
+    // closeDialog calls onDismiss after each action; the host (us) tears
+    // down the embedded dialog + its dim backdrop together.
+    startupDialog->onDismiss    = [this] { dismissStartupDialog(); };
 
-    juce::DialogWindow::LaunchOptions opts;
-    opts.content.setOwned (panel);
-    opts.dialogTitle = "Focal";
-    opts.dialogBackgroundColour = juce::Colour (0xff202024);
-    opts.escapeKeyTriggersCloseButton = true;
-    opts.useNativeTitleBar = true;
-    opts.resizable = false;
-    opts.launchAsync();
+    // Dim backdrop covers the rest of the UI; clicking the dim is a
+    // shortcut for "Continue blank" — the same as the dialog's own Skip
+    // button — so it doesn't trap the user when they want to dismiss.
+    startupDim = std::make_unique<DimOverlay>();
+    startupDim->setBounds (getLocalBounds());
+    startupDim->onClick = [this] { dismissStartupDialog(); };
+    addAndMakeVisible (startupDim.get());
+
+    // Centered on the main window. The dialog is plain dark — no native
+    // title bar — to match the embedded-modal aesthetic shared with the
+    // TapeMachine gear modal and the SUMMARY EQ/COMP popups.
+    const auto bounds = getLocalBounds()
+                            .withSizeKeepingCentre (startupDialog->getWidth(),
+                                                       startupDialog->getHeight());
+    startupDialog->setBounds (bounds);
+    addAndMakeVisible (startupDialog.get());
+}
+
+void MainComponent::dismissStartupDialog()
+{
+    // Defer the actual delete by one message-loop tick — closeDialog is
+    // typically called from inside one of the dialog's own button click
+    // handlers, and tearing down the dialog from inside its own callback
+    // chain is fragile. callAsync runs on the message thread after the
+    // click handler returns, when nothing's still on the dialog's stack.
+    juce::Component::SafePointer<MainComponent> safeThis (this);
+    juce::MessageManager::callAsync ([safeThis]
+    {
+        if (safeThis == nullptr) return;
+        safeThis->startupDialog.reset();
+        safeThis->startupDim.reset();
+    });
 }
 
 void MainComponent::newSessionPrompt()
@@ -990,7 +1031,7 @@ void MainComponent::openBounceDialog()
         opts.escapeKeyTriggersCloseButton = false;  // closing requires Cancel/Close
         opts.useNativeTitleBar = true;
         opts.resizable = false;
-        opts.launchAsync();
+        if (auto* dw = opts.launchAsync()) dw->toFront (true);
     });
 }
 

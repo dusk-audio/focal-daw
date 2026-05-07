@@ -202,6 +202,17 @@ void AudioEngine::publishPluginStateForSave()
             lane.pluginStateBase64[(size_t) s]    = slot.getStateBase64ForSave();
         }
     }
+
+#if FOCAL_HAS_DUSK_DSP
+    // Master tape (TapeMachine) state. Mirrors the per-slot pattern: serialise
+    // getStateInformation() into a base64 string on the session model so the
+    // serializer (which only sees Session) can persist it.
+    {
+        juce::MemoryBlock mb;
+        master.getTapeProcessor().getStateInformation (mb);
+        session.master().tapeStateBase64 = mb.toBase64Encoding();
+    }
+#endif
 }
 
 void AudioEngine::publishTransportStateForSave()
@@ -255,6 +266,23 @@ void AudioEngine::consumePluginStateAfterLoad()
             }
         }
     }
+
+#if FOCAL_HAS_DUSK_DSP
+    // Master tape state: push the deserialised base64 blob back into the
+    // hosted TapeMachineAudioProcessor. fromBase64Encoding fails-soft (no
+    // exception); empty / malformed data leaves the processor at its
+    // donor defaults rather than blowing up the load.
+    {
+        const auto& s64 = session.master().tapeStateBase64;
+        if (s64.isNotEmpty())
+        {
+            juce::MemoryBlock mb;
+            if (mb.fromBase64Encoding (s64) && mb.getSize() > 0)
+                master.getTapeProcessor().setStateInformation (mb.getData(),
+                                                                  (int) mb.getSize());
+        }
+    }
+#endif
 }
 
 void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
@@ -307,11 +335,17 @@ void AudioEngine::prepareForSelfTest (double sr, int bs)
     // (for master) to the tape oversampler.
     const int oxFactor = session.oversamplingFactor.load (std::memory_order_relaxed);
 
-    for (auto& s : strips)        s.prepare (sr, bs);
+    for (auto& s : strips)        s.prepare (sr, bs, oxFactor);
     for (auto& a : busStrips)     a.prepare (sr, bs, oxFactor);
     for (auto& a : auxLaneStrips) a.prepare (sr, bs);
     master.prepare (sr, bs, oxFactor);
-    masteringChain.prepare (sr, bs);
+#if FOCAL_HAS_DUSK_DSP
+    // TapeMachine animates its reels + level-integration timing from
+    // getPlayHead()->getPosition(). Without a playhead the donor reads
+    // null and the reels stay still even while audio passes through.
+    master.getTapeProcessor().setPlayHead (&playHead);
+#endif
+    masteringChain.prepare (sr, bs, oxFactor);
     masteringPlayer.prepare (bs);
     metronome.prepare (sr);
     playbackEngine.prepare (bs);  // size the playback read scratch - audio thread mustn't allocate
@@ -322,7 +356,8 @@ void AudioEngine::prepareForSelfTest (double sr, int bs)
     for (auto& v : busR)      v.assign ((size_t) bs, 0.0f);
     for (auto& v : auxLaneL)  v.assign ((size_t) bs, 0.0f);
     for (auto& v : auxLaneR)  v.assign ((size_t) bs, 0.0f);
-    playbackScratch.assign ((size_t) bs, 0.0f);
+    playbackScratch .assign ((size_t) bs, 0.0f);
+    playbackScratchR.assign ((size_t) bs, 0.0f);
 }
 
 void AudioEngine::audioDeviceStopped()
@@ -341,6 +376,8 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                                                     int numSamples,
                                                     const juce::AudioIODeviceCallbackContext&)
 {
+    juce::ScopedNoDenormals noDenormals;
+
     const auto callbackStart = juce::Time::getHighResolutionTicks();
 
     if ((int) mixL.size() < numSamples)
@@ -540,11 +577,18 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         //     for monitoring.
         //   - Stopped & un-armed & IN off: monoIn null → strip is silent.
         const float* monoIn = nullptr;
+        const bool stereoTrackInput = session.track (t).mode.load (std::memory_order_relaxed)
+                                          == (int) Track::Mode::Stereo;
 
         if (willReadFromDisk)
         {
+            // Stereo tracks read both channels from disk; mono tracks pass
+            // nullptr for outR which makes readForTrack skip the second
+            // channel entirely.
+            float* outR = stereoTrackInput ? playbackScratchR.data() : nullptr;
             playbackEngine.readForTrack (t, blockStartSamples,
-                                          playbackScratch.data(), numSamples);
+                                          playbackScratch.data(), outR,
+                                          numSamples);
             monoIn = playbackScratch.data();
         }
         else if (deviceInput != nullptr && (armed || monitorEnabled))
@@ -607,7 +651,27 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                                   && session.track (t).printEffects.load (std::memory_order_relaxed);
         strips[(size_t) t].setNeedsProcessedMono (needPrintBuffer);
 
-        strips[(size_t) t].processAndAccumulate (monoIn,
+        // Stereo input source for stereo tracks. Two paths:
+        //   • Disk playback: PlaybackEngine wrote the R channel into
+        //     playbackScratchR above (when stereoTrackInput is true), so
+        //     point monoInR at that buffer.
+        //   • Live input: source from the user's R input mapping.
+        const float* monoInR = nullptr;
+        if (stereoTrackInput && monoIn != nullptr)
+        {
+            if (willReadFromDisk)
+            {
+                monoInR = playbackScratchR.data();
+            }
+            else
+            {
+                const int rIdxStrip = session.resolveInputRForTrack (t);
+                if (rIdxStrip >= 0 && rIdxStrip < numInputChannels)
+                    monoInR = inputChannelData[(size_t) rIdxStrip];
+            }
+        }
+
+        strips[(size_t) t].processAndAccumulate (monoIn, monoInR,
                                                  mixL.data(), mixR.data(),
                                                  busLPtrs, busRPtrs,
                                                  auxLanePtrsL, auxLanePtrsR,
@@ -630,14 +694,22 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         if (isRecording && armed && deviceInput != nullptr)
         {
             const bool printEfx = session.track (t).printEffects.load (std::memory_order_relaxed);
-            const float* recSrc = deviceInput;
+
+            // Default sources: deviceInput on L; deviceInputR on R for stereo
+            // tracks (resolved earlier as monoInR). printEffects swaps both
+            // L and R to the strip's post-effect buffers when available.
+            const float* recL = deviceInput;
+            const float* recR = stereoTrackInput ? monoInR : nullptr;
             if (printEfx)
             {
-                if (auto* processed = strips[(size_t) t].getLastProcessedMono();
+                auto& strip = strips[(size_t) t];
+                if (auto* processed = strip.getLastProcessedMono();
                     processed != nullptr
-                    && strips[(size_t) t].getLastProcessedSamples() >= numSamples)
+                    && strip.getLastProcessedSamples() >= numSamples)
                 {
-                    recSrc = processed;
+                    recL = processed;
+                    if (stereoTrackInput)
+                        recR = strip.getLastProcessedR();  // may be nullptr → recorder duplicates L
                 }
             }
 
@@ -673,7 +745,9 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             {
                 const int writeOffset = (int) (sliceStart - blockStartSamples);
                 const int writeLength = (int) (sliceEnd - sliceStart);
-                recordManager.writeInputBlock (t, recSrc + writeOffset, writeLength);
+                const float* writeL = recL + writeOffset;
+                const float* writeR = (recR != nullptr) ? recR + writeOffset : nullptr;
+                recordManager.writeInputBlock (t, writeL, writeR, writeLength);
             }
         }
     }

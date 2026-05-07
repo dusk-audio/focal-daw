@@ -129,6 +129,12 @@ juce::DynamicObject::Ptr trackToObject (const Track& t)
         rObj->setProperty ("timeline_start",  (juce::int64) r.timelineStart);
         rObj->setProperty ("length",          (juce::int64) r.lengthInSamples);
         rObj->setProperty ("source_offset",   (juce::int64) r.sourceOffset);
+        if (r.numChannels != 1)
+            rObj->setProperty ("num_channels", r.numChannels);
+        // Fade samples emitted only when non-zero so existing sessions
+        // don't gain noise. PlaybackEngine treats absent fields as 0.
+        if (r.fadeInSamples  > 0) rObj->setProperty ("fade_in",  (juce::int64) r.fadeInSamples);
+        if (r.fadeOutSamples > 0) rObj->setProperty ("fade_out", (juce::int64) r.fadeOutSamples);
 
         // Take history. Empty array on the common case (no overdubs); only
         // serialised when at least one prior take has been captured to keep
@@ -376,6 +382,9 @@ void restoreTrack (Track& t, const juce::var& v)
             r.timelineStart   = (juce::int64) rv["timeline_start"];
             r.lengthInSamples = (juce::int64) rv["length"];
             r.sourceOffset    = (juce::int64) rv["source_offset"];
+            r.fadeInSamples   = rv.hasProperty ("fade_in")  ? (juce::int64) rv["fade_in"]  : 0;
+            r.fadeOutSamples  = rv.hasProperty ("fade_out") ? (juce::int64) rv["fade_out"] : 0;
+            r.numChannels     = rv.hasProperty ("num_channels") ? (int) rv["num_channels"] : 1;
 
             if (auto prior = rv["previous_takes"]; prior.isArray())
             {
@@ -474,6 +483,10 @@ bool SessionSerializer::save (const Session& s, const juce::File& target)
     master->setProperty ("fader_db",     s.master().faderDb.load());
     master->setProperty ("tape_enabled", s.master().tapeEnabled.load());
     master->setProperty ("tape_hq",      s.master().tapeHQ.load());
+    // TapeMachine APVTS state (base64). Skipped when empty so existing
+    // sessions don't gain a noisy field they don't need.
+    if (s.master().tapeStateBase64.isNotEmpty())
+        master->setProperty ("tape_state", s.master().tapeStateBase64);
     root->setProperty ("master", juce::var (master));
 
     // Mastering chain - separate from the master strip so its EQ/comp/limiter
@@ -601,6 +614,7 @@ bool SessionSerializer::load (Session& s, const juce::File& source)
         if (master.hasProperty ("fader_db"))     s.master().faderDb.store ((float) (double) master["fader_db"]);
         if (master.hasProperty ("tape_enabled")) s.master().tapeEnabled.store ((bool) master["tape_enabled"]);
         if (master.hasProperty ("tape_hq"))      s.master().tapeHQ.store ((bool) master["tape_hq"]);
+        if (master.hasProperty ("tape_state"))   s.master().tapeStateBase64 = master["tape_state"].toString();
     }
     if (auto mast = root["mastering"]; mast.isObject())
     {

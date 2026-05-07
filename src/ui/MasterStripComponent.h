@@ -3,12 +3,21 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../session/Session.h"
 
+// Forward decl unconditional; the definition is only #included from the
+// .cpp when FOCAL_HAS_DUSK_DSP is set. The pointer parameter stays valid
+// either way (passed as nullptr when the donor isn't available).
+class TapeMachineAudioProcessor;
+
 namespace focal
 {
 class MasterStripComponent final : public juce::Component, private juce::Timer
 {
 public:
-    explicit MasterStripComponent (MasterBusParams& paramsRef);
+    // tapeProcessor is a borrowed pointer to the master-bus TapeMachine
+    // instance owned by AudioEngine; the gear button uses it to spawn the
+    // editor. Nullable when the donor DSP is disabled (FOCAL_HAS_DUSK_DSP=0).
+    explicit MasterStripComponent (MasterBusParams& paramsRef,
+                                   ::TapeMachineAudioProcessor* tapeProcessor = nullptr);
     ~MasterStripComponent() override;
 
     void paint (juce::Graphics&) override;
@@ -39,8 +48,12 @@ private:
     juce::Slider     compMakeup    { juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::TextBoxBelow };
     juce::Label      compThrLabel, compRatLabel, compAtkLabel, compRelLabel, compMakLabel;
 
-    juce::TextButton tapeButton { "TAPE" };
-    juce::TextButton hqButton   { "HQ" };
+    juce::TextButton tapeButton    { "TAPE" };
+    juce::TextButton tapeGearButton { juce::CharPointer_UTF8 ("\xe2\x9a\x99") };  // U+2699 GEAR
+    ::TapeMachineAudioProcessor* tapeProcessorPtr = nullptr;
+    void openTapeMachineModal();
+    std::unique_ptr<class DimOverlay> tapeMachineDim;
+    juce::Component::SafePointer<juce::Component> tapeMachineModal;
 
     juce::Slider faderSlider { juce::Slider::LinearVertical, juce::Slider::TextBoxBelow };
 

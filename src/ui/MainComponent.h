@@ -117,5 +117,12 @@ private:
     std::unique_ptr<class TapeStrip>        tapeStrip;
     std::unique_ptr<class SystemStatusBar>  systemStatusBar;
     bool tapeStripExpanded = false;  // collapsed by default; user expands when arranging
+
+    // Startup dialog now lives as an embedded modal (no separate window) so
+    // it appears centered on the main UI with a dim backdrop. Both pieces
+    // are owned here and torn down together via dismissStartupDialog.
+    std::unique_ptr<class StartupDialog> startupDialog;
+    std::unique_ptr<class DimOverlay>    startupDim;
+    void dismissStartupDialog();
 };
 } // namespace focal

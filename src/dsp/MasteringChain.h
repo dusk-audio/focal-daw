@@ -26,7 +26,7 @@ class MasteringChain
 public:
     MasteringChain() = default;
 
-    void prepare (double sampleRate, int blockSize);
+    void prepare (double sampleRate, int blockSize, int oversamplingFactor = 1);
     void bind (const MasteringParams& params) noexcept;
 
     void processInPlace (float* L, float* R, int numSamples) noexcept;

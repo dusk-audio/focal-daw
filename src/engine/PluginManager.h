@@ -49,10 +49,12 @@ public:
                            double sampleRate, int blockSize,
                            juce::String& errorMessage);
 
-    // Cache file lives at ~/.config/Focal/plugin-cache.xml (Linux). Saved
-    // every time a plugin is successfully added to knownPluginList; loaded
-    // (best-effort) at construction. Invalid entries are tolerated - JUCE's
-    // KnownPluginList::recreateFromXml silently skips bad ones.
+    // Cache file lives under juce::File::userApplicationDataDirectory:
+    //   ~/.config/Focal/plugin-cache.xml on Linux,
+    //   ~/Library/Application Support/Focal/plugin-cache.xml on macOS.
+    // Saved every time a plugin is successfully added to knownPluginList;
+    // loaded (best-effort) at construction. Invalid entries are tolerated -
+    // JUCE's KnownPluginList::recreateFromXml silently skips bad ones.
     juce::File getCacheFile() const;
 
     // Scans every supported plugin format's default install locations and

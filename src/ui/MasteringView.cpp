@@ -4,6 +4,9 @@
 #include "MasteringLimiterEditor.h"
 #include "../engine/BounceEngine.h"
 #include "../engine/MasteringPlayer.h"
+#if FOCAL_HAS_DUSK_DSP
+  #include "ModernCompressorPanels.h"   // multi-comp - MultibandCompressorPanel
+#endif
 
 namespace focal
 {
@@ -346,12 +349,19 @@ MasteringView::MasteringView (Session& s, AudioEngine& e)
     };
     compPanelWrapper->addAndMakeVisible (compPanelEnable);
 
+    // Embed ONLY the donor's MultibandCompressorPanel rather than the full
+    // EnhancedCompressorEditor (which carries the mode selector + extra
+    // mode panels we don't want surfaced in the mastering view). The
+    // mastering chain has already pinned the UC into multiband mode, so
+    // hosting the multiband panel by itself gives us the focused UI we
+    // actually need.
+#if FOCAL_HAS_DUSK_DSP
     if (auto* compProc = engine.getMasteringChain().getCompProcessor())
     {
-        compEditor.reset (compProc->createEditorIfNeeded());
-        if (compEditor != nullptr)
-            compPanelWrapper->addAndMakeVisible (compEditor.get());
+        compEditor = std::make_unique<MultibandCompressorPanel> (compProc->getParameters());
+        compPanelWrapper->addAndMakeVisible (compEditor.get());
     }
+#endif
 
     // ── Custom Limiter editor ──
     limiterEditor = std::make_unique<MasteringLimiterEditor> (
@@ -439,19 +449,23 @@ void MasteringView::resized()
     area.removeFromTop (6);
 
     // ── 3-panel row: Digital EQ | Multiband Comp | Limiter ──
-    // Each panel takes the FULL remaining height between the top (waveform)
-    // and the bottom strip (meters / LUFS / target / export). No squish -
-    // the multiband comp's editor was previously cropped at 380 px.
+    // The EQ curve + 5-band knob row reads better with more width, and
+    // the multiband panel's 4 columns are still legible at a smaller
+    // share. Limiter is naturally narrow so it gets the leftover.
     auto panelsRow = area;
 
     constexpr int kPanelGap = 8;
-    const int panelW = (panelsRow.getWidth() - 2 * kPanelGap) / 3;
+    const int totalW    = juce::jmax (0, panelsRow.getWidth() - 2 * kPanelGap);
+    const int eqW       = (int) std::round (totalW * 0.42);
+    const int limW      = (int) std::round (totalW * 0.22);
+    const int compW     = totalW - eqW - limW;
 
-    auto eqPanel   = panelsRow.removeFromLeft (panelW);
+    auto eqPanel   = panelsRow.removeFromLeft (eqW);
     panelsRow.removeFromLeft (kPanelGap);
-    auto compPanel = panelsRow.removeFromLeft (panelW);
+    auto compPanel = panelsRow.removeFromLeft (compW);
     panelsRow.removeFromLeft (kPanelGap);
     auto limPanel  = panelsRow;
+    juce::ignoreUnused (limW);
 
     // EQ panel - custom curve + band-controls editor.
     if (eqEditor != nullptr)
@@ -703,6 +717,6 @@ void MasteringView::doExport()
     opts.escapeKeyTriggersCloseButton = false;
     opts.useNativeTitleBar = true;
     opts.resizable = false;
-    opts.launchAsync();
+    if (auto* dw = opts.launchAsync()) dw->toFront (true);
 }
 } // namespace focal

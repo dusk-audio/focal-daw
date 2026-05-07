@@ -1,7 +1,9 @@
 #pragma once
 
 #include <juce_audio_basics/juce_audio_basics.h>
+#include <juce_dsp/juce_dsp.h>
 #include <array>
+#include <memory>
 #include <vector>
 #include "../session/Session.h"
 #include "../engine/PluginSlot.h"
@@ -30,7 +32,7 @@ public:
     static constexpr int kNumBuses    = ChannelStripParams::kNumBuses;
     static constexpr int kNumAuxSends = ChannelStripParams::kNumAuxSends;
 
-    void prepare (double sampleRate, int blockSize);
+    void prepare (double sampleRate, int blockSize, int oversamplingFactor = 1);
     void bind (const ChannelStripParams& params) noexcept { paramsRef = &params; }
 
     // Bind the per-app PluginManager so this strip's PluginSlot can resolve
@@ -53,20 +55,31 @@ public:
     // meter in the UI.
     float getCurrentGrDb() const noexcept { return currentGrDb.load (std::memory_order_relaxed); }
 
-    // Pointer to the post-EQ/post-comp mono buffer from the most-recent
-    // processAndAccumulate() call. Valid for `lastProcessedSamples` samples.
-    // The recorder reads this when "print effects" is engaged on a track.
-    // Returns nullptr if no DSP ran this block (no input or unbound params).
+    // Pointer to the post-EQ/post-comp L (or mono) buffer from the most-
+    // recent processAndAccumulate() call. Valid for `lastProcessedSamples`
+    // samples. The recorder reads this when "print effects" is engaged on
+    // a track. Returns nullptr if no DSP ran this block.
     const float* getLastProcessedMono() const noexcept { return lastProcessedPtr; }
+
+    // Pointer to the post-EQ/post-comp R buffer when the strip ran in
+    // stereo mode this block. nullptr in mono mode (or no input) — callers
+    // that want stereo print-effects must check this before reading R.
+    const float* getLastProcessedR() const noexcept { return lastProcessedR; }
     int getLastProcessedSamples() const noexcept { return lastProcessedSamples; }
 
-    // Reads `numSamples` of mono audio from `monoIn`. Internal: HPF + 4-band EQ
-    // (single source from dsp-cores), then accumulates:
+    // Reads `numSamples` of audio from inL (and optionally inR for stereo
+    // tracks). Pass inR == nullptr for mono tracks; the strip then runs its
+    // EQ + Comp on a single channel and pans the mono signal to (L, R) on
+    // accumulation. With a non-null inR the strip processes 2 channels end-
+    // to-end and applies (panGainL, panGainR) as a per-channel balance.
+    // Internals: HPF + 4-band EQ (single source from dsp-cores) → comp →
+    // accumulates:
     //   • post-fader stereo signal into masterL/masterR (when not bus-routed)
     //   • binary-routed signal into busL[N]/busR[N] for each assigned bus
     //   • aux-send signal into auxLaneL[N]/auxLaneR[N] at auxSendDb[N] gain,
     //     pre- or post-fader per auxSendPreFader[N]
-    void processAndAccumulate (const float* monoIn,
+    void processAndAccumulate (const float* inL,
+                               const float* inR,                   // nullptr = mono path
                                float* masterL, float* masterR,
                                const std::array<float*, kNumBuses>& busL,
                                const std::array<float*, kNumBuses>& busR,
@@ -92,6 +105,23 @@ private:
 
     std::vector<float> tempMono;  // pre-fader scratch buffer (post-EQ)
     juce::AudioBuffer<float> eqMonoBuffer;  // wraps tempMono for BritishEQProcessor::process
+
+    // Stereo scratch — held in a juce::AudioBuffer so EQ + Comp can process
+    // it directly without a per-block wrap. Channel 1 is unused on mono
+    // tracks; preparing 2 channels for everything keeps internal DSP state
+    // (filter histories, comp envelope) sized correctly so a mono→stereo
+    // mode switch mid-session doesn't fault on a missing channel.
+    juce::AudioBuffer<float> tempStereoBuffer;
+
+    // Per-strip oversamplers wrapping the (EQ + Comp) chain. Built once
+    // per prepare based on Session::oversamplingFactor: nullptr at 1×, 1
+    // stage at 2×, 2 stages at 4×. Mono tracks use the 1-channel instance;
+    // stereo tracks use the 2-channel one. The donor's BritishEQ console
+    // saturation and ChannelComp/UC saturation alias without this; the
+    // user's "Effect Oversampling" pick is the single source of truth.
+    std::unique_ptr<juce::dsp::Oversampling<float>> oversamplerMono;
+    std::unique_ptr<juce::dsp::Oversampling<float>> oversamplerStereo;
+    int oversamplerStages = 0;  // 0 = no oversampling; 1 = 2×; 2 = 4×.
 
     // Per-channel insert plugin. Sits between phase invert and the EQ stage
     // so the user can drop a guitar amp / synth / character processor in
@@ -146,7 +176,8 @@ private:
 #endif
 
     std::atomic<float> currentGrDb { 0.0f };
-    const float* lastProcessedPtr = nullptr;  // updated each processAndAccumulate()
+    const float* lastProcessedPtr = nullptr;  // L (or mono) — updated each processAndAccumulate()
+    const float* lastProcessedR   = nullptr;  // R (stereo path only); nullptr in mono path
     int          lastProcessedSamples = 0;
     bool         needsProcessedMono = false;  // set per-block by the engine
 

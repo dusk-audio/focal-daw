@@ -226,6 +226,12 @@ private:
     void openEqEditorPopup();
     void openCompEditorPopup();
 
+    // Translucent shade attached to the top-level component while either
+    // popup is open. timerCallback removes it once both popups are gone.
+    std::unique_ptr<class DimOverlay> activeDimOverlay;
+    void attachDimOverlay();
+    void detachDimOverlay();
+
     // Apply visibility to every EQ child / every COMP child in one shot -
     // the strip has a lot of controls split across the two sections so we
     // gather them here rather than scattering setVisible calls.

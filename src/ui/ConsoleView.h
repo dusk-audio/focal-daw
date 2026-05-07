@@ -31,6 +31,18 @@ public:
     static constexpr int kRefBusWidth     = 150;   // comfortable padding around the 3-knob row
     static constexpr int kRefMasterWidth  = 230;   // 5 EQ knobs + 5 comp knobs at 40 px each
 
+    // Auto-engage SUMMARY (compact mode) so the EQ/COMP sections collapse
+    // into popup-launchers and the fader keeps its full vertical span when
+    // the window gets cramped. Two independent triggers:
+    //   - Height: EQ + COMP eat ~230 px of fixed vertical space inside the
+    //     strip; below this strip height the fader gets squeezed too far.
+    //   - Width:  only fires when the layout has already pushed strips
+    //     well below the kMinChannelWidth floor (the secondary scaling
+    //     pass). At kMin the knobs are still readable, so we don't want to
+    //     auto-compact just because we hit the floor.
+    static constexpr int kAutoCompactStripHeight = 820;
+    static constexpr int kAutoCompactChannelWidth = 110;
+
     static constexpr int kStripGap     = 4;
     static constexpr int kSectionGap   = 12;
 
@@ -53,6 +65,8 @@ public:
     // Forwarded by MainComponent when the SUMMARY view toggles. Each track
     // strip collapses its EQ + COMP into popup-launch buttons so the fader,
     // bus assigns, and meters stay visible while the tape strip is up.
+    // The user's intent is OR'd with auto-compact (engaged when the window
+    // is too narrow) — see applyCompactState.
     void setStripsCompactMode (bool compact);
 
     // Forwarded by MainComponent when the stage selector changes. In Mixing
@@ -61,6 +75,13 @@ public:
     void setStripsMixingMode (bool mixing);
 
 private:
+    // SUMMARY can be requested by the user (TAPE button) OR by the layout
+    // engine when the window shrinks past kAutoCompactChannelWidth. The
+    // applied state on each strip is the OR of both.
+    bool userWantsCompact = false;
+    bool autoCompact      = false;
+    void applyCompactState();
+
     std::array<std::unique_ptr<BusComponent>,       Session::kNumBuses> busStrips;
     std::unique_ptr<MasterStripComponent> masterStrip;
 

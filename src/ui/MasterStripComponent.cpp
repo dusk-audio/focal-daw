@@ -1,5 +1,11 @@
 #include "MasterStripComponent.h"
+#include "DimOverlay.h"
 #include "FocalLookAndFeel.h"
+#include "TapeMachineModalEditor.h"
+
+#if FOCAL_HAS_DUSK_DSP
+  #include "PluginProcessor.h"   // TapeMachineAudioProcessor + createEditor
+#endif
 
 namespace focal
 {
@@ -33,7 +39,9 @@ void styleSmallLabel (juce::Label& lbl, const juce::String& text, juce::Colour c
 }
 } // namespace
 
-MasterStripComponent::MasterStripComponent (MasterBusParams& p) : params (p)
+MasterStripComponent::MasterStripComponent (MasterBusParams& p,
+                                              ::TapeMachineAudioProcessor* tapeProc)
+    : params (p), tapeProcessorPtr (tapeProc)
 {
     nameLabel.setText ("MASTER", juce::dontSendNotification);
     nameLabel.setJustificationType (juce::Justification::centred);
@@ -128,7 +136,6 @@ MasterStripComponent::MasterStripComponent (MasterBusParams& p) : params (p)
     addAndMakeVisible (compMakLabel);
 
     styleToggle (tapeButton, juce::Colour (0xffd0a060));
-    styleToggle (hqButton,   juce::Colour (0xff7090c0));
 
     tapeButton.setToggleState (params.tapeEnabled.load (std::memory_order_relaxed),
                                 juce::dontSendNotification);
@@ -139,15 +146,13 @@ MasterStripComponent::MasterStripComponent (MasterBusParams& p) : params (p)
     };
     addAndMakeVisible (tapeButton);
 
-    hqButton.setToggleState (params.tapeHQ.load (std::memory_order_relaxed),
-                              juce::dontSendNotification);
-    hqButton.setTooltip (juce::CharPointer_UTF8 (
-        "HQ - 4× oversampling for tape stage (more CPU, lower aliasing)"));
-    hqButton.onClick = [this]
-    {
-        params.tapeHQ.store (hqButton.getToggleState(), std::memory_order_relaxed);
-    };
-    addAndMakeVisible (hqButton);
+    // Gear next to TAPE opens the full TapeMachine editor centered + dimmed.
+    // Not a toggle - momentary trigger.
+    tapeGearButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff2a2a2e));
+    tapeGearButton.setColour (juce::TextButton::textColourOffId, juce::Colour (0xffd0a060));
+    tapeGearButton.setTooltip ("Open the full tape machine editor");
+    tapeGearButton.onClick = [this] { openTapeMachineModal(); };
+    addAndMakeVisible (tapeGearButton);
 
     faderSlider.setRange (ChannelStripParams::kFaderMinDb, ChannelStripParams::kFaderMaxDb, 0.1);
     faderSlider.setSkewFactorFromMidPoint (-12.0);
@@ -411,11 +416,15 @@ void MasterStripComponent::resized()
     }
     area.removeFromTop (6);
 
-    // TAPE + HQ row.
-    auto buttonRow = area.removeFromTop (24);
-    const int colW = buttonRow.getWidth() / 2;
-    tapeButton.setBounds (buttonRow.removeFromLeft (colW).reduced (2, 0));
-    hqButton  .setBounds (buttonRow.reduced (2, 0));
+    // TAPE + gear row. Gear (22 px) opens the full TapeMachine editor; TAPE
+    // takes the remaining width on the row. The standalone HQ button retired
+    // when the global Audio Settings oversampling became the single source
+    // of truth for tape oversampling.
+    auto buttonRow = area.removeFromTop (24).reduced (2, 0);
+    constexpr int kGearW = 22;
+    tapeGearButton.setBounds (buttonRow.removeFromRight (kGearW));
+    buttonRow.removeFromRight (2);
+    tapeButton    .setBounds (buttonRow);
 
     area.removeFromTop (4);
 
@@ -443,5 +452,55 @@ void MasterStripComponent::resized()
     faderScaleArea = area.removeFromRight (kFaderScaleW);
     area.removeFromRight (4);
     faderSlider.setBounds (area);
+}
+
+void MasterStripComponent::openTapeMachineModal()
+{
+    // Toggle: pressing the gear while modal is open dismisses it.
+    if (tapeMachineModal != nullptr)
+    {
+        if (auto* m = tapeMachineModal.getComponent())
+        {
+            if (auto* parent = m->getParentComponent()) parent->removeChildComponent (m);
+            delete m;
+        }
+        tapeMachineDim.reset();
+        return;
+    }
+
+    auto* topLevel = getTopLevelComponent();
+    if (topLevel == nullptr) return;
+
+    juce::Component* body = nullptr;
+
+#if FOCAL_HAS_DUSK_DSP
+    // Spawn the TapeMachine plugin's native editor and wrap it so the
+    // donor's plugin-style header (painted "TapeMachine" + "Vintage Tape
+    // Emulation") is masked and the HQ oversampling combo (now driven
+    // globally from Audio Settings) is hidden. The wrapper takes
+    // ownership of the editor; deleting the wrapper deletes the editor,
+    // which calls editorBeingDeleted on the processor.
+    if (tapeProcessorPtr != nullptr)
+        if (auto* editor = tapeProcessorPtr->createEditor())
+            body = new TapeMachineModalEditor (editor);
+#endif
+
+    if (body == nullptr)
+    {
+        // Defensive fallback if the donor DSP is disabled or the editor
+        // failed to construct.
+        body = new juce::Component();
+        body->setSize (520, 320);
+    }
+
+    tapeMachineDim = std::make_unique<DimOverlay>();
+    tapeMachineDim->setBounds (topLevel->getLocalBounds());
+    tapeMachineDim->onClick = [this] { openTapeMachineModal(); };
+    topLevel->addAndMakeVisible (tapeMachineDim.get());
+
+    body->setBounds (topLevel->getLocalBounds()
+                        .withSizeKeepingCentre (body->getWidth(), body->getHeight()));
+    topLevel->addAndMakeVisible (body);
+    tapeMachineModal = body;
 }
 } // namespace focal

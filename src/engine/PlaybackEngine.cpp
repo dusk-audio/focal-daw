@@ -25,11 +25,10 @@ PlaybackEngine::~PlaybackEngine()
 
 void PlaybackEngine::prepare (int maxBlockSize)
 {
-    // Pre-allocate the mono scratch buffer once. AudioBuffer::setSize with
-    // avoidReallocating=true keeps the existing allocation as long as we
-    // don't grow past it; calling here with the largest expected block size
-    // guarantees readForTrack on the audio thread never allocates.
-    readScratch.setSize (1, juce::jmax (1, maxBlockSize),
+    // Pre-allocate the stereo scratch buffer once. Channel 1 is unused for
+    // mono regions but allocated so the audio-thread read path never has to
+    // grow on a stereo region.
+    readScratch.setSize (2, juce::jmax (1, maxBlockSize),
                           /*keepExistingContent*/ false,
                           /*clearExtraSpace*/      false,
                           /*avoidReallocating*/    false);
@@ -71,6 +70,21 @@ void PlaybackEngine::preparePlayback()
             rs.timelineStart   = region.timelineStart;
             rs.lengthInSamples = region.lengthInSamples;
             rs.sourceOffset    = region.sourceOffset;
+            rs.fadeInSamples   = juce::jmax<juce::int64> (0, region.fadeInSamples);
+            rs.fadeOutSamples  = juce::jmax<juce::int64> (0, region.fadeOutSamples);
+            rs.numChannels     = juce::jlimit (1, 2, region.numChannels);
+            // Enforce non-overlap: if fadeIn + fadeOut > length the multiplied
+            // ramps produce a gain-notch in the middle. Shrink proportionally
+            // so the ramps meet at a single sample instead.
+            if (rs.fadeInSamples + rs.fadeOutSamples > rs.lengthInSamples)
+            {
+                const auto total = rs.fadeInSamples + rs.fadeOutSamples;
+                if (total > 0)
+                {
+                    rs.fadeInSamples = (rs.fadeInSamples * rs.lengthInSamples) / total;
+                    rs.fadeOutSamples = rs.lengthInSamples - rs.fadeInSamples;
+                }
+            }
             stream->regions.push_back (std::move (rs));
         }
 
@@ -96,11 +110,14 @@ void PlaybackEngine::stopPlayback()
 
 void PlaybackEngine::readForTrack (int trackIndex,
                                    juce::int64 playheadSamples,
-                                   float* output,
+                                   float* outL,
+                                   float* outR,
                                    int numSamples) noexcept
 {
-    if (output == nullptr) return;
-    std::memset (output, 0, sizeof (float) * (size_t) numSamples);
+    if (outL == nullptr) return;
+    std::memset (outL, 0, sizeof (float) * (size_t) numSamples);
+    if (outR != nullptr)
+        std::memset (outR, 0, sizeof (float) * (size_t) numSamples);
 
     auto& slot = streams[(size_t) trackIndex];
     if (slot == nullptr) return;
@@ -130,11 +147,49 @@ void PlaybackEngine::readForTrack (int trackIndex,
         if (withinSamples > readScratch.getNumSamples()) continue;
 
         const juce::int64 readStart = r.sourceOffset + (firstWithin - r.timelineStart);
+        // For mono regions, read L only. For stereo, read both. The
+        // BufferingAudioReader's read(useLeft, useRight) flags do the
+        // right thing on either side; we always have a 2-channel
+        // readScratch so the call is safe regardless.
+        const bool readStereo = (r.numChannels == 2);
         r.reader->read (&readScratch, 0, withinSamples, readStart,
-                         /*useLeftChan*/ true, /*useRightChan*/ false);
-        std::memcpy (output + outOffset,
-                      readScratch.getReadPointer (0),
-                      sizeof (float) * (size_t) withinSamples);
+                         /*useLeftChan*/ true,
+                         /*useRightChan*/ readStereo);
+
+        // Apply fade-in / fade-out envelope in scratch, then SUM (instead
+        // of REPLACE) into the output buffer(s). Summing lets two regions
+        // overlap during a crossfade window. Mono regions duplicate the
+        // L channel into outR (when outR is non-null) so the strip's
+        // stereo path sees a center-panned signal.
+        const juce::int64 fadeIn  = r.fadeInSamples;
+        const juce::int64 fadeOut = r.fadeOutSamples;
+        const juce::int64 regionStart = r.timelineStart;
+        const juce::int64 fadeInGain = (fadeIn > 0) ? fadeIn : 1;
+        const juce::int64 fadeOutGain = (fadeOut > 0) ? fadeOut : 1;
+        const auto* srcL = readScratch.getReadPointer (0);
+        const auto* srcR = readStereo ? readScratch.getReadPointer (1) : srcL;
+        for (int i = 0; i < withinSamples; ++i)
+        {
+            const juce::int64 timelineSample = firstWithin + i;
+            float gain = 1.0f;
+            if (fadeIn > 0)
+            {
+                const juce::int64 inPos = timelineSample - regionStart;
+                if (inPos < fadeIn)
+                    gain *= juce::jlimit (0.0f, 1.0f,
+                                            (float) inPos / (float) fadeInGain);
+            }
+            if (fadeOut > 0)
+            {
+                const juce::int64 outPos = regionEnd - timelineSample;
+                if (outPos < fadeOut)
+                    gain *= juce::jlimit (0.0f, 1.0f,
+                                            (float) outPos / (float) fadeOutGain);
+            }
+            outL[outOffset + i] += srcL[i] * gain;
+            if (outR != nullptr)
+                outR[outOffset + i] += srcR[i] * gain;
+        }
     }
 }
 } // namespace focal
