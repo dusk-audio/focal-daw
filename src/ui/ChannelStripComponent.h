@@ -8,11 +8,13 @@
 
 namespace focal
 {
+class AudioEngine;
+
 class ChannelStripComponent final : public juce::Component, private juce::Timer
 {
 public:
     ChannelStripComponent (int trackIndex, Track& trackRef, Session& sessionRef,
-                            class PluginSlot& slotRef);
+                            class PluginSlot& slotRef, AudioEngine& engineRef);
     ~ChannelStripComponent() override;
 
     void paint (juce::Graphics&) override;
@@ -41,6 +43,8 @@ private:
     Track& track;
     Session& session;
     class PluginSlot& pluginSlot;  // owned by the AudioEngine's ChannelStrip
+    AudioEngine& engine;            // for transport playhead + isPlaying queries
+                                    // during Write capture (3c-ii)
     std::array<juce::uint32, ChannelStripParams::kNumBuses> lastBusColours {};  // for change detection in timerCallback
     float displayedGrDb = 0.0f;     // smoothed GR for the comp meter
     float displayedInputDb = -100.0f; // smoothed input level (L) for the level meter
@@ -147,6 +151,11 @@ private:
     juce::TextButton autoModeButton { "OFF" };
     void onAutoModeClicked();
     void refreshAutoModeButton();
+    // Append (normalized) `denormValue` to track.automationLanes[param]
+    // at the current transport playhead. Maintains strict ascending
+    // ordering so evaluateLane's binary search stays correct. Same-
+    // sample writes coalesce; loop wraparound truncates future points.
+    void captureWritePoint (AutomationParam param, float denormValue);
     // Last live fader dB rendered into the slider, polled in timerCallback
     // from track.strip.liveFaderDb. We avoid driving setValue every tick
     // by gating on a small delta - prevents UI churn when manual mode just

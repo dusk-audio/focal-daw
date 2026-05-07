@@ -497,13 +497,19 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 
         // Automation routing: write the effective fader dB into liveFaderDb
         // BEFORE the strip processes. ChannelStrip reads liveFaderDb as its
-        // smoother target, so an Off-mode strip just sees the manual
-        // setpoint while a Read-mode strip with non-empty fader lane sees
-        // the interpolated automation value at this block's playhead. The
-        // UI fader-display timer also polls liveFaderDb, giving free motor-
-        // fader animation in Read mode without extra wiring.
+        // smoother target, so an Off- / Write-mode strip just sees the
+        // manual setpoint while a Read-mode strip with non-empty fader lane
+        // sees the interpolated automation value at this block's playhead.
+        // The UI fader-display timer also polls liveFaderDb, giving free
+        // motor-fader animation in Read mode without extra wiring.
+        //
+        // The mode atom is loaded with `acquire` so the audio thread sees
+        // every prior write to the lane's points vector (made on the
+        // message thread during a Write pass) before reading it - the UI
+        // release-stores the new mode after appending, so the load-acquire
+        // here pairs with the store-release there to publish the points.
         {
-            const int amode = session.track (t).automationMode.load (std::memory_order_relaxed);
+            const int amode = session.track (t).automationMode.load (std::memory_order_acquire);
             const auto& fLane = session.track (t).automationLanes[(size_t) AutomationParam::FaderDb];
             const float effDb = (amode == (int) AutomationMode::Read && ! fLane.points.empty())
                 ? evaluateLane (fLane, blockStartSamples, AutomationParam::FaderDb)

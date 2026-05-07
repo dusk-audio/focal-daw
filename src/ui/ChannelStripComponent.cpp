@@ -2,6 +2,7 @@
 #include "FocalLookAndFeel.h"
 #include "ChannelEqEditor.h"
 #include "ChannelCompEditor.h"
+#include "../engine/AudioEngine.h"
 #include "../engine/PluginSlot.h"
 #include "../engine/PluginManager.h"
 
@@ -107,8 +108,8 @@ static void styleCompactSectionButton (juce::TextButton& b, juce::Colour accent)
 }
 
 ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
-                                                PluginSlot& slot)
-    : trackIndex (idx), track (t), session (s), pluginSlot (slot)
+                                                PluginSlot& slot, AudioEngine& eng)
+    : trackIndex (idx), track (t), session (s), pluginSlot (slot), engine (eng)
 {
     nameLabel.setText (track.name, juce::dontSendNotification);
     nameLabel.setJustificationType (juce::Justification::centred);
@@ -1356,23 +1357,135 @@ void ChannelStripComponent::timerCallback()
             displayedLiveFaderDb = live;
             faderSlider.setValue (live, juce::dontSendNotification);
         }
-        else if (amode == (int) AutomationMode::Off)
+        else if (amode != (int) AutomationMode::Read)
         {
-            // Keep displayedLiveFaderDb tracking so a Read->Off transition
-            // doesn't trigger a one-shot bogus setValue on the next tick.
+            // Keep displayedLiveFaderDb tracking so any non-Read -> Read
+            // transition doesn't trigger a one-shot bogus setValue on the
+            // next tick.
             displayedLiveFaderDb = live;
+        }
+
+        // Write capture: while transport is playing AND the strip is in
+        // Write mode, sample the manual faderDb every Timer tick (~30 Hz)
+        // and append a point to the fader lane. The audio thread routes
+        // manual faderDb to liveFaderDb during Write (it does NOT read
+        // the lane), so the in-flight vector mutation is race-free w.r.t.
+        // the audio thread for THIS strip's lane. A release-store on
+        // automationMode at Write-out time publishes the appended points
+        // before the audio thread next acquire-loads Read mode.
+        //
+        // 30 Hz capture is good enough for fader rides; 3c-iii will tighten
+        // to ~64 samples via an audio-thread sampler if gestures look
+        // chunky in practice.
+        if (amode == (int) AutomationMode::Write
+            && engine.getTransport().isPlaying())
+        {
+            captureWritePoint (AutomationParam::FaderDb,
+                                track.strip.faderDb.load (std::memory_order_relaxed));
         }
     }
 }
 
+void ChannelStripComponent::captureWritePoint (AutomationParam param, float denormValue)
+{
+    // Convert denormalized value back to lane storage (0..1). Mirrors
+    // Session.cpp's denormalizeAutomation - kept here as a small switch
+    // because there are only two callers (this and a future Touch hook)
+    // and a free function isn't worth the noise.
+    auto normalize = [] (AutomationParam p, float v) -> float
+    {
+        switch (p)
+        {
+            case AutomationParam::FaderDb:
+            {
+                const float lo = ChannelStripParams::kFaderMinDb;
+                const float hi = ChannelStripParams::kFaderMaxDb;
+                return juce::jlimit (0.0f, 1.0f, (v - lo) / (hi - lo));
+            }
+            case AutomationParam::Pan:
+                return juce::jlimit (0.0f, 1.0f, (v + 1.0f) * 0.5f);
+            case AutomationParam::Mute:
+            case AutomationParam::Solo:
+                return v >= 0.5f ? 1.0f : 0.0f;
+            case AutomationParam::AuxSend1:
+            case AutomationParam::AuxSend2:
+            case AutomationParam::AuxSend3:
+            case AutomationParam::AuxSend4:
+            {
+                if (v <= ChannelStripParams::kAuxSendOffDb) return 0.0f;
+                const float lo = ChannelStripParams::kAuxSendMinDb;
+                const float hi = ChannelStripParams::kAuxSendMaxDb;
+                return juce::jlimit (0.0f, 1.0f, (v - lo) / (hi - lo));
+            }
+            case AutomationParam::kCount: break;
+        }
+        return 0.0f;
+    };
+
+    auto& lane = track.automationLanes[(size_t) param];
+    AutomationPoint pt;
+    pt.timeSamples   = engine.getTransport().getPlayhead();
+    pt.value         = normalize (param, denormValue);
+    pt.recordedAtBPM = session.tempoBpm.load (std::memory_order_relaxed);
+
+    // Coalesce: if the most recent point is at the same timeline sample
+    // (or earlier), replace its value (don't append). This handles two
+    // cases: (a) Timer fires faster than transport advances (paused?
+    // shouldn't happen since we gated on isPlaying), (b) Time-travel
+    // backward via loop wraparound mid-Write -- subsequent appends
+    // belong AFTER the most recent timeline position, not before it.
+    // Strict ascending invariant is required by evaluateLane's binary
+    // search.
+    if (! lane.points.empty() && lane.points.back().timeSamples >= pt.timeSamples)
+    {
+        // Loop wraparound case: drop the rest of the lane that's now in
+        // the future relative to playhead, so the binary-search invariant
+        // (sorted ascending) holds and the upcoming Write captures land
+        // in their natural order. Discrete params (mute / solo) keep
+        // the same rule.
+        if (lane.points.back().timeSamples > pt.timeSamples)
+        {
+            auto cutoff = std::lower_bound (lane.points.begin(), lane.points.end(),
+                pt.timeSamples,
+                [] (const AutomationPoint& a, juce::int64 t) { return a.timeSamples < t; });
+            lane.points.erase (cutoff, lane.points.end());
+        }
+        // Same-sample replace: keep the latest value at this exact sample.
+        if (! lane.points.empty() && lane.points.back().timeSamples == pt.timeSamples)
+        {
+            lane.points.back() = pt;
+            return;
+        }
+    }
+    lane.points.push_back (pt);
+}
+
 void ChannelStripComponent::onAutoModeClicked()
 {
-    // 3c-i cycle: OFF -> READ -> OFF. 3c-ii will extend to Write/Touch.
+    // 3c-ii cycle: OFF -> READ -> WRITE -> OFF. Touch lands in 3c-ii(b).
     const int cur = track.automationMode.load (std::memory_order_relaxed);
-    const int next = (cur == (int) AutomationMode::Off)
-                       ? (int) AutomationMode::Read
-                       : (int) AutomationMode::Off;
-    track.automationMode.store (next, std::memory_order_relaxed);
+    int next = (int) AutomationMode::Off;
+    switch ((AutomationMode) cur)
+    {
+        case AutomationMode::Off:   next = (int) AutomationMode::Read;  break;
+        case AutomationMode::Read:  next = (int) AutomationMode::Write; break;
+        case AutomationMode::Write: next = (int) AutomationMode::Off;   break;
+        case AutomationMode::Touch: next = (int) AutomationMode::Off;   break;
+    }
+
+    // When transitioning OUT of Write, the points just appended to the
+    // lane during the Write pass need to be visible to the audio thread
+    // BEFORE it starts reading from the lane (which it will under Read).
+    // The release-store on mode synchronizes those writes - any prior
+    // append to lane.points happens-before the audio thread's acquire-
+    // load of the new mode.
+    track.automationMode.store (next, std::memory_order_release);
+
+    // Read mode disables the fader slider (spec: "User cannot override"),
+    // Write mode re-enables it so the user can ride the fader. Off keeps
+    // the manual setpoint live.
+    faderSlider.setEnabled (next != (int) AutomationMode::Read);
+
     refreshAutoModeButton();
 }
 

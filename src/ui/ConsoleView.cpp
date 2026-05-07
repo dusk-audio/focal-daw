@@ -7,7 +7,7 @@ ConsoleView::ConsoleView (Session& session, AudioEngine& engine) : sessionRef (s
     for (int i = 0; i < Session::kNumTracks; ++i)
     {
         strips[(size_t) i] = std::make_unique<ChannelStripComponent> (
-            i, session.track (i), session, engine.getStrip (i).getPluginSlot());
+            i, session.track (i), session, engine.getStrip (i).getPluginSlot(), engine);
         addAndMakeVisible (strips[(size_t) i].get());
     }
     for (int i = 0; i < Session::kNumBuses; ++i)
