@@ -314,6 +314,7 @@ AlsaPerformanceTest::runStartStopRace (const Options& opts)
 
     MeasuringCallback cb (0);
     int failures = 0;
+    int firstFailureCycle = -1;
 
     for (int i = 0; i < opts.startStopCycles; ++i)
     {
@@ -323,11 +324,24 @@ AlsaPerformanceTest::runStartStopRace (const Options& opts)
         // measures only the queueing layer and misses real start_threshold
         // behavior.
         juce::Thread::sleep (50);
+
+        // CodeRabbit fix: dev.isOpen() reflects open()/close() only, not
+        // start()/stop(), so it stays true after dev.stop() and the previous
+        // check rubber-stamped every cycle. Use the callback count instead -
+        // audioDeviceAboutToStart resets it to 0 at each start, and after
+        // a 50ms sleep at 1024/48k a healthy device will have produced at
+        // least two callbacks. Zero callbacks means start() didn't actually
+        // get the audio thread running (pre-fill failed, recovery cascade,
+        // or a deeper open-state inconsistency).
+        const int callbacksDuringRun = cb.totalCallbacks();
+
         dev.stop();
-        if (! dev.isOpen())
+
+        if (callbacksDuringRun == 0)
         {
             ++failures;
-            break;
+            if (firstFailureCycle < 0)
+                firstFailureCycle = i;
         }
     }
 
@@ -335,8 +349,10 @@ AlsaPerformanceTest::runStartStopRace (const Options& opts)
 
     r.xruns   = dev.getXRunCount();
     r.passed  = failures == 0;
-    r.verdict = failures == 0 ? "SAFE"
-                                : juce::String::formatted ("UNSAFE (failed at cycle %d)", failures);
+    r.verdict = failures == 0
+                  ? juce::String ("SAFE")
+                  : juce::String::formatted ("UNSAFE (%d/%d cycles produced no callbacks; first at #%d)",
+                                                failures, opts.startStopCycles, firstFailureCycle);
     r.details = juce::String::formatted ("xruns over all cycles: %d", r.xruns);
     return r;
 }
