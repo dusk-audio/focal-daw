@@ -205,6 +205,15 @@ AlsaPerformanceTest::runBufferSweep (const Options& opts)
     if (sizes.isEmpty())
         for (int b : kDefaultBufferLadder) sizes.add (b);
 
+    // Sort + dedupe so the "first SAFE/MARGINAL row in the results = minimum
+    // stable buffer" invariant holds for runAll's recommended-min picker.
+    // The default ladder above is already tidy; an opts.bufferSizes supplied
+    // by a programmatic caller (or a future env-var path) might not be.
+    sizes.sort();
+    for (int i = sizes.size() - 1; i > 0; --i)
+        if (sizes.getUnchecked (i) == sizes.getUnchecked (i - 1))
+            sizes.remove (i);
+
     juce::Array<Result> results;
     for (int bs : sizes)
     {
@@ -579,7 +588,7 @@ juce::String AlsaPerformanceTest::runAll (const Options& opts)
         if (rateRecommendedMin > 0)
             out.add (juce::String::formatted (
                 "  Recommended min buffer at %u Hz: %d frames (50%% headroom: %d)",
-                rate, rateRecommendedMin, rateRecommendedMin * 2));
+                rate, rateRecommendedMin, (rateRecommendedMin * 3) / 2));
         else
             out.add ("  No buffer size stable at this rate.");
 
