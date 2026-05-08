@@ -115,7 +115,8 @@ target_sources(Focal PRIVATE
 if(UNIX AND NOT APPLE)
     target_sources(Focal PRIVATE
         src/engine/alsa/AlsaAudioIODevice.cpp
-        src/engine/alsa/AlsaAudioIODeviceType.cpp)
+        src/engine/alsa/AlsaAudioIODeviceType.cpp
+        src/engine/alsa/AlsaPerformanceTest.cpp)
     target_link_libraries(Focal PRIVATE asound)
     target_compile_definitions(Focal PRIVATE FOCAL_HAS_FOCAL_ALSA=1)
 endif()

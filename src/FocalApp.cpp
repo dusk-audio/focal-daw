@@ -5,6 +5,10 @@
 #include "ui/WindowState.h"
 #include "engine/AudioEngine.h"
 #include "engine/AudioPipelineSelfTest.h"
+#if defined(__linux__)
+ #include "engine/alsa/AlsaAudioIODeviceType.h"
+ #include "engine/alsa/AlsaPerformanceTest.h"
+#endif
 #include "session/Session.h"
 
 #include <cstdio>
@@ -198,9 +202,20 @@ static void runHeadlessToneTest()
                   backendName.toRawUTF8(), deviceName.toRawUTF8(),
                   targetRate, targetBuf, durationMs);
 
-    // Initialise with no channels - we don't care about input here. The
-    // backend-cycle logic in JUCE still enumerates and the type can be
-    // switched explicitly below.
+    // Linux: pre-register Focal's ALSA backend + JACK before init, same
+    // pattern AudioEngine uses. Stops JUCE's createDeviceTypesIfNeeded
+    // from auto-registering its stock ALSA path (which would collide on
+    // the type-name "ALSA" with ours). Pre-scanning lets init's
+    // pickCurrentDeviceTypeWithDevices read device counts without tripping
+    // hasScanned assertions.
+   #if defined(__linux__)
+    if (auto* jackType = juce::AudioIODeviceType::createAudioIODeviceType_JACK())
+        dm.addAudioDeviceType (std::unique_ptr<juce::AudioIODeviceType> (jackType));
+    dm.addAudioDeviceType (std::make_unique<focal::AlsaAudioIODeviceType>());
+    for (auto* type : dm.getAvailableDeviceTypes())
+        if (type != nullptr) type->scanForDevices();
+   #endif
+
     if (const auto err = dm.initialiseWithDefaultDevices (0, 2); err.isNotEmpty())
         std::fprintf (stdout, "init: %s\n", err.toRawUTF8());
 
@@ -308,6 +323,41 @@ void FocalApp::initialise (const juce::String&)
         quit();
         return;
     }
+
+   #if defined(__linux__)
+    if (envFlagSet ("FOCAL_RUN_ALSA_PERF"))
+    {
+        // Tier 1 ALSA backend perf test. Drives the backend directly (no
+        // AudioDeviceManager involvement, no engine), output-only, silent.
+        // Configurable via env vars - device picks default of hw:0,0 if
+        // none set.
+        focal::AlsaPerformanceTest::Options opts;
+        if (const auto* v = std::getenv ("FOCAL_ALSA_PERF_DEVICE"))      opts.deviceId      = v;
+        if (const auto* v = std::getenv ("FOCAL_ALSA_PERF_RATE"))        opts.sampleRate    = (unsigned int) juce::String (v).getIntValue();
+        if (const auto* v = std::getenv ("FOCAL_ALSA_PERF_DURATION_MS")) opts.durationMs    = juce::String (v).getIntValue();
+        if (const auto* v = std::getenv ("FOCAL_ALSA_PERF_LOAD_US"))     opts.fakeDspLoadUs = juce::String (v).getIntValue();
+        if (const auto* v = std::getenv ("FOCAL_ALSA_PERF_LOOPBACK"))    opts.runLoopback   = juce::String (v).getIntValue() != 0;
+
+        // Tier 2: comma-separated list, e.g. "44100,48000,96000". Empty
+        // (or unset) keeps the single-rate Tier 1 behaviour.
+        if (const auto* v = std::getenv ("FOCAL_ALSA_PERF_RATES"))
+        {
+            const auto tokens = juce::StringArray::fromTokens (juce::String (v), ",", "");
+            for (const auto& t : tokens)
+            {
+                const int rate = t.trim().getIntValue();
+                if (rate > 0) opts.sampleRates.add ((unsigned int) rate);
+            }
+        }
+
+        const auto report = focal::AlsaPerformanceTest::runAll (opts);
+        std::fprintf (stdout, "%s\n", report.toRawUTF8());
+        std::fflush (stdout);
+
+        quit();
+        return;
+    }
+   #endif
 
     if (envFlagSet ("FOCAL_RUN_PERF_TEST"))
     {

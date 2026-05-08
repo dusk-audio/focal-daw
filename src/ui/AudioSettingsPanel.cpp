@@ -3,6 +3,9 @@
 #include "SelfTestPanel.h"
 #include "../engine/AudioEngine.h"
 #include "../session/Session.h"
+#if defined(__linux__)
+ #include "../engine/alsa/AlsaAudioIODevice.h"
+#endif
 
 namespace focal
 {
@@ -27,7 +30,15 @@ AudioSettingsPanel::AudioSettingsPanel (juce::AudioDeviceManager& dm,
     // latency but give the kernel more headroom against scheduler jitter.
     for (int p : { 2, 3, 4, 8, 16 })
         periodsCombo.addItem (juce::String (p), p);
-    periodsCombo.setSelectedId (juce::getALSARequestedPeriods(), juce::dontSendNotification);
+    {
+        // getRequestedPeriods() is clamped to [2,16] but the combo only exposes
+        // a discrete subset; fall back to 4 (JUCE default) for any value that
+        // doesn't have a corresponding item, otherwise the combo renders blank.
+        const int requested = AlsaAudioIODevice::getRequestedPeriods();
+        const bool inSet = (requested == 2 || requested == 3 || requested == 4
+                            || requested == 8 || requested == 16);
+        periodsCombo.setSelectedId (inSet ? requested : 4, juce::dontSendNotification);
+    }
     periodsCombo.setTooltip ("ALSA period count. Only applies to ALSA backend. "
                               "Increase if you hear xruns or distortion at low "
                               "buffer sizes; decrease for lower latency.");
@@ -40,6 +51,12 @@ AudioSettingsPanel::AudioSettingsPanel (juce::AudioDeviceManager& dm,
         "Open the headless audio pipeline self-test panel "
         "- synthetic engine tests + backend cycle."));
     addAndMakeVisible (selfTestButton);
+
+    rescanButton.onClick = [this] { applyRescan(); };
+    rescanButton.setTooltip ("Re-enumerate audio backends and devices. "
+                              "Use after plugging in or removing a USB / "
+                              "Thunderbolt audio interface.");
+    addAndMakeVisible (rescanButton);
 
     // Effect oversampling - global. ComboBox IDs are the literal factor (1,
     // 2, 4) so we read the value back without an extra mapping table.
@@ -110,7 +127,7 @@ void AudioSettingsPanel::resized()
 {
     auto area = getLocalBounds();
 
-    // Bottom row: Periods + Oversampling + Self-Test button.
+    // Bottom row: Periods + Oversampling + Rescan + Self-Test buttons.
     auto bottom = area.removeFromBottom (32);
 #if defined(__linux__)
     periodsLabel.setBounds       (bottom.removeFromLeft (180).reduced (4, 4));
@@ -119,6 +136,7 @@ void AudioSettingsPanel::resized()
     oversamplingLabel.setBounds  (bottom.removeFromLeft (160).reduced (4, 4));
     oversamplingCombo.setBounds  (bottom.removeFromLeft (120).reduced (4, 4));
     selfTestButton.setBounds     (bottom.removeFromRight (160).reduced (4, 4));
+    rescanButton.setBounds       (bottom.removeFromRight (140).reduced (4, 4));
 
     // Row above: UI scale slider + hint.
     auto scaleRow = area.removeFromBottom (28);
@@ -151,13 +169,39 @@ void AudioSettingsPanel::applyUiScaleChange()
     juce::Desktop::getInstance().setGlobalScaleFactor (scale);
 }
 
+void AudioSettingsPanel::applyRescan()
+{
+    // Re-enumerate every registered audio backend. AudioIODeviceType's
+    // scanForDevices() repopulates the type's internal device list; the
+    // listener notification path (fired by callDeviceChangeListeners() on
+    // our ALSA type, and by JUCE's own backends on theirs) tells the
+    // AudioDeviceSelectorComponent to re-query and rebuild its dropdowns.
+    //
+    // We iterate every type rather than only the current one so that
+    // switching backend (e.g. ALSA -> JACK) after a hot-plug still sees
+    // the freshly-enumerated devices on the new backend.
+    const auto& types = deviceManager.getAvailableDeviceTypes();
+    for (auto* type : types)
+        if (type != nullptr)
+            type->scanForDevices();
+
+    // The selector subscribes to AudioDeviceManager change broadcasts. Most
+    // backends' scanForDevices() will already fire callDeviceChangeListeners()
+    // (which routes through audioDeviceListChanged() → sendChangeMessage()),
+    // but some only broadcast on a real diff. Force a refresh either way.
+    // Re-applying the same setup via setAudioDeviceSetup is a no-op when
+    // newSetup == currentSetup (JUCE early-returns without notifying), so
+    // poke the broadcaster directly.
+    deviceManager.sendChangeMessage();
+}
+
 #if defined(__linux__)
 void AudioSettingsPanel::applyPeriodsChange()
 {
     const int p = periodsCombo.getSelectedId();
     if (p <= 0) return;
 
-    juce::setALSARequestedPeriods (p);
+    AlsaAudioIODevice::setRequestedPeriods (p);
 
     // Re-open the device with the same setup so setParameters() runs and
     // picks up the new period count. Without this, the change only takes

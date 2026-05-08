@@ -6,7 +6,7 @@
 namespace focal
 {
 AlsaAudioIODeviceType::AlsaAudioIODeviceType()
-    : juce::AudioIODeviceType ("ALSA (Focal)")
+    : juce::AudioIODeviceType ("ALSA")
 {
 }
 
@@ -108,11 +108,34 @@ juce::StringArray AlsaAudioIODeviceType::getDeviceNames (bool wantInputNames) co
     return wantInputNames ? inputNames : outputNames;
 }
 
-int AlsaAudioIODeviceType::getDefaultDeviceIndex (bool /*forInput*/) const
+int AlsaAudioIODeviceType::getDefaultDeviceIndex (bool forInput) const
 {
     jassert (hasScanned);
-    // No "default" in raw hw: enumeration - first entry is the default.
-    return 0;
+
+    // Heuristic: prefer the first device that doesn't look like a built-in
+    // motherboard codec, an HDMI output, or a webcam. Most users running
+    // Linux for audio plug in a USB or PCIe interface; first-run defaulting
+    // to the laptop's onboard HDA + 5.1 surround mapping forces them to
+    // dig into the dropdown to find their actual interface, which is the
+    // exact "doesn't work out of the box" experience we want to avoid.
+    //
+    // This only matters on first launch and after a saved device name no
+    // longer resolves; once the user's selection is persisted via JUCE's
+    // AudioDeviceManager state, that takes precedence.
+    const auto& names = forInput ? inputNames : outputNames;
+    for (int i = 0; i < names.size(); ++i)
+    {
+        const auto& n = names[i];
+        if (n.startsWithIgnoreCase ("HDA "))             continue;
+        if (n.containsIgnoreCase ("HDMI"))               continue;
+        if (forInput && n.containsIgnoreCase ("Webcam")) continue;
+        return i;
+    }
+
+    // Only built-in / unwanted devices are present - fall back to the
+    // first entry rather than returning -1, so the dialog still opens
+    // something rather than refusing to enumerate.
+    return names.isEmpty() ? -1 : 0;
 }
 
 int AlsaAudioIODeviceType::getIndexOfDevice (juce::AudioIODevice* device, bool asInput) const
@@ -138,5 +161,18 @@ juce::AudioIODevice* AlsaAudioIODeviceType::createDevice (const juce::String& ou
     const juce::String name  = outIdx >= 0 ? outputDeviceName : inputDeviceName;
 
     return new AlsaAudioIODevice (name, inId, outId);
+}
+
+void AlsaAudioIODeviceType::rescan()
+{
+    // scanForDevices() was tweaked earlier to drop its hasScanned early-
+    // return so a second call does pick up freshly-plugged hw: devices.
+    // After repopulating, fire the inherited listener notification so
+    // JUCE's AudioDeviceSelectorComponent re-queries getDeviceNames()
+    // and rebuilds its Output/Input combos. Without the listener call,
+    // the new device list sits in our arrays but the dropdown stays
+    // stale until the user closes and reopens the dialog.
+    scanForDevices();
+    callDeviceChangeListeners();
 }
 } // namespace focal

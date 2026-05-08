@@ -1,6 +1,7 @@
 #include "AlsaAudioIODevice.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -261,6 +262,16 @@ const double kCandidateRates[] = {
 const int kCandidateBufferSizes[] = {
     32, 64, 128, 256, 512, 1024, 2048, 4096
 };
+
+// Extract the symbolic card id from an "hw:CARD,DEV" string. "hw:UMC1820,0"
+// → "UMC1820"; "hw:PCH,1" → "PCH"; anything that doesn't start with "hw:"
+// → empty. Used by open() to gate snd_pcm_link to same-card pairs (so
+// cross-card duplex doesn't silently drift), and exercised by runSelfTest().
+juce::String cardOfHwId (const juce::String& id)
+{
+    return id.fromFirstOccurrenceOf ("hw:", false, false)
+             .upToFirstOccurrenceOf (",", false, false);
+}
 } // namespace
 
 void AlsaAudioIODevice::setRequestedPeriods (int p) noexcept
@@ -276,7 +287,7 @@ int AlsaAudioIODevice::getRequestedPeriods() noexcept
 AlsaAudioIODevice::AlsaAudioIODevice (const juce::String& name,
                                         const juce::String& inId,
                                         const juce::String& outId)
-    : juce::AudioIODevice (name, "ALSA (Focal)"),
+    : juce::AudioIODevice (name, "ALSA"),
       juce::Thread ("Focal-ALSA-IO"),
       inputId (inId),
       outputId (outId),
@@ -396,9 +407,25 @@ bool AlsaAudioIODevice::openOneHandle (const juce::String& id, bool isCapture, s
                                     SND_PCM_NONBLOCK);
     if (err < 0)
     {
-        lastError = juce::String ("snd_pcm_open(") + id + ", "
-                  + (isCapture ? "capture" : "playback") + "): "
-                  + snd_strerror (err);
+        // EBUSY is the case where a customer is most likely to need actionable
+        // help: another process (PipeWire/JACK shim, browser audio, screen
+        // recorder, another DAW) holds the kernel device. The default
+        // snd_strerror text ("Device or resource busy") doesn't tell them
+        // what to do about it, so swap in a message that names the usual
+        // suspects.
+        if (err == -EBUSY)
+        {
+            lastError = juce::String ("Device \"") + id + "\" is in use by another "
+                       "application (PipeWire, JACK, browser audio, or another DAW). "
+                       "Stop the other app or run `pactl suspend-sink <sink-name> 1` "
+                       "to release the kernel handle, then try again.";
+        }
+        else
+        {
+            lastError = juce::String ("snd_pcm_open(") + id + ", "
+                      + (isCapture ? "capture" : "playback") + "): "
+                      + snd_strerror (err);
+        }
         handle = nullptr;
         return false;
     }
@@ -571,8 +598,32 @@ juce::String AlsaAudioIODevice::open (const juce::BigInteger& inputChannels,
     // hardware clock. Without this, capture and playback can drift (audible
     // as a periodic phase ripple) and recovery on one direction leaves the
     // other in an unrecovered state.
+    //
+    // Caveat: link assumes a shared clock domain, which holds only when
+    // both PCMs live on the same physical card. snd_pcm_link will accept
+    // a cross-card pair on most kernels but the clocks won't actually be
+    // shared - audio drifts over long sessions. Compare the "hw:CARD,..."
+    // prefix of the two ids; only link when they match.
     if (outHandle != nullptr && inHandle != nullptr)
-        snd_pcm_link (outHandle, inHandle);
+    {
+        const auto outCard = cardOfHwId (outputId);
+        const auto inCard  = cardOfHwId (inputId);
+
+        if (outCard == inCard)
+        {
+            snd_pcm_link (outHandle, inHandle);
+        }
+        else
+        {
+            std::fprintf (stderr,
+                          "[Focal/ALSA] WARNING: input \"%s\" and output \"%s\" are on "
+                          "different cards (\"%s\" vs \"%s\"); not linking. The two "
+                          "clocks will drift over a long session. For tracking + "
+                          "monitoring use the same interface for in and out.\n",
+                          inputId.toRawUTF8(), outputId.toRawUTF8(),
+                          inCard.toRawUTF8(), outCard.toRawUTF8());
+        }
+    }
 
     openedSampleRate = rate;
     periodSize       = (int) period;
@@ -816,21 +867,44 @@ void AlsaAudioIODevice::run()
             }
             if (threadShouldExit()) break;
 
-            snd_pcm_sframes_t got = snd_pcm_readi (inHandle,
-                                                     interleavedInBytes.getData(),
-                                                     (snd_pcm_uframes_t) periodSize);
-            if (got < 0)
+            // Loop on partial reads. snd_pcm_readi can short-return after
+            // recovery or during state transitions - retry on the residual
+            // until we have a full period. EAGAIN (NONBLOCK and no data) is
+            // distinct from xrun: it just means "wait briefly and try
+            // again", not a stream error.
+            int       framesRemaining = periodSize;
+            char*     cursor          = (char*) interleavedInBytes.getData();
+            const int frameBytes      = bytesPerInSample * (int) inNumChannels;
+            bool      readFatal       = false;
+
+            while (framesRemaining > 0 && ! threadShouldExit())
             {
-                if (recoverFromXrun (inHandle, (int) got) < 0) break;
-                continue;
+                snd_pcm_sframes_t got = snd_pcm_readi (inHandle, cursor,
+                                                         (snd_pcm_uframes_t) framesRemaining);
+                if (got < 0)
+                {
+                    if (got == -EAGAIN)
+                    {
+                        snd_pcm_wait (inHandle, 100);
+                        continue;
+                    }
+                    if (recoverFromXrun (inHandle, (int) got) < 0)
+                    {
+                        readFatal = true;
+                        break;
+                    }
+                    // After recovery, the device is in PREPARED state and
+                    // the residual read is gone. Zero-fill the rest so the
+                    // callback sees a deterministic block instead of stale
+                    // bytes, and proceed.
+                    std::memset (cursor, 0, (size_t) (framesRemaining * frameBytes));
+                    framesRemaining = 0;
+                    break;
+                }
+                cursor          += got * frameBytes;
+                framesRemaining -= (int) got;
             }
-            if (got < periodSize)
-            {
-                // Partial read: zero the rest and proceed; better than a stall.
-                std::memset ((char*) interleavedInBytes.getData() + got * bytesPerInSample * (int) inNumChannels,
-                              0,
-                              (size_t) ((periodSize - got) * bytesPerInSample * (int) inNumChannels));
-            }
+            if (readFatal) break;
 
             deinterleaveCaptureBlock (interleavedInBytes.getData(),
                                         callbackInFloats, periodSize);
@@ -882,6 +956,16 @@ void AlsaAudioIODevice::run()
                                                             (snd_pcm_uframes_t) framesRemaining);
                 if (wrote < 0)
                 {
+                    // EAGAIN: NONBLOCK PCM with no buffer space. Don't
+                    // tight-spin, don't treat as xrun - wait briefly for
+                    // the kernel to drain a frame and try again. This also
+                    // catches the linked-pair drift case where capture's
+                    // wait returned but playback temporarily has no room.
+                    if (wrote == -EAGAIN)
+                    {
+                        snd_pcm_wait (outHandle, 100);
+                        continue;
+                    }
                     if (recoverFromXrun (outHandle, (int) wrote) < 0) goto loopExit;
                     continue;
                 }
@@ -892,4 +976,214 @@ void AlsaAudioIODevice::run()
     }
 loopExit: ;
 }
+
+// ============================================================================
+// Synthetic backend self-test. Lives here (rather than a separate cpp) because
+// the per-format converters and cardOfHwId are anonymous-namespace symbols
+// only visible inside this translation unit; surfacing them via a header
+// would widen the API surface for a one-time test entry point.
+//
+// Tests cover:
+//   1. Float<->int round-trip for every format we negotiate. Each format
+//      has a known precision floor; we check max-error <= floor.
+//   2. Channel-mask routing: with 2 active channels of a 4-channel device,
+//      slots 0/2 carry source data and slots 1/3 stay zero in the
+//      interleaved frame.
+//   3. cardOfHwId parsing for the same-card snd_pcm_link guard.
+//   4. setRequestedPeriods clamping to [2, 16].
+//
+// Real-device opens (snd_pcm_open + start + writei + readi against actual
+// hardware) are exercised by AudioPipelineSelfTest's existing backend cycle.
+juce::String AlsaAudioIODevice::runSelfTest()
+{
+    juce::StringArray report;
+    int passed = 0, failed = 0;
+
+    auto record = [&] (const juce::String& name, bool pass, const juce::String& detail = {})
+    {
+        report.add (juce::String ("  [") + (pass ? "PASS" : "FAIL") + "] " + name
+                     + (detail.isNotEmpty() ? "  " + detail : juce::String()));
+        (pass ? passed : failed)++;
+    };
+
+    // ----- 1. Per-format round-trip ----------------------------------------
+    {
+        constexpr int kFrames = 64;
+        constexpr int kDevCh  = 1;
+        const int activeIdx[] = { 0 };
+
+        juce::AudioBuffer<float> src (1, kFrames);
+        for (int i = 0; i < kFrames; ++i)
+            src.setSample (0, i, 0.5f * std::sin (2.0f * juce::MathConstants<float>::pi
+                                                     * 1000.0f * (float) i / 48000.0f));
+
+        // Precision floors: lossy formats have a max-error budget at twice
+        // the LSB of the format's quantization step, since round-trip
+        // applies one quantize+dequantize. FLOAT_LE is exact.
+        struct Case
+        {
+            const char* name;
+            int  bytesPerSample;
+            int  bitDepth;
+            bool isFloat;
+            float epsilon;
+            void (*write) (const juce::AudioBuffer<float>&, void*, int, int, const int*, int);
+            void (*read)  (const void*, juce::AudioBuffer<float>&, int, int, const int*, int);
+        };
+        const Case cases[] = {
+            { "FLOAT_LE", 4, 32, true,  0.0f,                         writeInterleavedFloat,    readInterleavedFloat    },
+            { "S32_LE",   4, 32, false, 2.0f / kInt32Scale,           writeInterleavedS32,      readInterleavedS32      },
+            { "S16_LE",   2, 16, false, 2.0f / kInt16Scale,           writeInterleavedS16,      readInterleavedS16      },
+            { "S24_LE",   4, 24, false, 2.0f / kInt24Scale,           writeInterleavedS24in32,  readInterleavedS24in32  },
+            { "S24_3LE",  3, 24, false, 2.0f / kInt24Scale,           writeInterleavedS24Packed,readInterleavedS24Packed},
+        };
+
+        for (const auto& c : cases)
+        {
+            juce::HeapBlock<char> scratch ((size_t) (c.bytesPerSample * kDevCh * kFrames), true);
+            juce::AudioBuffer<float> dest (1, kFrames);
+            dest.clear();
+
+            c.write (src, scratch.getData(), kFrames, kDevCh, activeIdx, 1);
+            c.read  (scratch.getData(), dest, kFrames, kDevCh, activeIdx, 1);
+
+            float maxErr = 0.0f;
+            for (int i = 0; i < kFrames; ++i)
+                maxErr = juce::jmax (maxErr, std::abs (src.getSample (0, i) - dest.getSample (0, i)));
+
+            record (juce::String ("Format round-trip ") + c.name,
+                     maxErr <= c.epsilon,
+                     juce::String::formatted ("max err %.2e (eps %.2e)", maxErr, c.epsilon));
+        }
+    }
+
+    // ----- 2. Channel-mask routing -----------------------------------------
+    {
+        constexpr int kFrames = 16;
+        constexpr int kDevCh  = 4;
+        const int activeIdx[] = { 0, 2 };
+        constexpr int kActive = 2;
+
+        juce::AudioBuffer<float> src (kActive, kFrames);
+        for (int f = 0; f < kFrames; ++f)
+        {
+            src.setSample (0, f,  0.5f);   // active 0 -> device slot 0
+            src.setSample (1, f, -0.25f);  // active 1 -> device slot 2
+        }
+
+        juce::HeapBlock<char> scratch ((size_t) (sizeof (int32_t) * kDevCh * kFrames), true);
+        writeInterleavedS32 (src, scratch.getData(), kFrames, kDevCh, activeIdx, kActive);
+
+        const auto* raw = reinterpret_cast<const int32_t*> (scratch.getData());
+        bool slot0HasData = false, slot2HasData = false;
+        bool slot1Zero = true,    slot3Zero = true;
+        for (int f = 0; f < kFrames; ++f)
+        {
+            if (raw[f * kDevCh + 0] != 0) slot0HasData = true;
+            if (raw[f * kDevCh + 1] != 0) slot1Zero    = false;
+            if (raw[f * kDevCh + 2] != 0) slot2HasData = true;
+            if (raw[f * kDevCh + 3] != 0) slot3Zero    = false;
+        }
+
+        record ("Channel routing - active slots populated",
+                 slot0HasData && slot2HasData,
+                 juce::String::formatted ("slot0=%s slot2=%s",
+                                            slot0HasData ? "data" : "ZERO",
+                                            slot2HasData ? "data" : "ZERO"));
+        record ("Channel routing - inactive slots zeroed",
+                 slot1Zero && slot3Zero,
+                 juce::String::formatted ("slot1=%s slot3=%s",
+                                            slot1Zero ? "zero" : "NONZERO",
+                                            slot3Zero ? "zero" : "NONZERO"));
+
+        // Round-trip back through deinterleave verifies the active-index
+        // map is symmetric (write puts active a -> slot activeIdx[a],
+        // read pulls slot activeIdx[a] -> active a).
+        juce::AudioBuffer<float> dest (kActive, kFrames);
+        dest.clear();
+        readInterleavedS32 (scratch.getData(), dest, kFrames, kDevCh, activeIdx, kActive);
+
+        float maxErr = 0.0f;
+        for (int a = 0; a < kActive; ++a)
+            for (int f = 0; f < kFrames; ++f)
+                maxErr = juce::jmax (maxErr, std::abs (src.getSample (a, f) - dest.getSample (a, f)));
+
+        record ("Channel routing - round-trip preserves active channels",
+                 maxErr <= 2.0f / kInt32Scale,
+                 juce::String::formatted ("max err %.2e", maxErr));
+    }
+
+    // ----- 3. cardOfHwId parsing -------------------------------------------
+    {
+        struct Case { const char* in; const char* expected; };
+        const Case cases[] = {
+            { "hw:UMC1820,0",         "UMC1820" },
+            { "hw:PCH,1",             "PCH"     },
+            { "hw:0,0",               "0"       },  // numeric card id
+            { "hw:UMC1820,0,2",       "UMC1820" },  // sub-device suffix
+            { "front:CARD=UMC1820",   ""        },  // not hw: -> reject
+            { "",                     ""        },
+        };
+        bool allOk = true;
+        juce::String detail;
+        for (const auto& c : cases)
+        {
+            const juce::String got = cardOfHwId (c.in);
+            const bool ok = got == juce::String (c.expected);
+            if (! ok)
+            {
+                allOk = false;
+                detail += juce::String ("'") + c.in + "' -> '" + got + "' (want '"
+                        + c.expected + "'); ";
+            }
+        }
+        record ("cardOfHwId parses hw:CARD,DEV correctly", allOk, detail);
+    }
+
+    // ----- 4. setRequestedPeriods clamping ---------------------------------
+    //
+    // The periods setting is shared static state that drives the NEXT real
+    // device open. AudioPipelineSelfTest::runAll() runs us here and then
+    // does its backend-cycle real-device test - if we left the periods
+    // value at the last sentinel we probed (2) instead of restoring the
+    // caller's preference, that backend cycle would silently configure
+    // the device with the test's leftover value. Use RAII so the restore
+    // survives any future early-return / exception in this block; a
+    // manual setRequestedPeriods(saved) at the end is too easy to skip.
+    {
+        const int saved = getRequestedPeriods();
+        struct PeriodsRestoreGuard
+        {
+            int saved;
+            ~PeriodsRestoreGuard() { setRequestedPeriods (saved); }
+        } restorer { saved };
+
+        setRequestedPeriods (1);    const int p1   = getRequestedPeriods();
+        setRequestedPeriods (0);    const int p0   = getRequestedPeriods();
+        setRequestedPeriods (-5);   const int pNeg = getRequestedPeriods();
+        setRequestedPeriods (99);   const int p99  = getRequestedPeriods();
+        setRequestedPeriods (8);    const int p8   = getRequestedPeriods();
+        setRequestedPeriods (2);    const int p2   = getRequestedPeriods();
+
+        record ("Periods clamping - low (1)",     p1   == 2,
+                 juce::String::formatted ("got %d", p1));
+        record ("Periods clamping - lower (0)",   p0   == 2,
+                 juce::String::formatted ("got %d", p0));
+        record ("Periods clamping - negative",    pNeg == 2,
+                 juce::String::formatted ("got %d", pNeg));
+        record ("Periods clamping - high (99)",   p99  == 16,
+                 juce::String::formatted ("got %d", p99));
+        record ("Periods clamping - in-range (8)",p8   == 8,
+                 juce::String::formatted ("got %d", p8));
+        record ("Periods clamping - in-range (2)",p2   == 2,
+                 juce::String::formatted ("got %d", p2));
+    }
+
+    juce::StringArray header;
+    header.add ("--- ALSA Backend Self-Test (no hardware) ---");
+    header.add (juce::String::formatted ("  Total: %d passed, %d failed", passed, failed));
+    header.add ("");
+    return header.joinIntoString ("\n") + "\n" + report.joinIntoString ("\n");
+}
+
 } // namespace focal

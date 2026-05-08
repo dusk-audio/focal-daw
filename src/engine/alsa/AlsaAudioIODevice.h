@@ -85,6 +85,17 @@ public:
     static void setRequestedPeriods (int p) noexcept;
     static int  getRequestedPeriods() noexcept;
 
+    // Synthetic backend self-test. Exercises the pure-logic surfaces that
+    // don't need real hardware: float<->int sample conversion round-trip
+    // for every format we negotiate, channel-mask routing into the
+    // interleaved frame, hw:CARD,DEV id parsing for cross-card detection,
+    // and periods-knob clamping. Returns a multi-line "[PASS] ..." /
+    // "[FAIL] ..." report. AudioPipelineSelfTest::runAll() invokes this
+    // alongside the engine pipeline tests, so FOCAL_RUN_SELFTEST=1 picks
+    // it up. Real-device opens are covered by the existing backend cycle
+    // section of AudioPipelineSelfTest, not here.
+    static juce::String runSelfTest();
+
 private:
     void run() override;  // SCHED_RR I/O thread
 

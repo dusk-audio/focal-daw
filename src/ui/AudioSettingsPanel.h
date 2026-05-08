@@ -4,18 +4,12 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <memory>
 
-// Focal-side declarations of the runtime ALSA periods accessors that live
-// in our patched JUCE/modules/juce_audio_devices/native/juce_ALSA_linux.cpp.
-// The default value is 4 to match upstream JUCE; UI writes here before
-// triggering an AudioDeviceManager re-open so the new period count takes
-// effect on the next snd_pcm_hw_params_set_periods_near call.
-#if defined(__linux__)
-namespace juce
-{
-    JUCE_API void setALSARequestedPeriods (int p) noexcept;
-    JUCE_API int  getALSARequestedPeriods() noexcept;
-}
-#endif
+// The ALSA "periods per buffer" knob is owned by Focal's custom ALSA
+// backend now (see AlsaAudioIODevice::set/getRequestedPeriods); the UI
+// reads/writes that backend's atomic and triggers a re-open so the new
+// value takes effect on the next snd_pcm_hw_params_set_periods_near call.
+// AudioSettingsPanel.cpp pulls in the header where it actually uses the
+// setter; the .h here keeps the dependency narrow.
 
 namespace focal
 {
@@ -53,6 +47,13 @@ private:
 #endif
     juce::TextButton selfTestButton { "Run Self-Test..." };
 
+    // Rescan button: triggers re-enumeration of all registered audio
+    // backends so freshly plugged-in / removed devices appear in the
+    // dropdowns without restarting Focal. Most relevant for USB hot-plug
+    // on Linux where there's no OS-level notification path; also fine on
+    // mac/Windows since AudioIODeviceType::scanForDevices is universal.
+    juce::TextButton rescanButton  { "Rescan devices" };
+
     // Global effect oversampling - single source of truth for "1× / 2× / 4×
     // across all effects". Default 1× (lowest CPU). 2× / 4× engage internal
     // oversampling on master + aux bus comps and the master tape sat
@@ -70,6 +71,7 @@ private:
 #endif
     void applyOversamplingChange();
     void applyUiScaleChange();
+    void applyRescan();
     void openSelfTest();
 };
 } // namespace focal
