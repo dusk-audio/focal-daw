@@ -1,5 +1,9 @@
 #pragma once
 
+#if ! (defined(__linux__) || defined(__gnu_linux__))
+ #error "AlsaPerformanceTest.h is ALSA/Linux-only"
+#endif
+
 #include <juce_core/juce_core.h>
 
 namespace focal
@@ -29,7 +33,7 @@ public:
         bool         passed = false;
 
         int    xruns           = 0;
-        double budgetMs        = 0.0;   // (period / sampleRate) * 1000
+        double budgetMs        = 0.0;   // (period * 1000.0) / sampleRate
         double meanCallbackMs  = 0.0;
         double p95CallbackMs   = 0.0;
         double p99CallbackMs   = 0.0;
@@ -70,7 +74,7 @@ public:
     {
         bool         signalDetected = false;
         int          latencySamples = -1;
-        double       latencyMs      = 0.0;
+        double       latencyMs      = -1.0;   // -1 == not measured (matches latencySamples sentinel)
         int          burstStartSample = -1;
         int          firstSignalSample = -1;
         juce::String details;

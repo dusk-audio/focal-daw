@@ -30,7 +30,15 @@ AudioSettingsPanel::AudioSettingsPanel (juce::AudioDeviceManager& dm,
     // latency but give the kernel more headroom against scheduler jitter.
     for (int p : { 2, 3, 4, 8, 16 })
         periodsCombo.addItem (juce::String (p), p);
-    periodsCombo.setSelectedId (AlsaAudioIODevice::getRequestedPeriods(), juce::dontSendNotification);
+    {
+        // getRequestedPeriods() is clamped to [2,16] but the combo only exposes
+        // a discrete subset; fall back to 4 (JUCE default) for any value that
+        // doesn't have a corresponding item, otherwise the combo renders blank.
+        const int requested = AlsaAudioIODevice::getRequestedPeriods();
+        const bool inSet = (requested == 2 || requested == 3 || requested == 4
+                            || requested == 8 || requested == 16);
+        periodsCombo.setSelectedId (inSet ? requested : 4, juce::dontSendNotification);
+    }
     periodsCombo.setTooltip ("ALSA period count. Only applies to ALSA backend. "
                               "Increase if you hear xruns or distortion at low "
                               "buffer sizes; decrease for lower latency.");
@@ -177,12 +185,14 @@ void AudioSettingsPanel::applyRescan()
         if (type != nullptr)
             type->scanForDevices();
 
-    // The selector subscribes to AudioDeviceManager change broadcasts,
-    // which fire when setAudioDeviceSetup is called. The cheapest way to
-    // poke it without changing the actual setup is to re-apply the
-    // current setup unchanged.
-    auto setup = deviceManager.getAudioDeviceSetup();
-    deviceManager.setAudioDeviceSetup (setup, /*treatAsChosenDevice*/ false);
+    // The selector subscribes to AudioDeviceManager change broadcasts. Most
+    // backends' scanForDevices() will already fire callDeviceChangeListeners()
+    // (which routes through audioDeviceListChanged() → sendChangeMessage()),
+    // but some only broadcast on a real diff. Force a refresh either way.
+    // Re-applying the same setup via setAudioDeviceSetup is a no-op when
+    // newSetup == currentSetup (JUCE early-returns without notifying), so
+    // poke the broadcaster directly.
+    deviceManager.sendChangeMessage();
 }
 
 #if defined(__linux__)

@@ -1141,8 +1141,22 @@ juce::String AlsaAudioIODevice::runSelfTest()
     }
 
     // ----- 4. setRequestedPeriods clamping ---------------------------------
+    //
+    // The periods setting is shared static state that drives the NEXT real
+    // device open. AudioPipelineSelfTest::runAll() runs us here and then
+    // does its backend-cycle real-device test - if we left the periods
+    // value at the last sentinel we probed (2) instead of restoring the
+    // caller's preference, that backend cycle would silently configure
+    // the device with the test's leftover value. Use RAII so the restore
+    // survives any future early-return / exception in this block; a
+    // manual setRequestedPeriods(saved) at the end is too easy to skip.
     {
         const int saved = getRequestedPeriods();
+        struct PeriodsRestoreGuard
+        {
+            int saved;
+            ~PeriodsRestoreGuard() { setRequestedPeriods (saved); }
+        } restorer { saved };
 
         setRequestedPeriods (1);    const int p1   = getRequestedPeriods();
         setRequestedPeriods (0);    const int p0   = getRequestedPeriods();
@@ -1150,8 +1164,6 @@ juce::String AlsaAudioIODevice::runSelfTest()
         setRequestedPeriods (99);   const int p99  = getRequestedPeriods();
         setRequestedPeriods (8);    const int p8   = getRequestedPeriods();
         setRequestedPeriods (2);    const int p2   = getRequestedPeriods();
-
-        setRequestedPeriods (saved);  // restore caller's pref
 
         record ("Periods clamping - low (1)",     p1   == 2,
                  juce::String::formatted ("got %d", p1));
