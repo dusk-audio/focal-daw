@@ -31,7 +31,20 @@ JUCE is picked up from `/home/marc/projects/JUCE/` automatically. Pass `-DJUCE_P
 
 ## Phase plan
 
-Phases 1a → 5 follow [Focal.md](Focal.md). Don't skip ahead. As of writing, Phase 1a (live mixer) and most of Phase 2 (multitrack recording + atomic JSON session save/load + autosave) are working. Phase 1b (send-bus plugin hosting on aux strips) and Phase 3 prep (take history) are the most recent additions. Phase 3 proper (markers, fader automation, punch+loop refinements) is next.
+Phases 1a → 5 follow [Focal.md](Focal.md). As of 2026-05-08, all spec phases are functionally complete:
+
+- **Phase 1a/1b** — live mixer + send-bus plugin hosting.
+- **Phase 2** — multitrack recording, atomic JSON session save/load, autosave.
+- **Phase 3** — regions / markers / fader automation / undo / punch + crossfades.
+- **Phase 4** — MIDI foundation + stereo strip path (4a), recording/playback/overdub/punch with hanging-note protection (4b), piano roll editor with snap/velocity/scroll/quantize (4c), polish (4d) including instrument plugin state save/restore.
+- **Phase 5** — tap tempo, CPU meter, VU meters, transport keyboard shortcuts, session templates, LED glow, fader shadows, audio device settings dialog.
+
+Plus a Tascam DP-24SD parity backlog: transport cluster (REW/FFWD hold-scrub + marker jumps + STOP+modifiers), jumpback, inline numeric clock, MIDI Learn + binding persistence, auto-punch with pre/post-roll, Clone+Clean, tuner (Duskamp donor), MIDI chord display, fader groups. And a modal pass that moved audio settings, mixdown, bounce, and the channel plugin editor to in-window `EmbeddedModal` overlays.
+
+**Remaining work:**
+1. Transport row crowding at narrow window widths (small layout fix).
+2. Out-of-process plugin hosting — Phase 4 requirement per [Focal.md:577](Focal.md#L577), currently in-process with a bypass-flag fallback. Real architectural scope.
+3. External MIDI output — [Focal.md:655](Focal.md#L655). Explicitly nice-to-have, not a launch feature.
 
 ## Audio thread rules (MANDATORY)
 
