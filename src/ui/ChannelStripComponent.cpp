@@ -6,6 +6,7 @@
 #include "../engine/AudioEngine.h"
 #include "../engine/PluginSlot.h"
 #include "../engine/PluginManager.h"
+#include "../session/RegionEditActions.h"
 
 namespace focal
 {
@@ -490,7 +491,29 @@ ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
     faderSlider.setTooltip ("Channel fader (dB) - double-click to reset to 0 dB");
     faderSlider.onValueChange = [this]
     {
-        track.strip.faderDb.store ((float) faderSlider.getValue(), std::memory_order_relaxed);
+        const auto newDb = (float) faderSlider.getValue();
+        track.strip.faderDb.store (newDb, std::memory_order_relaxed);
+
+        // Fader-group propagation. While dragging, write the same
+        // relative-dB delta to every peer in this strip's group.
+        // peerActive[] was built at onDragStart so the inner walk is
+        // a single pass; we don't re-query session.tracks every value
+        // change. Peer ChannelStrips' own 30 Hz timers pull faderDb back
+        // to their slider widgets so the visual sync is automatic.
+        const int gid = track.strip.faderGroupId.load (std::memory_order_relaxed);
+        if (gid != 0)
+        {
+            const float delta = newDb - faderDragAnchorDb;
+            for (int t = 0; t < Session::kNumTracks; ++t)
+            {
+                if (t == trackIndex || ! peerActive[(size_t) t]) continue;
+                const float target = juce::jlimit (
+                    ChannelStripParams::kFaderMinDb, ChannelStripParams::kFaderMaxDb,
+                    peerAnchorsDb[(size_t) t] + delta);
+                session.track (t).strip.faderDb.store (target,
+                                                          std::memory_order_relaxed);
+            }
+        }
     };
     // Touch-mode hooks: while the user has the fader grabbed, set the
     // strip's faderTouched flag so the audio engine routes the manual
@@ -503,11 +526,35 @@ ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
     faderSlider.onDragStart = [this]
     {
         track.strip.faderTouched.store (true, std::memory_order_release);
+
+        // Snapshot anchors for fader-group propagation. Capture this
+        // strip's current dB AND every peer's so the relative offset
+        // between members is preserved across the drag (no "smash to
+        // unison" if the user grabs a fader at +3 in a group where
+        // others sit at -10).
+        faderDragAnchorDb = (float) faderSlider.getValue();
+        peerActive.fill (false);
+        const int gid = track.strip.faderGroupId.load (std::memory_order_relaxed);
+        if (gid != 0)
+        {
+            for (int t = 0; t < Session::kNumTracks; ++t)
+            {
+                if (t == trackIndex) continue;
+                if (session.track (t).strip.faderGroupId.load (std::memory_order_relaxed) == gid)
+                {
+                    peerActive[(size_t) t]    = true;
+                    peerAnchorsDb[(size_t) t] = session.track (t).strip.faderDb.load (
+                        std::memory_order_relaxed);
+                }
+            }
+        }
     };
     faderSlider.onDragEnd = [this]
     {
         track.strip.faderTouched.store (false, std::memory_order_release);
+        peerActive.fill (false);
     };
+    faderSlider.addMouseListener (this, false);
     addAndMakeVisible (faderSlider);
 
     muteButton.setClickingTogglesState (true);
@@ -533,6 +580,7 @@ ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
         if (capturing)
             captureWritePoint (AutomationParam::Mute, newState ? 1.0f : 0.0f);
     };
+    muteButton.addMouseListener (this, false);
     addAndMakeVisible (muteButton);
 
     soloButton.setClickingTogglesState (true);
@@ -555,6 +603,7 @@ ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
         if (capturing)
             captureWritePoint (AutomationParam::Solo, soloButton.getToggleState() ? 1.0f : 0.0f);
     };
+    soloButton.addMouseListener (this, false);
     addAndMakeVisible (soloButton);
 
     phaseButton.setClickingTogglesState (true);
@@ -643,6 +692,7 @@ ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
     {
         session.setTrackArmed (trackIndex, armButton.getToggleState());
     };
+    armButton.addMouseListener (this, false);
     addAndMakeVisible (armButton);
 
     // PRINT toggle - when on, recording captures the post-EQ/post-comp signal
@@ -724,11 +774,54 @@ ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
     };
     addChildComponent (inputSelectorR);   // visibility toggled by refreshInputSelectorVisibility
 
-    // ── MIDI input selector (placeholder until phase 3) ──
-    midiInputSelector.addItem ("(MIDI input - phase 3)", 1);
-    midiInputSelector.setEnabled (false);
+    // ── MIDI input selector — populated from JUCE's MIDI input list ──
+    // Item ID 1 = "(none)" (maps to track.midiInputIndex = -1). Subsequent
+    // IDs are 2 + deviceIndex (so ID 2 → input 0, ID 3 → input 1, ...).
+    midiInputSelector.addItem ("(none)", 1);
+    {
+        const auto inputs = juce::MidiInput::getAvailableDevices();
+        for (int i = 0; i < inputs.size(); ++i)
+            midiInputSelector.addItem (inputs[i].name, 2 + i);
+    }
+    {
+        const int idx = track.midiInputIndex.load (std::memory_order_relaxed);
+        midiInputSelector.setSelectedId (idx >= 0 ? (2 + idx) : 1,
+                                          juce::dontSendNotification);
+    }
+    midiInputSelector.onChange = [this]
+    {
+        const int id = midiInputSelector.getSelectedId();
+        track.midiInputIndex.store (id <= 1 ? -1 : (id - 2), std::memory_order_relaxed);
+    };
     styleCombo (midiInputSelector);
     addChildComponent (midiInputSelector);
+
+    // ── MIDI channel filter (Omni / 1..16) ──
+    // ID 1 = Omni (atom = 0), IDs 2..17 = channels 1..16 (atom = 1..16).
+    midiChannelSelector.addItem ("Omni", 1);
+    for (int ch = 1; ch <= 16; ++ch)
+        midiChannelSelector.addItem ("Ch " + juce::String (ch), 1 + ch);
+    {
+        const int chSaved = track.midiChannel.load (std::memory_order_relaxed);
+        midiChannelSelector.setSelectedId (chSaved == 0 ? 1 : (1 + chSaved),
+                                            juce::dontSendNotification);
+    }
+    midiChannelSelector.onChange = [this]
+    {
+        const int id = midiChannelSelector.getSelectedId();
+        track.midiChannel.store (id <= 1 ? 0 : (id - 1), std::memory_order_relaxed);
+    };
+    styleCombo (midiChannelSelector);
+    addChildComponent (midiChannelSelector);
+
+    // MIDI activity LED. Tiny custom paint inside a juce::Component child;
+    // intercepts no clicks. Blink state is owned by ChannelStripComponent —
+    // timerCallback flips midiActivityLit from track.midiActivity (clear-
+    // on-read) and triggers a repaint.
+    midiActivityLed.setInterceptsMouseClicks (false, false);
+    midiActivityLed.setOpaque (false);
+    midiActivityLed.setPaintingIsUnclipped (true);
+    addChildComponent (midiActivityLed);
 
     refreshInputSelectorVisibility();
 
@@ -858,7 +951,7 @@ ChannelStripComponent::~ChannelStripComponent()
     // lingering through the next message-loop tick.
     if (auto* eq   = activeEqBox.getComponent())   eq->dismiss();
     if (auto* cmp  = activeCompBox.getComponent()) cmp->dismiss();
-    if (activePluginEditorDialog != nullptr) delete activePluginEditorDialog.getComponent();
+    pluginEditorModal.close();
 }
 
 void ChannelStripComponent::setEqSectionVisible (bool visible)
@@ -933,13 +1026,15 @@ void ChannelStripComponent::setMixingMode (bool mixing)
 
     // The mode/input/IN/ARM/PRINT block is hidden in Mixing - those controls
     // are tracking-stage only. The aux send knobs take that real estate.
-    modeSelector     .setVisible (! mixing);
-    inputSelector    .setVisible (! mixing);
-    inputSelectorR   .setVisible (! mixing);
-    midiInputSelector.setVisible (! mixing);
-    monitorButton    .setVisible (! mixing);
-    armButton        .setVisible (! mixing);
-    printButton      .setVisible (! mixing);
+    modeSelector       .setVisible (! mixing);
+    inputSelector      .setVisible (! mixing);
+    inputSelectorR     .setVisible (! mixing);
+    midiInputSelector  .setVisible (! mixing);
+    midiChannelSelector.setVisible (! mixing);
+    midiActivityLed    .setVisible (! mixing);
+    monitorButton      .setVisible (! mixing);
+    armButton          .setVisible (! mixing);
+    printButton        .setVisible (! mixing);
 
     auxRowLabel.setVisible (mixing);
     for (auto& k : auxKnobs)        if (k != nullptr) k->setVisible (mixing);
@@ -966,10 +1061,118 @@ void ChannelStripComponent::openPluginPicker()
     auto& mgr   = pluginSlot.getManagerForUi();
     auto& known = mgr.getKnownPluginList();
 
+    // MIDI tracks need an instrument plugin (synth / sampler), not an effect.
+    // Filter the known list by the donor-side `isInstrument` flag so the user
+    // doesn't have to scroll past every reverb/EQ to find their synths. Mono /
+    // Stereo tracks keep the full list.
+    const bool instrumentsOnly = (track.mode.load (std::memory_order_relaxed)
+                                    == (int) Track::Mode::Midi);
+
     juce::PopupMenu menu;
     if (known.getNumTypes() == 0)
     {
         menu.addSectionHeader ("No plugins scanned yet");
+    }
+    else if (instrumentsOnly)
+    {
+        // Manual menu for the filtered instrument list. IDs 1..N map directly
+        // to indices in `instruments` (captured by the lambda below). We
+        // can't use KnownPluginList::addToMenu here because that builds IDs
+        // off the full list and there's no built-in filter.
+        const auto instruments = mgr.getInstrumentDescriptions();
+        if (instruments.isEmpty())
+        {
+            menu.addSectionHeader ("No instruments scanned yet");
+        }
+        else
+        {
+            // Sort by manufacturer then name so similar plugins cluster
+            // (Vital, Surge, etc.). Sort a local copy so the manager's
+            // known-list order stays stable.
+            juce::Array<juce::PluginDescription> sorted (instruments);
+            std::sort (sorted.begin(), sorted.end(),
+                [] (const juce::PluginDescription& a, const juce::PluginDescription& b)
+                {
+                    if (a.manufacturerName != b.manufacturerName)
+                        return a.manufacturerName.compareIgnoreCase (b.manufacturerName) < 0;
+                    return a.name.compareIgnoreCase (b.name) < 0;
+                });
+
+            juce::String currentManufacturer;
+            juce::PopupMenu submenu;
+            for (int i = 0; i < sorted.size(); ++i)
+            {
+                const auto& d = sorted.getReference (i);
+                if (d.manufacturerName != currentManufacturer)
+                {
+                    if (currentManufacturer.isNotEmpty())
+                        menu.addSubMenu (currentManufacturer, submenu);
+                    submenu = juce::PopupMenu();
+                    currentManufacturer = d.manufacturerName;
+                }
+                submenu.addItem (i + 1, d.name);
+            }
+            if (currentManufacturer.isNotEmpty())
+                menu.addSubMenu (currentManufacturer, submenu);
+
+            // Stash the captured array so the lambda can resolve a result
+            // ID back to the matching PluginDescription. juce::PopupMenu's
+            // result lambda doesn't take captures except via copy, so we
+            // make a shared_ptr to keep the array alive through the async
+            // callback without copying it sample-by-sample.
+            auto sharedSorted = std::make_shared<juce::Array<juce::PluginDescription>> (std::move (sorted));
+            menu.addSeparator();
+            menu.addItem (9001, "Scan plugins (VST3 / LV2)...");
+            menu.addItem (9002, "Browse for file...");
+
+            juce::Component::SafePointer<ChannelStripComponent> safe (this);
+            menu.showMenuAsync (juce::PopupMenu::Options()
+                                  .withTargetComponent (&pluginSlotButton),
+                                  [safe, sharedSorted] (int result)
+            {
+                if (auto* self = safe.getComponent())
+                {
+                    if (result == 0) return;
+                    if (result == 9001) { self->runPluginScanModal(); self->openPluginPicker(); return; }
+                    if (result == 9002) { self->openPluginFileChooser(); return; }
+
+                    const int idx = result - 1;
+                    if (idx < 0 || idx >= sharedSorted->size()) return;
+                    const auto& desc = sharedSorted->getReference (idx);
+
+                    juce::String error;
+                    if (! self->pluginSlot.loadFromDescription (desc, error))
+                    {
+                        juce::AlertWindow::showAsync (
+                            juce::MessageBoxOptions()
+                                .withIconType (juce::MessageBoxIconType::WarningIcon)
+                                .withTitle ("Plugin load failed")
+                                .withMessage (error.isEmpty() ? "Unknown error" : error)
+                                .withButton ("OK"),
+                            nullptr);
+                    }
+                    self->refreshPluginSlotButton();
+                }
+            });
+            return;
+        }
+
+        menu.addSeparator();
+        menu.addItem (9001, "Scan plugins (VST3 / LV2)...");
+        menu.addItem (9002, "Browse for file...");
+
+        juce::Component::SafePointer<ChannelStripComponent> safe (this);
+        menu.showMenuAsync (juce::PopupMenu::Options()
+                              .withTargetComponent (&pluginSlotButton),
+                              [safe] (int result)
+        {
+            if (auto* self = safe.getComponent())
+            {
+                if (result == 9001) { self->runPluginScanModal(); self->openPluginPicker(); return; }
+                if (result == 9002) { self->openPluginFileChooser(); return; }
+            }
+        });
+        return;
     }
     else
     {
@@ -1117,7 +1320,7 @@ void ChannelStripComponent::showPluginSlotMenu()
     {
         // Editor toggle headline so right-click ALSO becomes a way to open
         // the plugin GUI (some users find right-click more discoverable).
-        const bool editorOpen = (activePluginEditorDialog != nullptr);
+        const bool editorOpen = pluginEditorModal.isOpen();
         menu.addItem (2001, editorOpen ? "Close editor" : "Open editor");
         menu.addSeparator();
         menu.addItem (2002, "Replace plugin...");
@@ -1162,9 +1365,9 @@ void ChannelStripComponent::refreshPluginSlotButton()
         pluginSlotButton.setButtonText ("+ Plugin");
 
     // If the plugin was unloaded out from under an open editor (e.g. via
-    // the right-click menu's Remove), the editor's dialog now references a
+    // the right-click menu's Remove), the editor's body now references a
     // dead AudioProcessor - close it.
-    if (name.isEmpty() && activePluginEditorDialog != nullptr)
+    if (name.isEmpty() && pluginEditorModal.isOpen())
         closePluginEditor();
 }
 
@@ -1172,7 +1375,7 @@ void ChannelStripComponent::togglePluginEditor()
 {
     // Toggle: if the editor is up, close it; otherwise open. Same shape as
     // the EQ / COMP popup buttons in compact mode.
-    if (activePluginEditorDialog != nullptr)
+    if (pluginEditorModal.isOpen())
         closePluginEditor();
     else
         openPluginEditor();
@@ -1180,7 +1383,7 @@ void ChannelStripComponent::togglePluginEditor()
 
 void ChannelStripComponent::openPluginEditor()
 {
-    if (activePluginEditorDialog != nullptr) return;  // already open
+    if (pluginEditorModal.isOpen()) return;
 
     auto* instance = pluginSlot.getInstance();
     if (instance == nullptr || ! instance->hasEditor()) return;
@@ -1188,27 +1391,21 @@ void ChannelStripComponent::openPluginEditor()
     auto* editor = instance->createEditorIfNeeded();
     if (editor == nullptr) return;
 
-    // DialogWindow takes ownership; on dismissal the dialog deletes the
-    // editor, and AudioProcessorEditor's destructor calls
-    // editorBeingDeleted on the plugin instance - that's the
-    // canonical lifecycle pattern.
-    juce::DialogWindow::LaunchOptions opts;
-    opts.content.setOwned (editor);
-    opts.dialogTitle = pluginSlot.getLoadedName().isNotEmpty()
-                          ? pluginSlot.getLoadedName()
-                          : juce::String ("Plugin");
-    opts.dialogBackgroundColour = juce::Colour (0xff181820);
-    opts.escapeKeyTriggersCloseButton = true;
-    opts.useNativeTitleBar = true;
-    opts.resizable = editor->isResizable();
-    activePluginEditorDialog = opts.launchAsync();
-    if (activePluginEditorDialog != nullptr) activePluginEditorDialog->toFront (true);
+    // Embedded modal hosted on the top-level component so the plugin
+    // editor centres over the whole UI, not just this strip. The editor
+    // is owned by EmbeddedModal::body_ - on close() the unique_ptr
+    // destructs the AudioProcessorEditor, whose destructor calls
+    // editorBeingDeleted on the plugin instance (the canonical
+    // lifecycle path - same as the previous DialogWindow flow).
+    auto* topLevel = getTopLevelComponent();
+    if (topLevel == nullptr) return;
+    pluginEditorModal.show (*topLevel,
+                              std::unique_ptr<juce::Component> (editor));
 }
 
 void ChannelStripComponent::closePluginEditor()
 {
-    if (auto* dlg = activePluginEditorDialog.getComponent())
-        delete dlg;  // SafePointer auto-zeros
+    pluginEditorModal.close();
 }
 
 void ChannelStripComponent::openEqEditorPopup()
@@ -1321,6 +1518,18 @@ void ChannelStripComponent::timerCallback()
         && activeCompBox.getComponent() == nullptr)
     {
         detachDimOverlay();
+    }
+
+    // MIDI activity LED. Read-and-clear the engine's flag each tick — a
+    // continuous stream sets it back to true on the next block, so the LED
+    // stays lit while traffic flows and turns off ~33 ms after it stops.
+    {
+        const bool fired = track.midiActivity.exchange (false, std::memory_order_relaxed);
+        if (midiActivityLed.lit != fired)
+        {
+            midiActivityLed.lit = fired;
+            midiActivityLed.repaint();
+        }
     }
 
     // Sync the inline COMP on/off button with the underlying atom so it
@@ -1698,6 +1907,44 @@ void ChannelStripComponent::refreshAutoModeButton()
 
 void ChannelStripComponent::mouseDown (const juce::MouseEvent& e)
 {
+    // Any click on the strip (background pixels - children consume their
+    // own mouse first) puts the focus on this track so keyboard shortcuts
+    // (A / S / X) target it. Fires on left AND right clicks because the
+    // user reasonably expects the right-click colour-menu to ALSO have
+    // selected the track.
+    if (onTrackFocusRequested) onTrackFocusRequested (trackIndex);
+
+    // Right-click on a specific child surface routes to the MIDI Learn
+    // menu for that target. The route is gated on eventComponent so a
+    // hit on the strip background still falls through to the colour menu.
+    if (e.mods.isPopupMenu())
+    {
+        if (e.eventComponent == &faderSlider)
+        {
+            midilearn::showLearnMenu (faderSlider, session,
+                                        MidiBindingTarget::TrackFader, trackIndex);
+            return;
+        }
+        if (e.eventComponent == &muteButton)
+        {
+            midilearn::showLearnMenu (muteButton, session,
+                                        MidiBindingTarget::TrackMute, trackIndex);
+            return;
+        }
+        if (e.eventComponent == &soloButton)
+        {
+            midilearn::showLearnMenu (soloButton, session,
+                                        MidiBindingTarget::TrackSolo, trackIndex);
+            return;
+        }
+        if (e.eventComponent == &armButton)
+        {
+            midilearn::showLearnMenu (armButton, session,
+                                        MidiBindingTarget::TrackArm, trackIndex);
+            return;
+        }
+    }
+
     // Right-click anywhere on the strip body opens the colour menu. Children
     // (sliders, buttons, labels) consume their own mouse events first, so this
     // only fires on background pixels - exactly the affordance we want.
@@ -1753,6 +2000,33 @@ void ChannelStripComponent::showColourMenu()
             menu.addItem (1012, "Re-enable plugin (auto-bypassed)");
     }
 
+    // Clone-to submenu. IDs 2000 + dest-index target the destination
+    // track. The action class CAPTURES the dest's prior state at first
+    // perform() so the user gets clean undo even when overwriting a
+    // populated track.
+    menu.addSeparator();
+    juce::PopupMenu cloneMenu;
+    for (int t = 0; t < Session::kNumTracks; ++t)
+    {
+        if (t == trackIndex) continue;
+        const auto& destTrack = session.track (t);
+        const auto label = juce::String (t + 1) + ": "
+            + (destTrack.name.isNotEmpty() ? destTrack.name : juce::String());
+        cloneMenu.addItem (2000 + t, label);
+    }
+    menu.addSubMenu ("Clone to track...", cloneMenu);
+
+    // Fader group submenu. 8 group slots is plenty for a 16-channel
+    // console (max parallel groups in practice is 4-5: drums, guitars,
+    // synths, vocals, BG). IDs 2100 + group-id; 2100 = ungrouped.
+    juce::PopupMenu groupMenu;
+    const int currentGroup = track.strip.faderGroupId.load (std::memory_order_relaxed);
+    groupMenu.addItem (2100, "None", true, currentGroup == 0);
+    for (int g = 1; g <= 8; ++g)
+        groupMenu.addItem (2100 + g, "Group " + juce::String (g),
+                            true, currentGroup == g);
+    menu.addSubMenu ("Fader group...", groupMenu);
+
     juce::Component::SafePointer<ChannelStripComponent> safe (this);
     // Copy the presets into a std::vector so the async callback owns its own
     // copy (the local C-array on the stack is gone by the time the menu fires).
@@ -1774,6 +2048,21 @@ void ChannelStripComponent::showColourMenu()
             if (result == 1010) { self->openPluginPicker();      return; }
             if (result == 1011) { self->unloadPluginSlot();      return; }
             if (result == 1012) { self->pluginSlot.clearAutoBypass(); return; }
+            if (result >= 2000 && result < 2000 + Session::kNumTracks)
+            {
+                const int dest = result - 2000;
+                auto& um = self->engine.getUndoManager();
+                um.beginNewTransaction ("Clone track");
+                um.perform (new CloneTrackAction (self->session, self->engine,
+                                                    self->trackIndex, dest));
+                return;
+            }
+            if (result >= 2100 && result <= 2108)
+            {
+                const int gid = result - 2100;   // 0 = ungrouped, 1..8
+                self->track.strip.faderGroupId.store (gid, std::memory_order_relaxed);
+                return;
+            }
             const int idx = result - 1;
             if (idx >= 0 && idx < (int) presetCopy.size())
                 self->applyTrackColour (juce::Colour (presetCopy[(size_t) idx].second));
@@ -1804,6 +2093,21 @@ void ChannelStripComponent::onTrackModeChanged()
     repaint();
 }
 
+void ChannelStripComponent::MidiActivityLed::paint (juce::Graphics& g)
+{
+    auto area = getLocalBounds().toFloat().reduced (1.5f);
+    if (area.isEmpty()) return;
+    // Rim + body. Lit = bright green; dim = dark green so the LED is always
+    // visible (the user knows the LED exists even when no MIDI is flowing).
+    const juce::Colour rim  (0xff202024);
+    const juce::Colour off  (0xff2a4a30);
+    const juce::Colour onG  (0xff7afb8a);
+    g.setColour (rim);
+    g.drawEllipse (area, 1.0f);
+    g.setColour (lit ? onG : off);
+    g.fillEllipse (area.reduced (1.5f));
+}
+
 void ChannelStripComponent::refreshInputSelectorVisibility()
 {
     const int mode = juce::jlimit (0, 2, track.mode.load (std::memory_order_relaxed));
@@ -1811,9 +2115,11 @@ void ChannelStripComponent::refreshInputSelectorVisibility()
     const bool isStereo = (mode == 1);
     const bool isMidi   = (mode == 2);
 
-    inputSelector    .setVisible (isMono || isStereo);
-    inputSelectorR   .setVisible (isStereo);
-    midiInputSelector.setVisible (isMidi);
+    inputSelector      .setVisible (isMono || isStereo);
+    inputSelectorR     .setVisible (isStereo);
+    midiInputSelector  .setVisible (isMidi);
+    midiChannelSelector.setVisible (isMidi);
+    midiActivityLed    .setVisible (isMidi);
 }
 
 void ChannelStripComponent::onHpfKnobChanged()
@@ -1946,13 +2252,24 @@ void ChannelStripComponent::paint (juce::Graphics& g)
                 const float x = bar.getX() + 1.0f;
                 const float w = bar.getWidth() - 2.0f;
                 const float y = bar.getBottom() - 1.0f - fillH;
+                const auto fillRect = juce::Rectangle<float> (x, y, w, fillH);
+                // Soft outer glow under the fill - matches the bus/master
+                // meters so the colour vocabulary reads consistently.
+                const auto tipCol = (frac > dbToFrac (-3.0f))   ? juce::Colour (0xffe05050)
+                                    : (frac > dbToFrac (-12.0f)) ? juce::Colour (0xffe0c050)
+                                                                  : juce::Colour (0xff44d058);
+                g.setColour (tipCol.withAlpha (0.18f));
+                g.fillRect (fillRect.expanded (1.5f));
+                g.setColour (tipCol.withAlpha (0.10f));
+                g.fillRect (fillRect.expanded (3.0f));
+
                 juce::ColourGradient grad (juce::Colour (0xffe05050), x, bar.getY(),
                                              juce::Colour (0xff44d058), x, bar.getBottom(),
                                              false);
                 grad.addColour (dbToFrac (-12.0f), juce::Colour (0xffe0c050));
                 grad.addColour (dbToFrac  (-3.0f), juce::Colour (0xffd07040));
                 g.setGradientFill (grad);
-                g.fillRect (juce::Rectangle<float> (x, y, w, fillH));
+                g.fillRect (fillRect);
             }
 
             const float peakFrac = dbToFrac (peakDb);
@@ -2062,7 +2379,13 @@ void ChannelStripComponent::resized()
         }
         else  // MIDI
         {
-            midiInputSelector.setBounds (inputRow);
+            // [ MIDI input ][ ch ][LED]
+            constexpr int kLedW = 14;
+            auto led = inputRow.removeFromRight (kLedW);
+            midiActivityLed.setBounds (led.reduced (1));
+            const int chW = juce::jmax (40, inputRow.getWidth() / 3);
+            midiChannelSelector.setBounds (inputRow.removeFromRight (chW).withTrimmedLeft (1));
+            midiInputSelector  .setBounds (inputRow.withTrimmedRight (1));
         }
 
         area.removeFromTop (3);

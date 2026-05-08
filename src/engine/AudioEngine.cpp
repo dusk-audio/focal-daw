@@ -61,6 +61,92 @@ AudioEngine::AudioEngine (Session& sessionToBindTo) : session (sessionToBindTo)
     }
 
     deviceManager.addAudioCallback (this);
+
+    // MIDI input wiring. Build the per-input collector list once at startup.
+    // addMidiInputDeviceCallback with an empty deviceIdentifier means "every
+    // enabled input fans out to this callback" — handleIncomingMidiMessage
+    // routes by source pointer.
+    bindMidiInputCollectorsOnce();
+    deviceManager.addMidiInputDeviceCallback ({}, this);
+}
+
+void AudioEngine::bindMidiInputCollectorsOnce()
+{
+    // CONSTRUCT-TIME ONLY. The audio thread reads `midiInputDevices`,
+    // `midiInputCollectors`, and `perInputMidi` lock-free during the audio
+    // callback, and the MIDI thread reads `midiInputDevices` /
+    // `midiInputCollectors` from `handleIncomingMidiMessage`. Mutating any
+    // of those vectors after the callbacks have been registered races with
+    // both threads. This function is called once from the AudioEngine
+    // constructor BEFORE `addAudioCallback` and `addMidiInputDeviceCallback`,
+    // which is the only safe ordering. Hot-plug refresh would require a
+    // mutex (or an atomic-swap of the device list) - not implemented yet.
+    //
+    // Two layers protect the contract: jassert in debug catches the misuse
+    // during development, and the early-return guard below makes a release-
+    // build re-entry a no-op rather than a UB-by-race. If a future caller
+    // genuinely needs to refresh the binding, replace both guards with a
+    // proper synchronisation strategy first.
+    jassert (midiInputCollectors.empty()
+             && "bindMidiInputCollectorsOnce is construct-time only");
+    if (! midiInputCollectors.empty())
+    {
+        std::fprintf (stderr,
+                      "[Focal/AudioEngine] WARNING: bindMidiInputCollectorsOnce "
+                      "called twice; ignoring (would race the audio/MIDI threads).\n");
+        return;
+    }
+
+    // Snapshot the available MIDI inputs and prepare a parallel collector
+    // list. Index alignment with `midiInputDevices` is what
+    // `Track::midiInputIndex` references (-1 = none, 0..N = this list).
+    midiInputDevices = juce::MidiInput::getAvailableDevices();
+    midiInputCollectors.clear();
+    midiInputCollectors.reserve ((size_t) midiInputDevices.size());
+    perInputMidi.assign ((size_t) midiInputDevices.size(), juce::MidiBuffer{});
+    const double sr = currentSampleRate.load (std::memory_order_relaxed);
+    for (int i = 0; i < midiInputDevices.size(); ++i)
+    {
+        auto col = std::make_unique<juce::MidiMessageCollector>();
+        if (sr > 0.0) col->reset (sr);
+        // Enabling the device routes its messages to handleIncomingMidiMessage
+        // via the empty-id callback registration in the ctor.
+        // setMidiInputDeviceEnabled returns void, so we re-query the manager
+        // to verify the enable took. Failure usually means the OS denied
+        // access (e.g. another app exclusively owns the port); log so the
+        // user can diagnose missing MIDI input rather than silently leaving
+        // the dropdown showing a non-functioning device.
+        const auto& devId = midiInputDevices[i].identifier;
+        deviceManager.setMidiInputDeviceEnabled (devId, true);
+        if (! deviceManager.isMidiInputDeviceEnabled (devId))
+        {
+            std::fprintf (stderr,
+                          "[Focal/AudioEngine] WARNING: failed to enable MIDI input \"%s\" "
+                          "(id %s). Another application may be holding it open.\n",
+                          midiInputDevices[i].name.toRawUTF8(),
+                          devId.toRawUTF8());
+        }
+        midiInputCollectors.push_back (std::move (col));
+    }
+}
+
+void AudioEngine::handleIncomingMidiMessage (juce::MidiInput* source,
+                                                const juce::MidiMessage& message)
+{
+    if (source == nullptr) return;
+    // Identify the source's index in our parallel list. JUCE guarantees
+    // identifier stability for a given device across the session.
+    const auto& sourceId = source->getIdentifier();
+    for (int i = 0; i < midiInputDevices.size(); ++i)
+    {
+        if (midiInputDevices[(size_t) i].identifier == sourceId)
+        {
+            if (i < (int) midiInputCollectors.size()
+                && midiInputCollectors[(size_t) i] != nullptr)
+                midiInputCollectors[(size_t) i]->addMessageToQueue (message);
+            return;
+        }
+    }
 }
 
 int AudioEngine::getBackendXRunCount() const noexcept
@@ -76,15 +162,24 @@ int AudioEngine::getBackendXRunCount() const noexcept
 
 void AudioEngine::setStage (Stage s) noexcept
 {
-    if (stage.load (std::memory_order_relaxed) == s) return;
+    const auto current = stage.load (std::memory_order_relaxed);
+    if (current == s) return;
 
-    // Always stop transport on a stage change so we don't leave a recorder
-    // open or a mastering player rolling into a different audio path.
-    if (transport.isRecording())
-        recordManager.stopRecording (transport.getPlayhead());
-    transport.setState (Transport::State::Stopped);
-    masteringPlayer.stop();
-    playbackEngine.stopPlayback();
+    // Recording / Mixing / Aux share the live track-to-master signal flow -
+    // only the visible UI changes between them, so playback / recording
+    // continue uninterrupted across those stage swaps. Mastering swaps to a
+    // wholly separate path (stereo file → MasteringChain → output), so
+    // transport must be force-stopped when crossing into or out of it.
+    const bool crossesMastering = (current == Stage::Mastering)
+                                 || (s == Stage::Mastering);
+    if (crossesMastering)
+    {
+        if (transport.isRecording())
+            recordManager.stopRecording (transport.getPlayhead());
+        transport.setState (Transport::State::Stopped);
+        masteringPlayer.stop();
+        playbackEngine.stopPlayback();
+    }
 
     stage.store (s, std::memory_order_relaxed);
 }
@@ -170,6 +265,11 @@ void AudioEngine::record()
 
     activeRecordStart.store (startSample, std::memory_order_relaxed);
 
+    // Stamp the take's start sample as the session's "last record point"
+    // so STOP+FFWD can return the user to where they last started a take.
+    // Persisted via the serializer; survives reload.
+    session.lastRecordPointSamples.store (startSample, std::memory_order_relaxed);
+
     // Count-in pre-roll: roll the playhead back one bar so the metronome
     // ticks a full bar before the take begins. Audio between the pre-roll
     // start and `startSample` is gated out of the recorder by the audio
@@ -186,8 +286,76 @@ void AudioEngine::record()
         }
     }
 
+    // Punch pre-roll: when punch is enabled and preRollSeconds > 0, roll
+    // the playhead back so the user hears existing material BEFORE the
+    // punch-in window. Same gate logic as count-in - the audio callback's
+    // punch window already prevents committing audio before punchIn so
+    // the WAV time-zero still maps to startSample. Stacks with count-in
+    // (whichever rolls back further wins) since they're independent
+    // pre-rolls solving different problems.
+    if (transport.isPunchEnabled())
+    {
+        const float pre = session.preRollSeconds.load (std::memory_order_relaxed);
+        if (pre > 0.0f)
+        {
+            const auto preSamples = (juce::int64) ((double) pre * sr);
+            const auto candidate = juce::jmax<juce::int64> (0, startSample - preSamples);
+            if (candidate < transport.getPlayhead())
+                transport.setPlayhead (candidate);
+        }
+    }
+
     playbackEngine.preparePlayback();  // un-armed tracks still play through
     transport.setState (Transport::State::Recording);
+}
+
+void AudioEngine::jumpToPrevMarker()
+{
+    const auto& markers = session.getMarkers();
+    if (markers.empty()) { transport.setPlayhead (0); return; }
+    const auto cur = transport.getPlayhead();
+    // Walk in reverse for the largest marker strictly before the playhead.
+    // "Strictly before" so a press while sitting ON a marker steps to the
+    // previous one rather than restating the current position.
+    juce::int64 target = 0;
+    bool found = false;
+    for (auto it = markers.rbegin(); it != markers.rend(); ++it)
+    {
+        if (it->timelineSamples < cur) { target = it->timelineSamples; found = true; break; }
+    }
+    transport.setPlayhead (found ? target : 0);
+}
+
+void AudioEngine::jumpToNextMarker()
+{
+    const auto& markers = session.getMarkers();
+    if (markers.empty()) return;   // no overshoot beyond known points
+    const auto cur = transport.getPlayhead();
+    for (const auto& m : markers)
+    {
+        if (m.timelineSamples > cur) { transport.setPlayhead (m.timelineSamples); return; }
+    }
+    // Past the last marker: stay where we are. Tascam-style "stops at end".
+}
+
+void AudioEngine::jumpToZero()
+{
+    transport.setPlayhead (0);
+}
+
+void AudioEngine::jumpToLastRecordPoint()
+{
+    transport.setPlayhead (session.lastRecordPointSamples.load (std::memory_order_relaxed));
+}
+
+void AudioEngine::jumpbackBySeconds()
+{
+    const auto sr = currentSampleRate.load (std::memory_order_relaxed);
+    if (sr <= 0.0) return;
+    const float secs = session.jumpbackSeconds.load (std::memory_order_relaxed);
+    const auto delta = (juce::int64) ((double) secs * sr);
+    const auto cur = transport.getPlayhead();
+    transport.setPlayhead (juce::jmax<juce::int64> (0, cur - delta));
 }
 
 void AudioEngine::publishPluginStateForSave()
@@ -322,6 +490,18 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
         usableOutputs.store (true, std::memory_order_relaxed);
     }
 
+    // Reset every MIDI collector with the current sample rate so it can
+    // convert the MIDI thread's millisecond timestamps into per-block sample
+    // positions. Without this, removeNextBlockOfMessages would emit
+    // garbage timestamps the first block. Safe to call here — the audio
+    // callback hasn't fired yet for this open.
+    {
+        const double sr = device->getCurrentSampleRate();
+        for (auto& c : midiInputCollectors)
+            if (c != nullptr)
+                c->reset (sr);
+    }
+
     prepareForSelfTest (device->getCurrentSampleRate(),
                          device->getCurrentBufferSizeSamples());
 }
@@ -359,6 +539,7 @@ void AudioEngine::prepareForSelfTest (double sr, int bs)
     masteringPlayer.prepare (bs);
     metronome.prepare (sr);
     playbackEngine.prepare (bs);  // size the playback read scratch - audio thread mustn't allocate
+    pitchDetector.prepare (sr);   // ~46 ms history at the device rate
 
     mixL.assign ((size_t) bs, 0.0f);
     mixR.assign ((size_t) bs, 0.0f);
@@ -389,6 +570,164 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     juce::ScopedNoDenormals noDenormals;
 
     const auto callbackStart = juce::Time::getHighResolutionTicks();
+
+    // Drain each MIDI input's collector into its per-input buffer for this
+    // block. Each removeNextBlockOfMessages is lock-free with respect to
+    // the MIDI thread's addMessageToQueue, so the audio thread never
+    // contends. Empty buffers cost ~nothing.
+    for (size_t i = 0; i < midiInputCollectors.size() && i < perInputMidi.size(); ++i)
+    {
+        perInputMidi[i].clear();
+        if (midiInputCollectors[i] != nullptr)
+            midiInputCollectors[i]->removeNextBlockOfMessages (perInputMidi[i], numSamples);
+    }
+
+    // Held-MIDI-notes tracking for the chord display. Walk every drained
+    // MIDI buffer and flip the per-note atomic on Note On / Note Off.
+    // Treat NoteOn vel=0 as NoteOff (running-status convention). Cheap -
+    // ~100 ns per event - and the SystemStatusBar's chord poll reads a
+    // snapshot of the array off-thread.
+    for (const auto& buf : perInputMidi)
+    {
+        if (buf.isEmpty()) continue;
+        for (const auto meta : buf)
+        {
+            const auto m = meta.getMessage();
+            if (m.isNoteOn() && m.getVelocity() > 0)
+            {
+                const int n = m.getNoteNumber();
+                if (n >= 0 && n < Session::kNumMidiNotes)
+                    session.heldMidiNotes[(size_t) n].store (true,
+                                                                std::memory_order_relaxed);
+            }
+            else if (m.isNoteOff() || (m.isNoteOn() && m.getVelocity() == 0))
+            {
+                const int n = m.getNoteNumber();
+                if (n >= 0 && n < Session::kNumMidiNotes)
+                    session.heldMidiNotes[(size_t) n].store (false,
+                                                                std::memory_order_relaxed);
+            }
+        }
+    }
+
+    // MIDI controller bindings - apply BEFORE the per-track filter so a
+    // bound CC drives its target regardless of which track the message
+    // happens to be addressed to. Lock-free read of session.midiBindings
+    // (mutated only on the message thread, race tolerated). Continuous
+    // targets write atoms directly; transport actions queue into
+    // pendingTransportAction (engine.play/stop/record aren't RT-safe).
+    // Note triggers fire on press only (NoteOn vel > 0); NoteOff and
+    // CC release are ignored per the v1 spec.
+    if (! session.midiBindings.empty())
+    {
+        for (const auto& buf : perInputMidi)
+        {
+            if (buf.isEmpty()) continue;
+            for (const auto meta : buf)
+            {
+                const auto m = meta.getMessage();
+                MidiBindingTrigger tg;
+                int dn = 0, val = 0;
+                if      (m.isController())             { tg = MidiBindingTrigger::CC;   dn = m.getControllerNumber(); val = m.getControllerValue(); }
+                else if (m.isNoteOn() && m.getVelocity() > 0) { tg = MidiBindingTrigger::Note; dn = m.getNoteNumber();       val = m.getVelocity(); }
+                else continue;
+                const int ch = m.getChannel();
+
+                // Learn capture - take the first matching event when a
+                // learn target is pending. Audio-thread CAS-store; the
+                // message thread drains and appends a binding, then
+                // clears midiLearnPending. We still apply normal binding
+                // matching below so a freshly-captured CC also drives
+                // its target on the same block (cheap, harmless).
+                if (session.midiLearnPending.load (std::memory_order_relaxed) >= 0
+                    && ! learnCaptureIsValid (session.midiLearnCapture.load (std::memory_order_relaxed)))
+                {
+                    session.midiLearnCapture.store (
+                        packLearnCapture (tg, ch, dn), std::memory_order_relaxed);
+                }
+
+                for (const auto& b : session.midiBindings)
+                {
+                    if (! b.sourceMatches (ch, dn, tg)) continue;
+                    if (! b.isValid()) continue;
+
+                    switch (b.target)
+                    {
+                        case MidiBindingTarget::TransportPlay:
+                            session.pendingTransportAction.store (
+                                (int) PendingTransportAction::Play, std::memory_order_relaxed);
+                            break;
+                        case MidiBindingTarget::TransportStop:
+                            session.pendingTransportAction.store (
+                                (int) PendingTransportAction::Stop, std::memory_order_relaxed);
+                            break;
+                        case MidiBindingTarget::TransportRecord:
+                            session.pendingTransportAction.store (
+                                (int) PendingTransportAction::Record, std::memory_order_relaxed);
+                            break;
+                        case MidiBindingTarget::TransportToggle:
+                            session.pendingTransportAction.store (
+                                (int) PendingTransportAction::Toggle, std::memory_order_relaxed);
+                            break;
+
+                        case MidiBindingTarget::TrackFader:
+                            if (b.targetIndex >= 0 && b.targetIndex < Session::kNumTracks)
+                            {
+                                // CC 0..127 -> -90..+12 dB linearly. -90 maps below
+                                // the kFaderInfThreshDb hard-mute floor so a value
+                                // of 0 cleanly silences the strip.
+                                const float frac = (float) val / 127.0f;
+                                const float db = -90.0f + frac * (12.0f + 90.0f);
+                                session.track (b.targetIndex).strip.faderDb.store (
+                                    db, std::memory_order_relaxed);
+                            }
+                            break;
+                        case MidiBindingTarget::TrackPan:
+                            if (b.targetIndex >= 0 && b.targetIndex < Session::kNumTracks)
+                            {
+                                const float p = ((float) val / 127.0f) * 2.0f - 1.0f;
+                                session.track (b.targetIndex).strip.pan.store (
+                                    p, std::memory_order_relaxed);
+                            }
+                            break;
+                        case MidiBindingTarget::TrackMute:
+                            if (val >= 64 && b.targetIndex >= 0 && b.targetIndex < Session::kNumTracks)
+                            {
+                                auto& a = session.track (b.targetIndex).strip.mute;
+                                a.store (! a.load (std::memory_order_relaxed),
+                                          std::memory_order_relaxed);
+                            }
+                            break;
+                        case MidiBindingTarget::TrackSolo:
+                            if (val >= 64 && b.targetIndex >= 0 && b.targetIndex < Session::kNumTracks)
+                            {
+                                auto& a = session.track (b.targetIndex).strip.solo;
+                                a.store (! a.load (std::memory_order_relaxed),
+                                          std::memory_order_relaxed);
+                            }
+                            break;
+                        case MidiBindingTarget::TrackArm:
+                            if (val >= 64 && b.targetIndex >= 0 && b.targetIndex < Session::kNumTracks)
+                            {
+                                auto& a = session.track (b.targetIndex).recordArmed;
+                                a.store (! a.load (std::memory_order_relaxed),
+                                          std::memory_order_relaxed);
+                            }
+                            break;
+                        case MidiBindingTarget::MasterFader:
+                        {
+                            const float frac = (float) val / 127.0f;
+                            const float db = -90.0f + frac * (12.0f + 90.0f);
+                            session.master().faderDb.store (db, std::memory_order_relaxed);
+                            break;
+                        }
+                        case MidiBindingTarget::None:
+                            break;
+                    }
+                }
+            }
+        }
+    }
 
     if ((int) mixL.size() < numSamples)
     {
@@ -462,6 +801,21 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     const bool isPlaying   = (state == Transport::State::Playing);
     const bool isRecording = (state == Transport::State::Recording);
     const juce::int64 blockStartSamples = transport.getPlayhead();
+
+    // Hanging-note protection. Detect two events that warrant a per-MIDI-
+    // track "All Notes Off" flush this block:
+    //   • Transport rolling -> stopped (held notes won't get their Note
+    //     Off from the region or input stream).
+    //   • Playhead discontinuity while still rolling (loop wrap, scrub).
+    // Both cases produce stuck synth voices without an explicit flush.
+    const bool isRolling = isPlaying || isRecording;
+    const bool transportJustStopped = wasRolling && ! isRolling;
+    const bool playheadJumped = isRolling
+                              && lastBlockEndSample != 0
+                              && blockStartSamples != lastBlockEndSample;
+    const bool flushHangingMidi = transportJustStopped || playheadJumped;
+    wasRolling         = isRolling;
+    lastBlockEndSample = blockStartSamples + numSamples;
 
     for (int t = 0; t < Session::kNumTracks; ++t)
     {
@@ -547,6 +901,8 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         const bool soloed  = trackParams.liveSolo.load (std::memory_order_relaxed);
         const bool armed   = session.track (t).recordArmed.load (std::memory_order_relaxed);
         const bool monitorEnabled = session.track (t).inputMonitor.load (std::memory_order_relaxed);
+        const bool midiTrack = session.track (t).mode.load (std::memory_order_relaxed)
+                                   == (int) Track::Mode::Midi;
 
         // The track will read from disk during Play, or during Record on
         // un-armed tracks (so other tracks keep playing while we record into
@@ -569,6 +925,19 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         const int inputIdx = session.resolveInputForTrack (t);
         const float* deviceInput = (inputIdx >= 0 && inputIdx < numInputChannels)
                                     ? inputChannelData[(size_t) inputIdx] : nullptr;
+
+        // Tuner: when this track is the selected target, feed the device
+        // input to the YIN-style PitchDetector. Allocation-free; the
+        // detector publishes the latest Hz / level into Session atoms
+        // that the TunerOverlay polls at 30 Hz on the message thread.
+        // Inactive when tuneTrackIndex < 0.
+        if (deviceInput != nullptr
+            && session.tuneTrackIndex.load (std::memory_order_relaxed) == t)
+        {
+            pitchDetector.pushBlock (deviceInput, numSamples);
+            session.tuneLatestHz   .store (pitchDetector.getLatestHz(),    std::memory_order_relaxed);
+            session.tuneLatestLevel.store (pitchDetector.getLatestLevel(), std::memory_order_relaxed);
+        }
 
         // Choose the source the channel strip will process.
         //   - Playing & not armed: read previous take from disk (un-armed
@@ -653,6 +1022,147 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         }
         session.track (t).meterInputRDb.store (inputRDb, std::memory_order_relaxed);
 
+        // MIDI input filter — pull events from the track's selected input
+        // Hanging-note flush. Emitted FIRST (sample 0) so the synth
+        // releases any held voices before we add this block's new events
+        // on top. CC 64 = sustain pedal off, CC 123 = all notes off.
+        // We hit all 16 channels because we don't track which channels
+        // had active notes - cheap brute-force is fine, the synth ignores
+        // the redundant channels in the same processBlock pass.
+        // Skipped on non-MIDI tracks; perTrackMidiScratch on those tracks
+        // stays an empty buffer for effect inserts.
+        perTrackMidiScratch.clear();
+        if (midiTrack && flushHangingMidi)
+        {
+            for (int ch = 1; ch <= 16; ++ch)
+            {
+                perTrackMidiScratch.addEvent (
+                    juce::MidiMessage::controllerEvent (ch, 64,  0), 0);
+                perTrackMidiScratch.addEvent (
+                    juce::MidiMessage::controllerEvent (ch, 123, 0), 0);
+            }
+        }
+
+        // Build this block's per-track MIDI buffer. Two source paths,
+        // mutually exclusive (matches the audio source decision above):
+        //   • Disk playback (willReadFromDisk): walk the track's
+        //     midiRegions and emit any note/CC events whose absolute
+        //     sample-position falls inside this block. This is the
+        //     scheduled-playback path - the synth hears notes that were
+        //     previously recorded onto the timeline.
+        //   • Live monitoring (else): pull from the input MIDI collector
+        //     and apply the per-track channel filter, just like before.
+        // The strip's instrument plugin then sees one unified buffer.
+        // Note: scratch already cleared above by the flush block, plus any
+        // emitted All Notes Off events. Both source paths add to those.
+        if (willReadFromDisk)
+        {
+            const float bpm = session.tempoBpm.load (std::memory_order_relaxed);
+            const double sr = currentSampleRate.load (std::memory_order_relaxed);
+            // Plugin latency comp for instrument tracks: shift the scheduling
+            // window forward by the plugin's reported latency so the
+            // delayed audio output aligns to the correct timeline sample.
+            // 0 latency = no shift (the common case for synths). Audio
+            // tracks have no instrument plugin so latency is 0 even when
+            // the slot is loaded with an effect.
+            const juce::int64 pluginLatency = midiTrack
+                ? (juce::int64) strips[(size_t) t].getPluginSlot().getLatencySamples()
+                : 0;
+            const auto schedStart = blockStartSamples + pluginLatency;
+            const auto blockEnd   = schedStart + numSamples;
+
+            // Chase pass: when the playhead jumps INTO the middle of a
+            // sustained note (transport start after seek, loop wrap, etc.)
+            // the synth would otherwise sit silent until the Note Off fires
+            // since the Note On is in the past. Emit Note On at sample 1
+            // (one sample after the All Notes Off the flush block already
+            // emitted at sample 0, so the synth doesn't immediately silence
+            // the chase) for every note whose on-time is before blockStart
+            // and off-time is after blockStart.
+            if (flushHangingMidi)
+            {
+                for (const auto& region : session.track (t).midiRegions)
+                {
+                    const auto regStart = region.timelineStart;
+                    for (const auto& n : region.notes)
+                    {
+                        const auto onAbs  = regStart + ticksToSamples (n.startTick, sr, bpm);
+                        const auto offAbs = onAbs + ticksToSamples (n.lengthInTicks, sr, bpm);
+                        if (onAbs < blockStartSamples && offAbs > blockStartSamples)
+                        {
+                            perTrackMidiScratch.addEvent (
+                                juce::MidiMessage::noteOn (n.channel, n.noteNumber,
+                                                            (juce::uint8) n.velocity),
+                                1);
+                        }
+                    }
+                }
+            }
+
+            for (const auto& region : session.track (t).midiRegions)
+            {
+                const auto regStart = region.timelineStart;
+                const auto regEnd   = regStart + region.lengthInSamples;
+                // Skip regions that don't overlap the SHIFTED block at all.
+                // schedStart/blockEnd already include the plugin-latency
+                // offset for MIDI tracks; on audio tracks pluginLatency=0
+                // so this collapses to the original [blockStart, blockEnd)
+                // window.
+                if (regEnd <= schedStart || regStart >= blockEnd) continue;
+
+                for (const auto& n : region.notes)
+                {
+                    const auto onAbs  = regStart + ticksToSamples (n.startTick, sr, bpm);
+                    const auto offAbs = onAbs + ticksToSamples (n.lengthInTicks, sr, bpm);
+                    if (onAbs >= schedStart && onAbs < blockEnd)
+                    {
+                        perTrackMidiScratch.addEvent (
+                            juce::MidiMessage::noteOn (n.channel, n.noteNumber,
+                                                        (juce::uint8) n.velocity),
+                            (int) (onAbs - schedStart));
+                    }
+                    if (offAbs >= schedStart && offAbs < blockEnd)
+                    {
+                        perTrackMidiScratch.addEvent (
+                            juce::MidiMessage::noteOff (n.channel, n.noteNumber),
+                            (int) (offAbs - schedStart));
+                    }
+                }
+                for (const auto& c : region.ccs)
+                {
+                    const auto sAbs = regStart + ticksToSamples (c.atTick, sr, bpm);
+                    if (sAbs >= schedStart && sAbs < blockEnd)
+                    {
+                        perTrackMidiScratch.addEvent (
+                            juce::MidiMessage::controllerEvent (c.channel,
+                                                                  c.controller,
+                                                                  c.value),
+                            (int) (sAbs - schedStart));
+                    }
+                }
+            }
+            if (! perTrackMidiScratch.isEmpty())
+                session.track (t).midiActivity.store (true, std::memory_order_relaxed);
+        }
+        else
+        {
+            const int midiIdx = session.track (t).midiInputIndex.load (std::memory_order_relaxed);
+            if (midiIdx >= 0 && midiIdx < (int) perInputMidi.size()
+                && ! perInputMidi[(size_t) midiIdx].isEmpty())
+            {
+                const int chFilter = session.track (t)
+                                        .midiChannel.load (std::memory_order_relaxed);
+                for (const auto meta : perInputMidi[(size_t) midiIdx])
+                {
+                    const auto m = meta.getMessage();
+                    if (chFilter == 0 || m.getChannel() == chFilter)
+                        perTrackMidiScratch.addEvent (m, meta.samplePosition);
+                }
+                if (! perTrackMidiScratch.isEmpty())
+                    session.track (t).midiActivity.store (true, std::memory_order_relaxed);
+            }
+        }
+
         // Tell the strip whether the recorder is going to ask for the
         // post-effects buffer this block - if so, the strip MUST run its
         // DSP even when it's not passing to master. Otherwise we let it
@@ -681,12 +1191,16 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             }
         }
 
+        // MIDI tracks have no audio input - their gate is just mute/solo.
+        // Audio tracks still require a non-null source to pass.
+        const bool stripPasses = midiTrack ? passes : (passes && monoIn != nullptr);
         strips[(size_t) t].processAndAccumulate (monoIn, monoInR,
+                                                 perTrackMidiScratch, midiTrack,
                                                  mixL.data(), mixR.data(),
                                                  busLPtrs, busRPtrs,
                                                  auxLanePtrsL, auxLanePtrsR,
                                                  numSamples,
-                                                 passes && monoIn != nullptr);
+                                                 stripPasses);
         session.track (t).meterGrDb.store (strips[(size_t) t].getCurrentGrDb(),
                                             std::memory_order_relaxed);
 
@@ -759,6 +1273,22 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 const float* writeR = (recR != nullptr) ? recR + writeOffset : nullptr;
                 recordManager.writeInputBlock (t, writeL, writeR, writeLength);
             }
+        }
+
+        // MIDI capture: when the track is in MIDI mode AND armed AND the
+        // transport is recording, push this block's already-filtered MIDI
+        // events into the per-track FIFO. Audio recording (above) gates on
+        // deviceInput presence; MIDI tracks have no audio input so we gate
+        // on isRecording + armed + the MIDI mode flag instead. The same
+        // count-in / punch window math we apply to audio also applies here:
+        // events with negative samplePos (relative to recordStart) are
+        // dropped at drain time, so passing the raw blockStart - recordStart
+        // offset is sufficient.
+        if (isRecording && armed && midiTrack && ! perTrackMidiScratch.isEmpty())
+        {
+            const auto recStart = activeRecordStart.load (std::memory_order_relaxed);
+            const auto blockOffsetFromRecord = blockStartSamples - recStart;
+            recordManager.writeMidiBlock (t, perTrackMidiScratch, blockOffsetFromRecord);
         }
     }
 
@@ -890,7 +1420,9 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 
     // Detect xrun: callback work shouldn't exceed the buffer's wall-clock
     // budget. If it does, we'd glitch on the next callback. Track the count
-    // for the status bar.
+    // for the status bar. Same pass also updates the smoothed CPU usage
+    // (callback wall-time / buffer audio-time, one-pole LPF) which the
+    // status bar polls.
     const auto sr = currentSampleRate.load (std::memory_order_relaxed);
     if (sr > 0.0)
     {
@@ -899,6 +1431,15 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                                      * secondsPerTick * 1000.0;
         if (elapsedMs > bufferMs)
             xrunCount.fetch_add (1, std::memory_order_relaxed);
+
+        if (bufferMs > 0.0)
+        {
+            const float instant = (float) juce::jlimit (0.0, 2.0, elapsedMs / bufferMs);
+            // 0.2 coefficient -> ~5-block smoothing; fast enough that the
+            // user sees real spikes, slow enough to mask single-block jitter.
+            const float prev = cpuUsage.load (std::memory_order_relaxed);
+            cpuUsage.store (prev + 0.2f * (instant - prev), std::memory_order_relaxed);
+        }
     }
 }
 } // namespace focal

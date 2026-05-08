@@ -40,14 +40,21 @@ void styleSmallLabel (juce::Label& lbl, const juce::String& text, juce::Colour c
 } // namespace
 
 MasterStripComponent::MasterStripComponent (MasterBusParams& p,
+                                              Session& s,
                                               ::TapeMachineAudioProcessor* tapeProc)
-    : params (p), tapeProcessorPtr (tapeProc)
+    : params (p), session (s), tapeProcessorPtr (tapeProc)
 {
     nameLabel.setText ("MASTER", juce::dontSendNotification);
     nameLabel.setJustificationType (juce::Justification::centred);
     nameLabel.setColour (juce::Label::textColourId, juce::Colours::white);
     nameLabel.setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
     addAndMakeVisible (nameLabel);
+
+    // Analog VU meter, fed by the post-master peak atoms so it tracks the
+    // exact stereo signal that hits the audio device. Two needles (L + R).
+    vuMeter = std::make_unique<AnalogVuMeter> (
+        &params.meterPostMasterLDb, &params.meterPostMasterRDb);
+    addAndMakeVisible (*vuMeter);
 
     auto styleToggle = [] (juce::TextButton& b, juce::Colour onColour)
     {
@@ -164,6 +171,7 @@ MasterStripComponent::MasterStripComponent (MasterBusParams& p,
     {
         params.faderDb.store ((float) faderSlider.getValue(), std::memory_order_relaxed);
     };
+    faderSlider.addMouseListener (this, false);
     addAndMakeVisible (faderSlider);
 
     // Output meter readouts (peak dBFS + GR dB).
@@ -272,6 +280,17 @@ void MasterStripComponent::paint (juce::Graphics& g)
                 auto fillRect = juce::Rectangle<float> (bar.getX() + 1.5f,
                                                          bar.getBottom() - 2.0f - fillH,
                                                          bar.getWidth() - 3.0f, fillH);
+                // Soft glow stack behind the lit fill - matches the bus
+                // and channel-strip meters so the visual language reads
+                // consistently across the console.
+                const auto tipCol = (frac > 0.85f) ? juce::Colour (0xffff5050)
+                                                    : (frac > 0.65f) ? juce::Colour (0xffe0c050)
+                                                                       : juce::Colour (0xff70c060);
+                g.setColour (tipCol.withAlpha (0.18f));
+                g.fillRoundedRectangle (fillRect.expanded (1.5f), 2.0f);
+                g.setColour (tipCol.withAlpha (0.10f));
+                g.fillRoundedRectangle (fillRect.expanded (3.0f), 3.0f);
+
                 juce::ColourGradient grad (juce::Colour (0xff70c060),
                                             fillRect.getX(), fillRect.getBottom(),
                                             juce::Colour (0xffff5050),
@@ -355,6 +374,15 @@ void MasterStripComponent::resized()
     area.removeFromTop (6);
     nameLabel.setBounds (area.removeFromTop (22));
     area.removeFromTop (6);
+
+    // Analog VU meter at the top - same proportions as the bus strips so
+    // the meter row reads consistently across the console.
+    if (vuMeter != nullptr)
+    {
+        const int vuH = juce::jmax (32, area.getWidth() * 5 / 12);
+        vuMeter->setBounds (area.removeFromTop (vuH));
+        area.removeFromTop (4);
+    }
 
     // 26 px rotary diameter (matches channel strip) + 14 px textbox below.
     // Block width is 40 - 28 px was too narrow and clipped both the bottom
@@ -502,5 +530,17 @@ void MasterStripComponent::openTapeMachineModal()
                         .withSizeKeepingCentre (body->getWidth(), body->getHeight()));
     topLevel->addAndMakeVisible (body);
     tapeMachineModal = body;
+}
+
+void MasterStripComponent::mouseDown (const juce::MouseEvent& e)
+{
+    // Right-click on the master fader opens the MIDI Learn menu.
+    if (e.eventComponent == &faderSlider && e.mods.isPopupMenu())
+    {
+        midilearn::showLearnMenu (faderSlider, session,
+                                    MidiBindingTarget::MasterFader);
+        return;
+    }
+    juce::Component::mouseDown (e);
 }
 } // namespace focal

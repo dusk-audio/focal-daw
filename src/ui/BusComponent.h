@@ -1,7 +1,9 @@
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <memory>
 #include "../session/Session.h"
+#include "AnalogVuMeter.h"
 
 namespace focal
 {
@@ -49,6 +51,11 @@ private:
     juce::Slider     faderSlider { juce::Slider::LinearVertical, juce::Slider::TextBoxBelow };
     juce::TextButton muteButton { "M" };
     juce::TextButton soloButton { "S" };
+
+    // Analog VU meter at the top of the strip. Reads the bus's post-DSP
+    // peak atoms; its internal Timer applies VU ballistics and repaints
+    // independently of the strip's own timer.
+    std::unique_ptr<AnalogVuMeter> vuMeter;
 
     // Stereo output meter (L | R) on the right side of the fader, matching
     // the master strip's layout. Smoothed and peak-hold values per channel.

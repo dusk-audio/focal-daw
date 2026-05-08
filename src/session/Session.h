@@ -4,8 +4,10 @@
 #include <juce_graphics/juce_graphics.h>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <memory>
 #include <vector>
+#include "MidiBindings.h"
 
 namespace focal
 {
@@ -82,6 +84,13 @@ struct ChannelStripParams
     std::atomic<bool>  mute    { false };
     std::atomic<bool>  solo    { false };
     std::atomic<bool>  phaseInvert { false };  // Ø - flips polarity at strip input
+
+    // Fader group id. 0 = ungrouped; 1..N = members of group N. When the
+    // user drags a fader on a track in a group, every other track sharing
+    // the same group id gets the same relative-dB delta applied. Anchor
+    // values are captured at drag-start so the relative offset between
+    // group members is preserved end-to-end.
+    std::atomic<int>   faderGroupId { 0 };
 
     // Per-channel bus assigns. Bit i is true => post-fader signal also sums
     // into BUS (i+1) at unity. Channel always sums to master regardless of
@@ -241,6 +250,91 @@ struct TakeRef
     juce::int64 lengthInSamples = 0;
 };
 
+// Standard MIDI tick resolution. Pulses-per-quarter-note = 480 matches
+// every modern DAW + .mid file convention; high enough that 64th-note
+// triplets quantize exactly (480 / 24 = 20). Conversion helpers below
+// turn between sample positions (audio-domain) and tick positions
+// (musical-domain) at a given tempo and sample rate. Tempo is read from
+// the session at conversion time - changes to BPM rebuild the
+// scheduled-sample mapping; the tick positions on the events stay stable.
+constexpr int kMidiTicksPerQuarter = 480;
+
+inline juce::int64 samplesToTicks (juce::int64 samples,
+                                   double sampleRate,
+                                   float bpm) noexcept
+{
+    if (sampleRate <= 0.0 || bpm <= 0.0f) return 0;
+    return (juce::int64) std::llround (
+        (double) samples * (double) bpm * (double) kMidiTicksPerQuarter
+            / (sampleRate * 60.0));
+}
+
+inline juce::int64 ticksToSamples (juce::int64 ticks,
+                                   double sampleRate,
+                                   float bpm) noexcept
+{
+    if (sampleRate <= 0.0 || bpm <= 0.0f) return 0;
+    return (juce::int64) std::llround (
+        (double) ticks * sampleRate * 60.0
+            / ((double) bpm * (double) kMidiTicksPerQuarter));
+}
+
+// One MIDI note in tick time, anchored relative to its containing region's
+// start. Off events are folded into `lengthInTicks` so the model never has
+// dangling note-on / note-off bookkeeping. Negative or zero length is the
+// "all-notes-off across the region" signal that scheduler should skip.
+struct MidiNote
+{
+    int  channel       = 1;     // 1..16
+    int  noteNumber    = 60;    // 0..127
+    int  velocity      = 100;   // 1..127 (MIDI vel 0 = note-off; recorded notes always >= 1)
+    juce::int64 startTick     = 0;
+    juce::int64 lengthInTicks = 0;
+};
+
+// CC / pitch-bend / sustain / etc. - non-note MIDI events stored generically.
+// `controller` doubles as the message type discriminator: 0..127 is a
+// regular CC; we'll add named sentinels for pitch-bend / aftertouch in 4c
+// when the piano roll surfaces them. For 4b only CCs are captured.
+struct MidiCc
+{
+    int  channel    = 1;     // 1..16
+    int  controller = 64;    // 0..127 (sustain pedal = 64)
+    int  value      = 0;     // 0..127
+    juce::int64 atTick = 0;
+};
+
+// MIDI region - the MIDI counterpart of AudioRegion. Anchored on the
+// timeline at `timelineStart` (samples), holds events in ticks relative
+// to that anchor. lengthInSamples is the rendered length at session
+// tempo (cached so the timeline-rect math doesn't reconvert per draw);
+// PlaybackEngine recomputes it whenever tempoBpm changes. lengthInTicks
+// is the source of truth for musical length. previousTakes mirrors the
+// AudioRegion take-history pattern - overdubbed takes stack here when
+// the new take's range fully contains an existing region.
+struct MidiTakeRef
+{
+    juce::int64           lengthInTicks = 0;
+    std::vector<MidiNote> notes;
+    std::vector<MidiCc>   ccs;
+};
+
+struct MidiRegion
+{
+    juce::int64 timelineStart    = 0;   // sample position on the timeline
+    juce::int64 lengthInSamples  = 0;   // cached at session tempo
+    juce::int64 lengthInTicks    = 0;   // source of truth for musical length
+
+    std::vector<MidiNote> notes;
+    std::vector<MidiCc>   ccs;
+
+    // Older takes that occupied this region's timeline range, captured by
+    // the recorder when a new take's range fully contains an existing
+    // region. Front of the vector = next to surface on a cycle, same
+    // semantics as AudioRegion::previousTakes.
+    std::vector<MidiTakeRef> previousTakes;
+};
+
 // Audio region - references a mono WAV file on disk. Multiple recordings
 // over the same timeline range stack into `previousTakes`; the live take's
 // fields (file/sourceOffset/lengthInSamples) plus that vector form a
@@ -311,9 +405,21 @@ struct Track
                                             // -2 = inputSource + 1, paired adjacent)
     std::atomic<int>  midiInputIndex { -1 }; // -1 = none; 0..N = AudioDeviceManager
                                               // MIDI input index. Only used in Midi mode.
+    std::atomic<int>  midiChannel    { 0 };  // 0 = omni (all channels accepted),
+                                              // 1..16 = filter to that MIDI channel only.
+    // Audio thread sets to true when a MIDI message routes to this track in
+    // a given block. UI timer polls + clear-on-read for the activity LED so a
+    // continuous stream still flashes (clear-then-rise per timer tick).
+    mutable std::atomic<bool> midiActivity { false };
 
     // Recorded regions for this track (mutated only on the message thread).
+    // Audio tracks (Mode::Mono / Mode::Stereo) write to `regions`; MIDI
+    // tracks (Mode::Midi) write to `midiRegions`. The other vector stays
+    // empty for the wrong mode - we don't switch storage on a mode flip,
+    // so a Mono->Midi conversion preserves the audio takes underneath
+    // (a future "convert to MIDI" UX would explicitly clear them).
     std::vector<AudioRegion> regions;
+    std::vector<MidiRegion>  midiRegions;
 
     // Per-channel plugin slot persistence. Populated from the live PluginSlot
     // immediately before SessionSerializer::save (via AudioEngine::publishPluginStateForSave)
@@ -654,6 +760,68 @@ public:
     // capture begins. The captured WAV's first sample still maps to the
     // playhead position at Record-press, not the negative pre-roll start.
     std::atomic<bool>  countInEnabled    { false };
+
+    // Transport cluster state (Tascam-style REW/FFWD/jumpback). Per-session
+    // so workflow preferences travel with the project rather than living in
+    // an app-wide preferences file (Focal.md #6 - no preferences sprawl).
+    //   jumpbackSeconds      - amount the « button rewinds during playback
+    //   lastRecordPointSamples - timeline position the most-recent record
+    //     pass STARTED at; STOP+FFWD jumps to it. Default 0 = haven't
+    //     recorded yet, so the first STOP+FFWD just stays at zero (which
+    //     reads as "do nothing", correct).
+    std::atomic<float>       jumpbackSeconds        { 5.0f };
+    std::atomic<juce::int64> lastRecordPointSamples { 0 };
+
+    // Auto-punch pre-roll / post-roll. Active only when transport.punch
+    // is enabled (otherwise the punch range is meaningless and these
+    // settings stay dormant).
+    //   preRollSeconds  - on Record-press, the playhead is rolled back
+    //     this many seconds before punchIn. Existing material plays
+    //     audibly during pre-roll; the audio callback's punch-window
+    //     gate already prevents committing audio before punchIn.
+    //   postRollSeconds - after the playhead crosses punchOut, the
+    //     transport keeps rolling for this long, then auto-stops.
+    //     0 = stay rolling indefinitely (matches the previous behaviour
+    //     where punch never auto-stopped).
+    std::atomic<float> preRollSeconds  { 0.0f };
+    std::atomic<float> postRollSeconds { 0.0f };
+
+    // Tuner. tuneTrackIndex = -1 disables; 0..15 selects which track's
+    // device input feeds the pitch detector. tuneLatestHz / tuneLatestLevel
+    // are written from the audio thread on every block (the detector runs
+    // when an active track is selected) and polled by TunerOverlay's
+    // 30 Hz timer to drive the note + cents readout. Not persisted - the
+    // tuner is a transient utility, not a workflow setting.
+    std::atomic<int>   tuneTrackIndex { -1 };
+    std::atomic<float> tuneLatestHz   { 0.0f };
+    std::atomic<float> tuneLatestLevel { 0.0f };
+
+    // Currently-held MIDI notes across all inputs - the audio thread sets
+    // a slot to true on Note On (vel > 0) and false on Note Off (or vel
+    // 0 Note On). The chord-analyzer poll on the SystemStatusBar timer
+    // walks the array, builds a vector, and runs ChordAnalyzer::analyze
+    // off-thread. Per-note std::atomic<bool> rather than a single packed
+    // word keeps the audio thread's update path lock-free without
+    // needing CAS loops.
+    static constexpr int kNumMidiNotes = 128;
+    std::array<std::atomic<bool>, kNumMidiNotes> heldMidiNotes {};
+
+    // MIDI controller bindings. Mutated only on the message thread (UI
+    // learn-capture and explicit forget); audio thread reads it lock-free
+    // when applying inbound MIDI events. Matches the existing region
+    // edit-vs-read race-tolerance pattern - mutations are user gestures,
+    // audio reads are short-loop iterations.
+    //
+    // pendingTransportAction - audio thread sets this when a binding hits
+    //   a transport target; TransportBar's 20 Hz timer drains it on the
+    //   message thread (engine.play/stop/record aren't RT-safe).
+    // midiLearnPending - UI sets a packed (target, index); audio thread
+    //   captures the next matching MIDI source into midiLearnCapture;
+    //   message-thread timer drains the capture and appends a binding.
+    std::vector<MidiBinding> midiBindings;
+    std::atomic<int>         pendingTransportAction { (int) PendingTransportAction::None };
+    std::atomic<int>         midiLearnPending       { -1 };
+    std::atomic<juce::int64> midiLearnCapture       { 0 };
 
     // Resolve the audio device input channel that this track should read from.
     // -2 (default) means "follow the track index", -1 means "no input".

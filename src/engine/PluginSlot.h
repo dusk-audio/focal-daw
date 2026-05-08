@@ -82,6 +82,10 @@ public:
     // require stereo (no mono bus support), we duplicate-and-process (L=R)
     // and average back to mono.
     //
+    // `midiMessages` is forwarded to the plugin's processBlock. For audio-
+    // effect inserts the caller passes an empty buffer; for instrument
+    // plugins it carries the per-track-filtered MIDI events for the block.
+    //
     // Stage-4 time-budget protection: each block is timed; if the plugin's
     // wall-clock exceeds `kTimeBudgetFraction` of the buffer's audio time
     // (e.g. 60 % of 21.3 ms at 1024/48k = 12.8 ms), the bypass flag is
@@ -90,14 +94,16 @@ public:
     // crash. User can manually clear the auto-bypass via the plugin slot
     // UI (right-click → "Re-enable plugin"); we don't auto-recover because
     // the plugin would just freeze the thread again.
-    void processMonoBlock (float* monoData, int numSamples) noexcept;
+    void processMonoBlock (float* monoData, int numSamples,
+                           juce::MidiBuffer& midiMessages) noexcept;
 
     // Stereo variant for aux/master buses. L and R are processed in place.
     // Mono-only plugins: average L+R into a temporary mono buffer, run the
     // plugin, write the result to both channels (so a mono reverb still
     // makes sense on a stereo send return).
     // Same time-budget watchdog as processMonoBlock.
-    void processStereoBlock (float* L, float* R, int numSamples) noexcept;
+    void processStereoBlock (float* L, float* R, int numSamples,
+                             juce::MidiBuffer& midiMessages) noexcept;
 
     // True if the slot was AUTO-bypassed by the time-budget watchdog (as
     // distinct from manual setBypassed). UI shows this state so the user
@@ -111,6 +117,20 @@ public:
     juce::AudioPluginInstance* getInstance() const noexcept
     {
         return currentInstance.load (std::memory_order_acquire);
+    }
+
+    // Reported latency of the loaded plugin in samples. 0 when no plugin
+    // is loaded or the plugin reports no latency. Audio-thread-safe -
+    // reads the instance via the same atomic pointer the process path
+    // uses, then queries getLatencySamples on the instance (no allocation,
+    // no lock). Used by AudioEngine's MIDI scheduler to push instrument
+    // events forward in time so the plugin's delayed audio output lands
+    // on the correct timeline sample.
+    int getLatencySamples() const noexcept
+    {
+        if (auto* p = currentInstance.load (std::memory_order_acquire))
+            return p->getLatencySamples();
+        return 0;
     }
 
     // Session save/restore. The XML form encodes a juce::PluginDescription
@@ -144,9 +164,20 @@ private:
     double preparedSampleRate = 0.0;
     int    preparedBlockSize  = 0;
 
+    // Watchdog state. Audio-thread-only; no other thread reads these.
+    //   • blocksSinceLoad: skips the budget check while a freshly-loaded
+    //     plugin warms up (cold caches, lazy-init, oversampler ramps).
+    //     Without this, plugins like reverbs and look-ahead limiters trip
+    //     the watchdog on block 1 every time and never get processed.
+    //   • consecutiveOverruns: a single late block (scheduling jitter,
+    //     other-thread preemption) shouldn't kill the plugin. Require N
+    //     in a row before bypassing.
+    // Reset to 0 by prepareToPlay and by every successful load.
+    int blocksSinceLoad     = 0;
+    int consecutiveOverruns = 0;
+
     // Per-block scratch buffer for stereo-fallback plugins. Sized at
     // prepareToPlay so the audio thread doesn't allocate. 2-channel.
     juce::AudioBuffer<float> stereoScratch;
-    juce::MidiBuffer         emptyMidi;
 };
 } // namespace focal

@@ -3,6 +3,9 @@
 #include "AuxView.h"
 #include "BounceDialog.h"
 #include "DimOverlay.h"
+#include "PianoRollComponent.h"
+#include "TunerOverlay.h"
+#include "../session/SessionTemplates.h"
 #include "MasteringView.h"
 #include "StartupDialog.h"
 #include "SystemStatusBar.h"
@@ -101,6 +104,7 @@ MainComponent::MainComponent()
     addAndMakeVisible (systemStatusBar.get());
 
     transportBar = std::make_unique<TransportBar> (engine);
+    transportBar->onTunerToggle = [this] { toggleTuner(); };
     transportBar->onTapeStripToggle = [this] (bool expanded)
     {
         tapeStripExpanded = expanded;
@@ -115,6 +119,7 @@ MainComponent::MainComponent()
 
     tapeStrip = std::make_unique<TapeStrip> (session, engine);
     tapeStrip->setVisible (tapeStripExpanded);
+    tapeStrip->onMidiRegionClicked = [this] (int t, int r) { openPianoRoll (t, r); };
     addAndMakeVisible (tapeStrip.get());
 
     // Sync the transport-bar TAPE toggle with the collapsed default.
@@ -131,6 +136,10 @@ MainComponent::MainComponent()
 
     consoleView = std::make_unique<ConsoleView> (session, engine);
     addAndMakeVisible (consoleView.get());
+    consoleView->setOnStripFocusRequested ([this] (int t)
+    {
+        if (tapeStrip != nullptr) tapeStrip->setSelectedTrack (t);
+    });
 
     // Initial stage is Mixing (mixingStageBtn defaults toggled on) - sync the
     // strips so they show aux sends instead of input/IN/ARM/PRINT from the
@@ -209,8 +218,12 @@ MainComponent::~MainComponent()
     // dialog's AudioDeviceSelectorComponent listens to AudioDeviceManager
     // and would crash on listener-removal in that delayed teardown.
     // Deleting it here, while AudioEngine is still alive, is safe.
-    if (activeAudioDialog != nullptr)
-        delete activeAudioDialog.getComponent();
+    // Embedded modal teardown: closes the panel + dim while AudioEngine
+    // is still alive, so AudioDeviceSelectorComponent's listener removal
+    // happens before the engine and its DeviceManager go away.
+    audioSettingsModal.close();
+    mixdownModal      .close();
+    bounceModal       .close();
 
     // Intentionally NO auto-save here. Standard DAW behavior is to require
     // an explicit Save before exit. The previous auto-save on destruct
@@ -389,6 +402,55 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
         return true;
     }
 
+    // ── Metronome click toggle: 'C' (no modifiers). Matches the C/I
+    // (count-in) abbreviation already used on the transport bar's button.
+    // The TransportBar's clickToggle button polls the same atom on its
+    // 30 Hz timer and re-syncs its visual state.
+    if (code == 'C' && noMods)
+    {
+        auto& enabled = session.metronomeEnabled;
+        enabled.store (! enabled.load (std::memory_order_relaxed),
+                        std::memory_order_relaxed);
+        return true;
+    }
+
+    // ── Track arm / solo / mute on the selected track. Selection state
+    // lives on TapeStrip (the most-recently-clicked region's track); when
+    // nothing's selected, the shortcuts no-op rather than guessing. The
+    // ChannelStrip's existing 30 Hz timer picks up the atom changes and
+    // refreshes its toggles.
+    if (tapeStrip != nullptr)
+    {
+        const int sel = tapeStrip->getSelectedTrack();
+        if (sel >= 0 && sel < Session::kNumTracks)
+        {
+            if (code == 'A' && noMods)
+            {
+                auto& a = session.track (sel).recordArmed;
+                a.store (! a.load (std::memory_order_relaxed),
+                          std::memory_order_relaxed);
+                return true;
+            }
+            if (code == 'S' && noMods)
+            {
+                auto& s = session.track (sel).strip.solo;
+                s.store (! s.load (std::memory_order_relaxed),
+                          std::memory_order_relaxed);
+                return true;
+            }
+            // 'X' = mute toggle. M is already taken by drop-marker; X is
+            // mnemonic for "kill / cross out" and matches Reaper's mute
+            // keybinding.
+            if (code == 'X' && noMods)
+            {
+                auto& m = session.track (sel).strip.mute;
+                m.store (! m.load (std::memory_order_relaxed),
+                          std::memory_order_relaxed);
+                return true;
+            }
+        }
+    }
+
     // ── Window: F11 toggles fullscreen. Walks up to the parent
     // ResizableWindow because that's the layer that owns the OS window
     // state, not MainComponent itself.
@@ -524,29 +586,15 @@ void MainComponent::resized()
 
 void MainComponent::openAudioSettings()
 {
-    // If a settings dialog is already open, just raise it. Creating a second
-    // would orphan the first in ModalComponentManager (our SafePointer would
-    // overwrite the old handle), and the orphaned dialog's
-    // AudioDeviceSelectorComponent destructor would later run after
-    // AudioEngine has been freed → the same shutdown segfault we just fixed.
-    if (auto* existing = activeAudioDialog.getComponent())
-    {
-        existing->toFront (true);
-        return;
-    }
-
-    auto* panel = new AudioSettingsPanel (engine.getDeviceManager(), engine, session);
+    // Embedded modal - identical UX to a window (Esc to dismiss, click
+    // outside to close, body holds focus) but rendered over the main
+    // canvas so we don't fragment across OS windows. The Modal helper
+    // handles the dim overlay + body lifetime.
+    if (audioSettingsModal.isOpen()) return;
+    auto panel = std::make_unique<AudioSettingsPanel> (engine.getDeviceManager(),
+                                                          engine, session);
     panel->setSize (600, 520);
-
-    juce::DialogWindow::LaunchOptions opts;
-    opts.content.setOwned (panel);
-    opts.dialogTitle = "Audio device";
-    opts.dialogBackgroundColour = juce::Colour (0xff202024);
-    opts.escapeKeyTriggersCloseButton = true;
-    opts.useNativeTitleBar = true;
-    opts.resizable = true;
-    activeAudioDialog = opts.launchAsync();
-    if (activeAudioDialog != nullptr) activeAudioDialog->toFront (true);
+    audioSettingsModal.show (*this, std::move (panel));
 }
 
 void MainComponent::switchToStage (AudioEngine::Stage s)
@@ -618,7 +666,8 @@ void MainComponent::doMixdown()
     // the explicit dialog flow for ad-hoc renders.
     auto target = session.getSessionDirectory().getChildFile ("mixdown.wav");
 
-    auto* panel = new BounceDialog (engine, session, engine.getDeviceManager(), target);
+    auto panel = std::make_unique<BounceDialog> (engine, session,
+                                                   engine.getDeviceManager(), target);
     panel->setSize (520, 200);
 
     // Hand off to Mastering once the bounce finishes successfully. The
@@ -628,19 +677,13 @@ void MainComponent::doMixdown()
     panel->onSuccessfulFinish = [safeThis] (juce::File rendered)
     {
         if (safeThis == nullptr) return;
+        safeThis->mixdownModal.close();
         safeThis->switchToStage (AudioEngine::Stage::Mastering);
         if (safeThis->masteringView != nullptr)
             safeThis->masteringView->loadFile (rendered);
     };
 
-    juce::DialogWindow::LaunchOptions opts;
-    opts.content.setOwned (panel);
-    opts.dialogTitle = "Mixdown";
-    opts.dialogBackgroundColour = juce::Colour (0xff202024);
-    opts.escapeKeyTriggersCloseButton = false;
-    opts.useNativeTitleBar = true;
-    opts.resizable = false;
-    if (auto* dw = opts.launchAsync()) dw->toFront (true);
+    mixdownModal.show (*this, std::move (panel));
 }
 
 void MainComponent::launchStartupDialog()
@@ -964,6 +1007,10 @@ bool MainComponent::finishLoadingSessionFrom (const juce::File& sourceJson,
     consoleView.reset();
     consoleView = std::make_unique<ConsoleView> (session, engine);
     addAndMakeVisible (consoleView.get());
+    consoleView->setOnStripFocusRequested ([this] (int t)
+    {
+        if (tapeStrip != nullptr) tapeStrip->setSelectedTrack (t);
+    });
     if (consoleView != nullptr && transportBar != nullptr)
         consoleView->setStripsCompactMode (tapeStripExpanded);
     resized();
@@ -1021,17 +1068,10 @@ void MainComponent::openBounceDialog()
         if (! outFile.hasFileExtension ("wav"))
             outFile = outFile.withFileExtension ("wav");
 
-        auto* panel = new BounceDialog (engine, session, engine.getDeviceManager(), outFile);
+        auto panel = std::make_unique<BounceDialog> (engine, session,
+                                                       engine.getDeviceManager(), outFile);
         panel->setSize (520, 200);
-
-        juce::DialogWindow::LaunchOptions opts;
-        opts.content.setOwned (panel);
-        opts.dialogTitle = "Bounce";
-        opts.dialogBackgroundColour = juce::Colour (0xff202024);
-        opts.escapeKeyTriggersCloseButton = false;  // closing requires Cancel/Close
-        opts.useNativeTitleBar = true;
-        opts.resizable = false;
-        if (auto* dw = opts.launchAsync()) dw->toFront (true);
+        bounceModal.show (*this, std::move (panel));
     });
 }
 
@@ -1051,7 +1091,12 @@ enum MenuItemId
     kMenuFileSaveAs   = 1004,
     kMenuFileMixdown  = 1010,
     kMenuFileBounce   = 1011,
+    kMenuFileCleanOut = 1012,
     kMenuFileQuit     = 1099,
+    // Reserved range for template entries (one per SessionTemplate enum
+    // value, indexed off this base). Stays well above the file-action IDs
+    // so future additions don't collide.
+    kMenuFileTemplateBase = 1200,
     kMenuSettingsAudio = 2001,
 };
 }
@@ -1068,12 +1113,25 @@ juce::PopupMenu MainComponent::getMenuForIndex (int topLevelMenuIndex,
     if (topLevelMenuIndex == 0)   // File
     {
         menu.addItem (kMenuFileNew,    "New session...");
+
+        // New From Template submenu - drops opinionated track names /
+        // colours / modes onto the live session so the user is one
+        // arm-click from recording. Iterates the SessionTemplate enum so
+        // a new template appears here automatically.
+        juce::PopupMenu templates;
+        for (int i = 0; i < (int) SessionTemplate::kCount; ++i)
+            templates.addItem (kMenuFileTemplateBase + i,
+                                nameForTemplate ((SessionTemplate) i));
+        menu.addSubMenu ("New from template", templates);
+
         menu.addItem (kMenuFileOpen,   "Open...");
         menu.addItem (kMenuFileSave,   "Save");
         menu.addItem (kMenuFileSaveAs, "Save as...");
         menu.addSeparator();
         menu.addItem (kMenuFileMixdown, "Mixdown");
         menu.addItem (kMenuFileBounce,  "Bounce...");
+        menu.addSeparator();
+        menu.addItem (kMenuFileCleanOut, "Clean out unreferenced files...");
         menu.addSeparator();
         menu.addItem (kMenuFileQuit, "Quit");
     }
@@ -1106,12 +1164,235 @@ void MainComponent::menuItemSelected (int menuItemID, int /*topLevelMenuIndex*/)
         case kMenuFileSaveAs: saveAsPrompt();           break;
         case kMenuFileMixdown: doMixdown();             break;
         case kMenuFileBounce:  openBounceDialog();      break;
+        case kMenuFileCleanOut: cleanOutUnreferencedFiles(); break;
         case kMenuFileQuit:
             if (auto* app = juce::JUCEApplicationBase::getInstance())
                 app->systemRequestedQuit();
             break;
         case kMenuSettingsAudio: openAudioSettings();   break;
-        default: break;
+        default:
+            // Template menu items live in [kMenuFileTemplateBase, +kCount).
+            if (menuItemID >= kMenuFileTemplateBase
+                && menuItemID < kMenuFileTemplateBase + (int) SessionTemplate::kCount)
+            {
+                applyTemplate (session,
+                                (SessionTemplate) (menuItemID - kMenuFileTemplateBase));
+                // Rebuild the console view so the new track names / colours
+                // / modes propagate into existing strip components - the
+                // simplest way to pick up name + colour + mode in one shot.
+                consoleView.reset();
+                consoleView = std::make_unique<ConsoleView> (session, engine);
+                addAndMakeVisible (consoleView.get());
+                consoleView->setOnStripFocusRequested ([this] (int t)
+                {
+                    if (tapeStrip != nullptr) tapeStrip->setSelectedTrack (t);
+                });
+                consoleView->setStripsMixingMode (
+                    engine.getStage() == AudioEngine::Stage::Mixing);
+                if (tapeStrip != nullptr) tapeStrip->repaint();
+                resized();
+            }
+            break;
     }
+}
+
+void MainComponent::cleanOutUnreferencedFiles()
+{
+    // Build the set of WAVs the session is currently using - both the
+    // live region's `file` and every previousTakes entry. Anything in
+    // the audio dir not in this set is fair game for deletion.
+    auto audioDir = session.getAudioDirectory();
+    if (! audioDir.isDirectory())
+    {
+        juce::AlertWindow::showAsync (
+            juce::MessageBoxOptions()
+                .withIconType (juce::MessageBoxIconType::InfoIcon)
+                .withTitle ("Clean out")
+                .withMessage ("This session has no audio directory yet, "
+                                "so there's nothing to clean.")
+                .withButton ("OK"),
+            nullptr);
+        return;
+    }
+
+    juce::StringArray referenced;   // full paths
+    for (int t = 0; t < Session::kNumTracks; ++t)
+    {
+        for (const auto& r : session.track (t).regions)
+        {
+            referenced.addIfNotAlreadyThere (r.file.getFullPathName());
+            for (const auto& take : r.previousTakes)
+                referenced.addIfNotAlreadyThere (take.file.getFullPathName());
+        }
+    }
+
+    // Walk the audio directory for .wav files. Anything outside the
+    // referenced set is a candidate. Subdirectories are intentionally
+    // skipped so external WAVs the user dropped in by hand don't get
+    // touched.
+    juce::Array<juce::File> candidates;
+    juce::int64 totalBytes = 0;
+    for (const auto& f : audioDir.findChildFiles (juce::File::findFiles, false, "*.wav"))
+    {
+        if (! referenced.contains (f.getFullPathName()))
+        {
+            candidates.add (f);
+            totalBytes += f.getSize();
+        }
+    }
+
+    if (candidates.isEmpty())
+    {
+        juce::AlertWindow::showAsync (
+            juce::MessageBoxOptions()
+                .withIconType (juce::MessageBoxIconType::InfoIcon)
+                .withTitle ("Clean out")
+                .withMessage ("No unreferenced files found. The audio "
+                                "directory is already clean.")
+                .withButton ("OK"),
+            nullptr);
+        return;
+    }
+
+    const auto sizeMB = (double) totalBytes / (1024.0 * 1024.0);
+    const auto msg = "Found " + juce::String (candidates.size())
+                   + " unreferenced .wav file(s) totalling "
+                   + juce::String (sizeMB, 1) + " MB.\n\n"
+                   + "These were created by past record passes that no "
+                     "longer have any region or take pointing at them. "
+                     "Deleting cannot be undone.";
+
+    juce::AlertWindow::showAsync (
+        juce::MessageBoxOptions()
+            .withIconType (juce::MessageBoxIconType::WarningIcon)
+            .withTitle ("Clean out unreferenced files")
+            .withMessage (msg)
+            .withButton ("Delete")
+            .withButton ("Cancel"),
+        [safeThis = juce::Component::SafePointer<MainComponent> (this), candidates] (int buttonIdx)
+        {
+            if (buttonIdx != 1) return;   // 1 = first button = Delete
+            int deleted = 0;
+            for (const auto& f : candidates)
+                if (f.deleteFile()) ++deleted;
+            if (auto* self = safeThis.getComponent())
+                self->statusLabel.setText ("Deleted " + juce::String (deleted)
+                                            + " unreferenced file(s).",
+                                            juce::dontSendNotification);
+        });
+}
+
+void MainComponent::openPianoRoll (int trackIdx, int regionIdx)
+{
+    // Toggle vs swap. Clicking the SAME region while the roll is already
+    // open dismisses it (a second click on a region is naturally read as
+    // "I'm done"); clicking a DIFFERENT region tears the current roll
+    // down and re-opens on the new target so the user doesn't have to
+    // dismiss-then-click.
+    if (pianoRoll != nullptr)
+    {
+        const bool sameRegion = (pianoRollTrackIdx == trackIdx
+                                  && pianoRollRegionIdx == regionIdx);
+        closePianoRoll();
+        if (sameRegion) return;
+    }
+
+    pianoRoll = std::make_unique<PianoRollComponent> (session, trackIdx, regionIdx);
+    pianoRollTrackIdx  = trackIdx;
+    pianoRollRegionIdx = regionIdx;
+    pianoRollDim = std::make_unique<DimOverlay>();
+
+    // Sized as a centred panel that leaves a small inset on each side so
+    // the dimmed backdrop is still visible (helps users see they're in a
+    // modal). The inset shrinks on small windows so the roll always has
+    // a workable surface even on a 1280-wide screen.
+    const auto bounds = getLocalBounds();
+    const int inset = juce::jmax (24, juce::jmin (bounds.getWidth(), bounds.getHeight()) / 16);
+    const auto rollBounds = bounds.reduced (inset);
+
+    pianoRollDim->setBounds (bounds);
+    pianoRollDim->onClick = [this] { closePianoRoll(); };
+    addAndMakeVisible (pianoRollDim.get());
+
+    pianoRoll->setBounds (rollBounds);
+    pianoRoll->onCloseRequested = [this] { closePianoRoll(); };
+    addAndMakeVisible (pianoRoll.get());
+    pianoRoll->grabKeyboardFocus();
+}
+
+void MainComponent::closePianoRoll()
+{
+    if (pianoRoll != nullptr) removeChildComponent (pianoRoll.get());
+    if (pianoRollDim != nullptr) removeChildComponent (pianoRollDim.get());
+    pianoRoll.reset();
+    pianoRollDim.reset();
+    pianoRollTrackIdx  = -1;
+    pianoRollRegionIdx = -1;
+    if (tapeStrip != nullptr) tapeStrip->repaint();
+}
+
+namespace
+{
+// Tiny Timer subclass used by the tuner overlay to poll the engine's
+// pitch atoms at 30 Hz on the message thread. Public-internal because
+// the unique_ptr in MainComponent.h holds it as juce::Timer*.
+class TunerPoller final : public juce::Timer
+{
+public:
+    TunerPoller (Session& s, TunerOverlay& o) : session (s), overlay (o)
+    {
+        startTimerHz (30);
+    }
+    void timerCallback() override
+    {
+        const float hz = session.tuneLatestHz   .load (std::memory_order_relaxed);
+        const float lv = session.tuneLatestLevel.load (std::memory_order_relaxed);
+        overlay.setDetected (hz, lv);
+    }
+private:
+    Session& session;
+    TunerOverlay& overlay;
+};
+} // namespace
+
+void MainComponent::toggleTuner()
+{
+    if (tuner != nullptr) { closeTuner(); return; }
+
+    // Pick the track to tune. Prefers the user's most-recent selection
+    // (the same selectedTrack the keyboard shortcuts use); falls back
+    // to track 0 when nothing's selected so the button always does
+    // something rather than silently failing.
+    int trackIdx = 0;
+    if (tapeStrip != nullptr)
+    {
+        const int sel = tapeStrip->getSelectedTrack();
+        if (sel >= 0 && sel < Session::kNumTracks) trackIdx = sel;
+    }
+    session.tuneTrackIndex.store (trackIdx, std::memory_order_relaxed);
+    session.tuneLatestHz   .store (0.0f,    std::memory_order_relaxed);
+    session.tuneLatestLevel.store (0.0f,    std::memory_order_relaxed);
+
+    tuner = std::make_unique<TunerOverlay>();
+    tuner->onDismiss = [this] { closeTuner(); };
+    tunerDim = std::make_unique<DimOverlay>();
+    tunerDim->setBounds (getLocalBounds());
+    tunerDim->onClick = [this] { closeTuner(); };
+    addAndMakeVisible (tunerDim.get());
+
+    tuner->setBounds (getLocalBounds());
+    addAndMakeVisible (tuner.get());
+
+    tunerPoller = std::make_unique<TunerPoller> (session, *tuner);
+}
+
+void MainComponent::closeTuner()
+{
+    tunerPoller.reset();
+    if (tuner    != nullptr) removeChildComponent (tuner.get());
+    if (tunerDim != nullptr) removeChildComponent (tunerDim.get());
+    tuner.reset();
+    tunerDim.reset();
+    session.tuneTrackIndex.store (-1, std::memory_order_relaxed);
 }
 } // namespace focal

@@ -2,8 +2,10 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <array>
+#include <functional>
 #include <memory>
 #include "CompMeterStrip.h"
+#include "EmbeddedModal.h"
 #include "../session/Session.h"
 
 namespace focal
@@ -20,6 +22,23 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
     void mouseDown (const juce::MouseEvent& e) override;
+
+    // Click-to-focus hook. Fired when the user clicks anywhere on the
+    // strip (or any of its children, via the wide click-target). The
+    // host (MainComponent) wires this to the TapeStrip selection so
+    // keyboard shortcuts (A / S / X) target the strip the user just
+    // touched, even when no region has been clicked.
+    std::function<void (int trackIndex)> onTrackFocusRequested;
+
+    // Fader-group drag state. Captured at onDragStart for every track
+    // in the same group as this strip, then on each onValueChange the
+    // delta against this strip's anchor is added to each peer's anchor
+    // and stored in their faderDb atom. Cleared at onDragEnd. The peer
+    // ChannelStripComponents pick up the change via their existing
+    // 30 Hz timer that polls faderDb and pushes it to their slider.
+    float                            faderDragAnchorDb = 0.0f;
+    std::array<float, 16>            peerAnchorsDb {};   // key = trackIndex
+    std::array<bool,  16>            peerActive    {};   // true = peer in group
 
     // Compact mode hides the inline EQ + COMP controls and replaces each
     // section with a single small button that opens the corresponding
@@ -172,6 +191,16 @@ private:
     juce::ComboBox   inputSelector;         // mono / stereo-L / (hidden in MIDI)
     juce::ComboBox   inputSelectorR;        // stereo-R (visible only in stereo mode)
     juce::ComboBox   midiInputSelector;     // MIDI input port (visible only in MIDI mode)
+    juce::ComboBox   midiChannelSelector;   // Omni / Ch 1..16 filter (MIDI mode only)
+    // Small painted dot, repainted by the strip's existing 30 Hz timer when
+    // the engine sets track.midiActivity (clear-on-read). Sits next to the
+    // MIDI selectors when the track is in MIDI mode.
+    struct MidiActivityLed : juce::Component
+    {
+        bool lit = false;
+        void paint (juce::Graphics& g) override;
+    };
+    MidiActivityLed midiActivityLed;
 
     // Aux send knobs (visible only in Mixing stage). Each sends a copy of
     // the channel signal into the matching AUX strip's plugin chain. The
@@ -211,7 +240,11 @@ private:
     void openPluginEditor();
     void closePluginEditor();
     std::unique_ptr<juce::FileChooser> activePluginChooser;
-    juce::Component::SafePointer<juce::DialogWindow> activePluginEditorDialog;
+    // Plugin editor uses an EmbeddedModal (centred overlay + dim backdrop on
+    // the parent, Esc / click-outside dismiss) instead of a native top-level
+    // DialogWindow. Lifetime is tied to this strip - the modal closes when
+    // the strip is destroyed, before the underlying PluginSlot tears down.
+    EmbeddedModal pluginEditorModal;
 
     // Compact-mode plumbing.
     bool compactMode = false;
@@ -219,8 +252,6 @@ private:
     juce::TextButton compCompactButton { "COMP" };
     // EQ + Comp use CallOutBox (in-window overlay, click-outside-to-dismiss
     // with the click consumed so the trigger button doesn't bounce-reopen).
-    // Plugin editor stays as a top-level DialogWindow because plugin GUIs
-    // can be very large and benefit from being a separate OS window.
     juce::Component::SafePointer<juce::CallOutBox> activeEqBox;
     juce::Component::SafePointer<juce::CallOutBox> activeCompBox;
     void openEqEditorPopup();

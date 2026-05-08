@@ -706,17 +706,10 @@ void MasteringView::doExport()
 
     auto target = session.getSessionDirectory().getChildFile ("master.wav");
 
-    auto* panel = new BounceDialog (engine, session, engine.getDeviceManager(),
-                                     target, BounceEngine::Mode::MasteringChain);
+    auto panel = std::make_unique<BounceDialog> (engine, session,
+                                                   engine.getDeviceManager(),
+                                                   target, BounceEngine::Mode::MasteringChain);
     panel->setSize (520, 200);
-
-    juce::DialogWindow::LaunchOptions opts;
-    opts.content.setOwned (panel);
-    opts.dialogTitle = "Export master";
-    opts.dialogBackgroundColour = juce::Colour (0xff202024);
-    opts.escapeKeyTriggersCloseButton = false;
-    opts.useNativeTitleBar = true;
-    opts.resizable = false;
-    if (auto* dw = opts.launchAsync()) dw->toFront (true);
+    exportModal.show (*this, std::move (panel));
 }
 } // namespace focal

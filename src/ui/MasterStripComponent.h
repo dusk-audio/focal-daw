@@ -1,7 +1,9 @@
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <memory>
 #include "../session/Session.h"
+#include "AnalogVuMeter.h"
 
 // Forward decl unconditional; the definition is only #included from the
 // .cpp when FOCAL_HAS_DUSK_DSP is set. The pointer parameter stays valid
@@ -16,17 +18,22 @@ public:
     // tapeProcessor is a borrowed pointer to the master-bus TapeMachine
     // instance owned by AudioEngine; the gear button uses it to spawn the
     // editor. Nullable when the donor DSP is disabled (FOCAL_HAS_DUSK_DSP=0).
+    // sessionRef is the live session, used by the right-click MIDI Learn
+    // menu on the master fader.
     explicit MasterStripComponent (MasterBusParams& paramsRef,
+                                   class Session& sessionRef,
                                    ::TapeMachineAudioProcessor* tapeProcessor = nullptr);
     ~MasterStripComponent() override;
 
     void paint (juce::Graphics&) override;
     void resized() override;
+    void mouseDown (const juce::MouseEvent& e) override;
 
 private:
     void timerCallback() override;
 
     MasterBusParams& params;
+    class Session& session;
 
     juce::Label nameLabel;
 
@@ -56,6 +63,10 @@ private:
     juce::Component::SafePointer<juce::Component> tapeMachineModal;
 
     juce::Slider faderSlider { juce::Slider::LinearVertical, juce::Slider::TextBoxBelow };
+
+    // Analog VU meter at the top of the strip - same look as the bus VUs
+    // so the user reads master level the same way they read bus level.
+    std::unique_ptr<AnalogVuMeter> vuMeter;
 
     // Output stereo meter (post-master peak in dB, L/R split) + GR readout.
     // The meter sits to the RIGHT of the fader to match the channel-strip

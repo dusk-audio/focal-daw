@@ -19,6 +19,15 @@ namespace focal
 // (so the audio engine owns plugin infrastructure alongside the device
 // manager). Could move to FocalApp scope later if non-engine code needs
 // access.
+//
+// Threading: ALL methods on this class are message-thread-only. The audio
+// thread never touches the manager - plugin instances live in PluginSlot
+// after construction and the audio thread only reads the slot's atomic
+// `currentInstance` pointer. KnownPluginList is mutated in-place by
+// scanInstalledPlugins / createPluginInstance and read by
+// getInstrumentDescriptions / getKnownPluginList; concurrent access from
+// other threads would race. Calling any method here from the audio thread
+// is a bug.
 class PluginManager
 {
 public:
@@ -28,6 +37,21 @@ public:
     juce::AudioPluginFormatManager& getFormatManager() noexcept { return formatManager; }
     juce::KnownPluginList&          getKnownPluginList() noexcept { return knownPluginList; }
 
+    // Message-thread only. Reads knownPluginList; would race a concurrent
+    // scan or createPluginInstance.
+    //
+    // Subset of getKnownPluginList()::getTypes() filtered by the donor-side
+    // `isInstrument` flag (set by JUCE from the plugin's own self-report).
+    // Used by the per-channel picker on MIDI tracks so the user only sees
+    // synths / samplers, not effects. Computed on demand - the known list
+    // changes only on user-triggered scans, so re-filtering each open is
+    // cheap.
+    juce::Array<juce::PluginDescription> getInstrumentDescriptions() const;
+
+    // Message-thread only. Mutates knownPluginList and runs synchronous
+    // plugin loading (file I/O, JUCE format-manager calls); never call
+    // from the audio thread or any RT-sensitive context.
+    //
     // Instantiate a plugin from a file path (e.g. a .vst3 bundle directory
     // on Linux). Returns nullptr on failure (file missing, format not
     // supported, plugin failed to load). Synchronous - may take 100s of ms
@@ -41,6 +65,8 @@ public:
                            double sampleRate, int blockSize,
                            juce::String& errorMessage);
 
+    // Message-thread only. Same threading constraints as the file overload.
+    //
     // Same shape but resolve by a previously-discovered PluginDescription
     // (used when restoring a session - the plugin file path may have moved
     // but the description's uid + format matches).
@@ -57,6 +83,11 @@ public:
     // JUCE's KnownPluginList::recreateFromXml silently skips bad ones.
     juce::File getCacheFile() const;
 
+    // Message-thread only. Mutates knownPluginList; UI should also block
+    // any other call into this manager for the duration so getInstrument-
+    // Descriptions / createPluginInstance don't observe a half-populated
+    // list.
+    //
     // Scans every supported plugin format's default install locations and
     // populates knownPluginList. Synchronous; can take 10-30 seconds the
     // first time on a system with many plugins. Returns the number of

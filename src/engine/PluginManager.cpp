@@ -74,6 +74,15 @@ int PluginManager::scanInstalledPlugins()
     return added;
 }
 
+juce::Array<juce::PluginDescription> PluginManager::getInstrumentDescriptions() const
+{
+    juce::Array<juce::PluginDescription> instruments;
+    for (const auto& desc : knownPluginList.getTypes())
+        if (desc.isInstrument)
+            instruments.add (desc);
+    return instruments;
+}
+
 std::unique_ptr<juce::AudioPluginInstance>
 PluginManager::createPluginInstance (const juce::File& pluginFile,
                                       double sampleRate, int blockSize,

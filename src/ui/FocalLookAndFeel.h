@@ -86,6 +86,17 @@ public:
                                                         trackW, bounds.getHeight() - 12.0f);
         g.setColour (juce::Colour (0xff0a0a0c));
         g.fillRoundedRectangle (trackRect, trackW * 0.5f);
+        // Inner shadow at the top so the track reads as recessed into the
+        // strip - a subtle vertical fade just inside the top edge.
+        {
+            juce::ColourGradient innerShadow (juce::Colour (0x80000000),
+                                                trackRect.getX(), trackRect.getY(),
+                                                juce::Colour (0x00000000),
+                                                trackRect.getX(),
+                                                trackRect.getY() + 6.0f, false);
+            g.setGradientFill (innerShadow);
+            g.fillRoundedRectangle (trackRect, trackW * 0.5f);
+        }
         g.setColour (juce::Colour (0xff2a2a2e));
         g.drawRoundedRectangle (trackRect, trackW * 0.5f, 0.6f);
 
@@ -115,9 +126,14 @@ public:
         const float capH = 22.0f;
         const auto cap = juce::Rectangle<float> (cx - capW * 0.5f, sliderPos - capH * 0.5f, capW, capH);
 
-        // Cast shadow under the cap.
-        g.setColour (juce::Colour (0x80000000));
-        g.fillRoundedRectangle (cap.translated (0.0f, 2.0f), 3.0f);
+        // Soft drop shadow under the cap. Real Gaussian blur via
+        // juce::DropShadow looks like the cap is hovering above the
+        // track; the previous 2-px translated rectangle read as a
+        // graphic-design shadow rather than a physical one. Drawn first
+        // so the body gradient sits cleanly on top.
+        juce::DropShadow (juce::Colours::black.withAlpha (0.55f), 6,
+                            juce::Point<int> (0, 2))
+            .drawForRectangle (g, cap.toNearestInt());
 
         // Body gradient (top-bright, bottom-dark).
         juce::ColourGradient body (juce::Colour (0xffd0c8b0), cap.getX(), cap.getY(),

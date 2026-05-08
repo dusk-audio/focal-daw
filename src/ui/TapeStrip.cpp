@@ -151,6 +151,15 @@ TapeStrip::RegionHit TapeStrip::hitTestRegion (int x, int y) const noexcept
     return {};
 }
 
+void TapeStrip::setSelectedTrack (int t) noexcept
+{
+    if (t < 0 || t >= Session::kNumTracks) t = -1;
+    if (selectedTrack == t && selectedRegion == -1) return;
+    selectedTrack  = t;
+    selectedRegion = -1;
+    repaint();
+}
+
 void TapeStrip::rebuildPlaybackIfStopped()
 {
     // Re-prep the playback engine so the next play picks up the edited
@@ -400,6 +409,27 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
         return;
     }
 
+    // Left-click on the track label (the strip on the far left of each
+    // row, before the timeline column starts) selects that track without
+    // picking a region. Lets keyboard shortcuts (A / S / X) target a
+    // track that has no recorded regions yet.
+    {
+        const auto labelCol = labelColumnBounds();
+        if (labelCol.contains (e.x, e.y) && ! e.mods.isRightButtonDown())
+        {
+            for (int t = 0; t < Session::kNumTracks; ++t)
+            {
+                if (rowBounds (t).contains (e.x, e.y))
+                {
+                    selectedTrack  = t;
+                    selectedRegion = -1;
+                    repaint();
+                    return;
+                }
+            }
+        }
+    }
+
     if (! col.contains (e.x, e.y)) return;
 
     // Left-click on a region body or edge starts a drag (move / trim) AND
@@ -449,6 +479,29 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
         selectedRegion = hit.regionIdx;
         repaint();
         return;
+    }
+
+    // MIDI region hit-test - audio regions and MIDI regions never coexist
+    // on a single track (mode is exclusive), but we run this AFTER the
+    // audio test so the existing flow stays untouched. Click on a MIDI
+    // region body fires the host callback to spawn the piano-roll editor.
+    {
+        for (int t = 0; t < Session::kNumTracks; ++t)
+        {
+            const auto row = rowBounds (t);
+            if (! row.contains (e.x, e.y)) continue;
+            const auto& mr = session.track (t).midiRegions;
+            for (int i = (int) mr.size() - 1; i >= 0; --i)
+            {
+                const auto& r = mr[(size_t) i];
+                const int x0 = xForSample (r.timelineStart);
+                const int x1 = xForSample (r.timelineStart + r.lengthInSamples);
+                if (e.x < x0 || e.x > x1) continue;
+                if (onMidiRegionClicked) onMidiRegionClicked (t, i);
+                return;
+            }
+            break;
+        }
     }
 
     // Click on empty timeline → seek the playhead AND clear the selection.
@@ -1010,6 +1063,57 @@ void TapeStrip::paint (juce::Graphics& g)
                     g.setFont (juce::Font (juce::FontOptions (8.0f, juce::Font::bold)));
                     g.drawText (juce::String ((int) region.previousTakes.size() + 1),
                                  badge, juce::Justification::centred, false);
+                }
+            }
+        }
+
+        // MIDI regions on this track. Same anchor + bounds math as audio
+        // regions; the inside paints a stylised note-pile (small dots at
+        // each note's start position, vertically distributed by pitch)
+        // so the user can read note density at a glance from the timeline.
+        const auto& midiRegions = session.track (t).midiRegions;
+        for (const auto& region : midiRegions)
+        {
+            const int x0 = xForSample (region.timelineStart);
+            const int x1 = xForSample (region.timelineStart + region.lengthInSamples);
+            if (x1 <= col.getX() || x0 >= col.getRight()) continue;
+
+            auto regionRect = juce::Rectangle<int> (x0, row.getY() + 1,
+                                                     juce::jmax (2, x1 - x0),
+                                                     row.getHeight() - 2)
+                                  .getIntersection (col.withTrimmedTop (1).withTrimmedBottom (1));
+            if (regionRect.isEmpty()) continue;
+
+            // Block fill - desaturated track colour with a subtle inset
+            // so it reads "MIDI" vs the brighter audio block colour.
+            const auto base = session.track (t).colour;
+            g.setColour (base.withMultipliedSaturation (0.5f).withMultipliedBrightness (0.55f));
+            g.fillRoundedRectangle (regionRect.toFloat(), 2.0f);
+            g.setColour (base.withAlpha (0.85f));
+            g.drawRoundedRectangle (regionRect.toFloat().reduced (0.5f), 2.0f, 0.8f);
+
+            // Note dots. Walk the region's notes; each note's start tick
+            // converted back to a fraction of region length gives an X
+            // position; pitch (0..127) gives a Y position inside the
+            // region rect. Caps the per-region dot count to keep paint
+            // cheap on dense regions.
+            if (region.lengthInTicks > 0 && ! region.notes.empty())
+            {
+                const float rx = (float) regionRect.getX();
+                const float ry = (float) regionRect.getY();
+                const float rw = (float) regionRect.getWidth();
+                const float rh = (float) regionRect.getHeight();
+                const float dotSize = juce::jmax (1.0f, rh * 0.07f);
+                g.setColour (base.brighter (0.4f).withAlpha (0.85f));
+                const int maxDots = juce::jmin ((int) region.notes.size(), 256);
+                for (int i = 0; i < maxDots; ++i)
+                {
+                    const auto& n = region.notes[(size_t) i];
+                    const float fx = (float) n.startTick / (float) region.lengthInTicks;
+                    const float fy = 1.0f - juce::jlimit (0.0f, 1.0f, (float) n.noteNumber / 127.0f);
+                    g.fillRect (rx + fx * rw - dotSize * 0.5f,
+                                 ry + fy * rh - dotSize * 0.5f,
+                                 dotSize, dotSize);
                 }
             }
         }

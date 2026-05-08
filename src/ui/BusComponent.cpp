@@ -61,6 +61,14 @@ BusComponent::BusComponent (Bus& b, Session& s, int idx)
     };
     addAndMakeVisible (nameLabel);
 
+    // Analog VU meter at the top of the strip - shows post-DSP bus level
+    // with classic 300 ms ballistics so the user can read average level the
+    // way they would on an analog console. Stereo: two needles overlaid on
+    // one face (L = black, R = oxblood).
+    vuMeter = std::make_unique<AnalogVuMeter> (
+        &bus.strip.meterPostBusLDb, &bus.strip.meterPostBusRDb);
+    addAndMakeVisible (*vuMeter);
+
     const auto eqGreen = juce::Colour (0xff80c090);
     const auto compGold = juce::Colour (0xffe0c050);
     // Pan red - matches the channel-strip pan colour (0xffc04040) so the
@@ -309,6 +317,17 @@ void BusComponent::paint (juce::Graphics& g)
                 auto fillRect = juce::Rectangle<float> (bar.getX() + 1.5f,
                                                          bar.getBottom() - 2.0f - fillH,
                                                          bar.getWidth() - 3.0f, fillH);
+                // Soft outer glow - two stacked translucent rectangles in
+                // the meter's tip colour. Cheap (no Gaussian blur) and the
+                // alpha falloff reads as bloom around the lit area.
+                const auto tipCol = (frac > 0.85f) ? juce::Colour (0xffff5050)
+                                                    : (frac > 0.65f) ? juce::Colour (0xffe0c050)
+                                                                       : juce::Colour (0xff70c060);
+                g.setColour (tipCol.withAlpha (0.18f));
+                g.fillRoundedRectangle (fillRect.expanded (1.5f), 2.0f);
+                g.setColour (tipCol.withAlpha (0.10f));
+                g.fillRoundedRectangle (fillRect.expanded (3.0f), 3.0f);
+
                 juce::ColourGradient grad (juce::Colour (0xff70c060),
                                             fillRect.getX(), fillRect.getBottom(),
                                             juce::Colour (0xffff5050),
@@ -394,6 +413,16 @@ void BusComponent::resized()
     area.removeFromTop (6);
     nameLabel.setBounds (area.removeFromTop (20));
     area.removeFromTop (3);
+
+    // Analog VU meter spans the full strip width with the photo's ~2.4:1
+    // aspect ratio. Sits between the name label and the EQ block so the
+    // user reads level first (the most common monitoring task).
+    if (vuMeter != nullptr)
+    {
+        const int vuH = juce::jmax (28, area.getWidth() * 5 / 12);
+        vuMeter->setBounds (area.removeFromTop (vuH));
+        area.removeFromTop (3);
+    }
 
     // No plugin slots on buses - reserved space stays a thin gap so the
     // strip's vertical layout matches the channel strips' rhythm. Plugins

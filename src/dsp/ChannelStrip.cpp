@@ -238,6 +238,8 @@ void ChannelStrip::updateCompParameters() noexcept
 
 void ChannelStrip::processAndAccumulate (const float* inL,
                                          const float* inR,
+                                         juce::MidiBuffer& trackMidi,
+                                         bool  isMidi,
                                          float* masterL, float* masterR,
                                          const std::array<float*, kNumBuses>& busL,
                                          const std::array<float*, kNumBuses>& busR,
@@ -254,12 +256,16 @@ void ChannelStrip::processAndAccumulate (const float* inL,
 
     if (numSamples == 0) return;
 
-    const bool stereo = (inR != nullptr);
+    // MIDI tracks always run a stereo audio path: the instrument plugin fills
+    // L+R from MIDI events and the rest of the strip processes that as a
+    // stereo signal. Mono / Stereo audio tracks behave as before.
+    const bool stereo = (inR != nullptr) || isMidi;
 
-    // No params or no input → tick the smoothers down (so M/S transitions
-    // sound smooth) and bail. The strip produces silence and exposes no
-    // processed buffer to the recorder.
-    if (paramsRef == nullptr || inL == nullptr)
+    // No params, or an audio track with no input → tick the smoothers down
+    // (so M/S transitions sound smooth) and bail. MIDI tracks are exempt
+    // from the inL == nullptr bail because their audio source comes from
+    // the plugin, not an input buffer.
+    if (paramsRef == nullptr || (inL == nullptr && ! isMidi))
     {
         faderGain.setTargetValue (0.0f);
         for (auto& s : busGain)     s.setTargetValue (0.0f);
@@ -321,7 +327,8 @@ void ChannelStrip::processAndAccumulate (const float* inL,
         // Per-channel insert plugin (post-phase-invert, pre-EQ). No-op when no
         // plugin loaded or slot bypassed; lock-free atomic read of the instance
         // pointer otherwise.
-        pluginSlot.processMonoBlock (tempMono.data(), numSamples);
+        pluginMidiScratch.clear();
+        pluginSlot.processMonoBlock (tempMono.data(), numSamples, pluginMidiScratch);
 
 #if FOCAL_HAS_DUSK_DSP
         if (oversamplerStages > 0 && oversamplerMono != nullptr)
@@ -378,22 +385,36 @@ void ChannelStrip::processAndAccumulate (const float* inL,
     }
     else
     {
-        // Stereo path. Copy inL / inR into the pre-allocated stereo scratch,
-        // then run EQ + Comp on a 2-channel AudioBuffer view. Plugin slot
-        // processes stereo. Phase invert flips both channels (preserves the
-        // L/R relative phase relationship).
+        // Stereo / MIDI path. Stereo tracks copy inL/inR into the pre-
+        // allocated scratch and run the (insert) plugin in place. MIDI
+        // tracks zero the scratch and let the (instrument) plugin fill it
+        // from the filtered per-track MIDI events. Both then proceed
+        // through the same EQ + Comp + accumulate pipeline.
         auto* L = tempStereoBuffer.getWritePointer (0);
         auto* R = tempStereoBuffer.getWritePointer (1);
-        std::memcpy (L, inL, sizeof (float) * (size_t) numSamples);
-        std::memcpy (R, inR, sizeof (float) * (size_t) numSamples);
 
-        if (paramsRef->phaseInvert.load (std::memory_order_relaxed))
+        if (isMidi)
         {
-            juce::FloatVectorOperations::negate (L, L, numSamples);
-            juce::FloatVectorOperations::negate (R, R, numSamples);
+            juce::FloatVectorOperations::clear (L, numSamples);
+            juce::FloatVectorOperations::clear (R, numSamples);
+            // Instrument plugins read MIDI and write audio. Phase invert is
+            // a no-op against generated content, so we don't apply it here.
+            pluginSlot.processStereoBlock (L, R, numSamples, trackMidi);
         }
+        else
+        {
+            std::memcpy (L, inL, sizeof (float) * (size_t) numSamples);
+            std::memcpy (R, inR, sizeof (float) * (size_t) numSamples);
 
-        pluginSlot.processStereoBlock (L, R, numSamples);
+            if (paramsRef->phaseInvert.load (std::memory_order_relaxed))
+            {
+                juce::FloatVectorOperations::negate (L, L, numSamples);
+                juce::FloatVectorOperations::negate (R, R, numSamples);
+            }
+
+            pluginMidiScratch.clear();
+            pluginSlot.processStereoBlock (L, R, numSamples, pluginMidiScratch);
+        }
 
 #if FOCAL_HAS_DUSK_DSP
         if (oversamplerStages > 0 && oversamplerStereo != nullptr)

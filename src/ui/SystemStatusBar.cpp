@@ -1,11 +1,15 @@
 #include "SystemStatusBar.h"
+#include "../dsp/ChordAnalyzer.h"
 
 namespace focal
 {
 SystemStatusBar::SystemStatusBar (AudioEngine& e) : engine (e)
 {
     setOpaque (true);
-    startTimerHz (4);
+    chordAnalyzer = std::make_unique<::ChordAnalyzer>();
+    // Bump the tick rate so chord readout follows playing at a usable
+    // latency. 10 Hz feels responsive without burning paint cycles.
+    startTimerHz (10);
     timerCallback();
 }
 
@@ -15,9 +19,17 @@ void SystemStatusBar::timerCallback()
 {
     const double sr = engine.getCurrentSampleRate();
     const int    bs = engine.getCurrentBlockSize();
-    const double cpu = engine.getDeviceManager().getCpuUsage();
+    // Engine-side CPU usage (smoothed callback wall-time / buffer audio-time).
+    // More predictive of xruns than AudioDeviceManager::getCpuUsage which
+    // averages over a longer window and includes time spent in JUCE/driver
+    // glue we don't control.
+    const double cpu = (double) engine.getCpuUsage();
     const int    engineXruns  = engine.getXRunCount();
     const int    backendXruns = engine.getBackendXRunCount();
+    lastCpuUsage     = cpu;
+    lastEngineXruns  = engineXruns;
+    lastBackendXruns = backendXruns;
+    lastAudioWarn    = ! engine.hasUsableOutputs() && sr > 0.0;
 
     if (sr > 0.0 && bs > 0)
     {
@@ -47,6 +59,40 @@ void SystemStatusBar::timerCallback()
     dspInfo = "DSP: " + juce::String ((int) std::round (cpu * 100.0)) + "%"
             + " (" + juce::String (engineXruns) + "/" + juce::String (backendXruns) + ")";
 
+    // Chord readout. Audio thread maintains heldMidiNotes; we snapshot
+    // here, fingerprint to skip re-analysis when nothing changed, and
+    // run the analyzer on the message thread (it allocates a vector +
+    // set internally). With <2 notes held, just blank - chord names
+    // require a triad's worth of context to be musically meaningful.
+    auto& s = engine.getSession();
+    std::vector<int> heldNotes;
+    int fingerprint = 0;
+    for (int n = 0; n < Session::kNumMidiNotes; ++n)
+    {
+        if (s.heldMidiNotes[(size_t) n].load (std::memory_order_relaxed))
+        {
+            heldNotes.push_back (n);
+            // Cheap mix into the fingerprint; collisions are tolerable
+            // (worst case = one missed re-analyze on a held chord).
+            fingerprint = fingerprint * 131 + (n + 1);
+        }
+    }
+    if (fingerprint != lastHeldFingerprint)
+    {
+        lastHeldFingerprint = fingerprint;
+        if (heldNotes.size() >= 2 && chordAnalyzer != nullptr)
+        {
+            const auto info = chordAnalyzer->analyze (heldNotes);
+            chordInfo = info.name.isNotEmpty()
+                ? juce::String (juce::CharPointer_UTF8 ("\xe2\x99\xaa  ")) + info.name
+                : juce::String();
+        }
+        else
+        {
+            chordInfo = {};
+        }
+    }
+
     repaint();
 }
 
@@ -61,9 +107,11 @@ void SystemStatusBar::paint (juce::Graphics& g)
                                                 12.0f, juce::Font::plain)));
 
     // Color the DSP segment red when CPU is high or either xrun counter
-    // moved off zero (engine-side OR backend-side).
-    const double cpu   = engine.getDeviceManager().getCpuUsage();
-    const int    xruns = engine.getXRunCount() + engine.getBackendXRunCount();
+    // moved off zero (engine-side OR backend-side). Read from the cached
+    // tick snapshot so paint colour and dspInfo text always agree - re-
+    // querying the engine here can race a fresh timer tick mid-frame.
+    const double cpu   = lastCpuUsage;
+    const int    xruns = lastEngineXruns + lastBackendXruns;
     const bool   warn  = cpu > 0.85 || xruns > 0;
 
     // DSP info now reads "DSP: 12% (3/0)" at worst - engine/backend xrun
@@ -71,10 +119,22 @@ void SystemStatusBar::paint (juce::Graphics& g)
     auto dspBounds = bounds.removeFromRight (140);
     bounds.removeFromRight (8);  // small gap
 
+    // Chord readout in the middle column. Held-notes-driven; blank when
+    // nothing's playing or fewer than 2 notes are held. Centre-aligned
+    // and a touch brighter than the telemetry text so it reads as the
+    // performance signal instead of mixing with the system data.
+    if (chordInfo.isNotEmpty())
+    {
+        auto chordBounds = bounds.removeFromRight (160);
+        bounds.removeFromRight (8);
+        g.setColour (juce::Colour (0xffd0d0d8));
+        g.drawText (chordInfo, chordBounds, juce::Justification::centredRight, false);
+    }
+
     // Audio segment goes red when the device opened with no outputs -
     // matches the "NO OUTPUTS" text override applied in timerCallback.
-    const bool audioWarn = ! engine.hasUsableOutputs() && engine.getCurrentSampleRate() > 0.0;
-    g.setColour (audioWarn ? juce::Colour (0xffe05050) : juce::Colour (0xffb0b0b8));
+    // Cached on the same tick so colour matches the rendered string.
+    g.setColour (lastAudioWarn ? juce::Colour (0xffe05050) : juce::Colour (0xffb0b0b8));
     g.drawText (audioInfo, bounds, juce::Justification::centredLeft, false);
 
     g.setColour (warn ? juce::Colour (0xffe05050) : juce::Colour (0xffb0b0b8));

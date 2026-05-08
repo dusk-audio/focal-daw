@@ -59,6 +59,11 @@ private:
 
     std::array<PluginSlot, kMaxPlugins> slots;
 
+    // Empty MIDI buffer threaded through the slots' processStereoBlock calls.
+    // Aux lanes host effect plugins only, so this stays empty - kept as a
+    // member purely so the audio thread doesn't default-construct one.
+    juce::MidiBuffer pluginMidiScratch;
+
     void updateGainTarget() noexcept;
 };
 } // namespace focal

@@ -57,11 +57,13 @@ juce::DynamicObject::Ptr trackToObject (const Track& t)
     obj->setProperty ("mute",           t.strip.mute.load());
     obj->setProperty ("solo",           t.strip.solo.load());
     obj->setProperty ("phase_invert",   t.strip.phaseInvert.load());
+    obj->setProperty ("fader_group",    t.strip.faderGroupId.load());
     obj->setProperty ("input_monitor",  t.inputMonitor.load());
     obj->setProperty ("print_effects",  t.printEffects.load());
     obj->setProperty ("input_source",   t.inputSource.load());
     obj->setProperty ("input_source_r", t.inputSourceR.load());
     obj->setProperty ("midi_input_idx", t.midiInputIndex.load());
+    obj->setProperty ("midi_channel",   t.midiChannel.load());
     obj->setProperty ("track_mode",     t.mode.load());
 
     juce::Array<juce::var> buses;
@@ -157,6 +159,97 @@ juce::DynamicObject::Ptr trackToObject (const Track& t)
     }
     obj->setProperty ("regions", regions);
 
+    // MIDI regions. Same shape as audio regions (timelineStart + length)
+    // but holds events in tick time instead of a WAV file path. Notes and
+    // CCs are flat arrays so the JSON stays compact even on dense regions.
+    // Only serialised when the track actually has MIDI data; absent for
+    // audio tracks so existing sessions don't gain noise.
+    if (! t.midiRegions.empty())
+    {
+        juce::Array<juce::var> midiRegions;
+        for (auto& r : t.midiRegions)
+        {
+            auto* rObj = new juce::DynamicObject();
+            rObj->setProperty ("timeline_start",   (juce::int64) r.timelineStart);
+            rObj->setProperty ("length_samples",   (juce::int64) r.lengthInSamples);
+            rObj->setProperty ("length_ticks",     (juce::int64) r.lengthInTicks);
+
+            juce::Array<juce::var> notes;
+            notes.ensureStorageAllocated ((int) r.notes.size());
+            for (const auto& n : r.notes)
+            {
+                auto* nObj = new juce::DynamicObject();
+                nObj->setProperty ("ch",    n.channel);
+                nObj->setProperty ("note",  n.noteNumber);
+                nObj->setProperty ("vel",   n.velocity);
+                nObj->setProperty ("start", (juce::int64) n.startTick);
+                nObj->setProperty ("len",   (juce::int64) n.lengthInTicks);
+                notes.add (juce::var (nObj));
+            }
+            rObj->setProperty ("notes", notes);
+
+            if (! r.ccs.empty())
+            {
+                juce::Array<juce::var> ccs;
+                ccs.ensureStorageAllocated ((int) r.ccs.size());
+                for (const auto& c : r.ccs)
+                {
+                    auto* cObj = new juce::DynamicObject();
+                    cObj->setProperty ("ch",   c.channel);
+                    cObj->setProperty ("ctrl", c.controller);
+                    cObj->setProperty ("val",  c.value);
+                    cObj->setProperty ("at",   (juce::int64) c.atTick);
+                    ccs.add (juce::var (cObj));
+                }
+                rObj->setProperty ("ccs", ccs);
+            }
+
+            // MIDI take history mirrors audio: previously-recorded versions
+            // of the same range stack here when an overdub fully overlaps
+            // an existing region.
+            if (! r.previousTakes.empty())
+            {
+                juce::Array<juce::var> prior;
+                for (const auto& take : r.previousTakes)
+                {
+                    auto* tObj = new juce::DynamicObject();
+                    tObj->setProperty ("length_ticks", (juce::int64) take.lengthInTicks);
+                    juce::Array<juce::var> tnotes;
+                    for (const auto& n : take.notes)
+                    {
+                        auto* nObj = new juce::DynamicObject();
+                        nObj->setProperty ("ch",    n.channel);
+                        nObj->setProperty ("note",  n.noteNumber);
+                        nObj->setProperty ("vel",   n.velocity);
+                        nObj->setProperty ("start", (juce::int64) n.startTick);
+                        nObj->setProperty ("len",   (juce::int64) n.lengthInTicks);
+                        tnotes.add (juce::var (nObj));
+                    }
+                    tObj->setProperty ("notes", tnotes);
+                    if (! take.ccs.empty())
+                    {
+                        juce::Array<juce::var> tccs;
+                        for (const auto& c : take.ccs)
+                        {
+                            auto* cObj = new juce::DynamicObject();
+                            cObj->setProperty ("ch",   c.channel);
+                            cObj->setProperty ("ctrl", c.controller);
+                            cObj->setProperty ("val",  c.value);
+                            cObj->setProperty ("at",   (juce::int64) c.atTick);
+                            tccs.add (juce::var (cObj));
+                        }
+                        tObj->setProperty ("ccs", tccs);
+                    }
+                    prior.add (juce::var (tObj));
+                }
+                rObj->setProperty ("previous_takes", prior);
+            }
+
+            midiRegions.add (juce::var (rObj));
+        }
+        obj->setProperty ("midi_regions", midiRegions);
+    }
+
     // Automation: per-strip mode + one array per non-empty lane. Empty
     // lanes are omitted to keep session.json compact for the common case
     // (no automation recorded yet). The "automation" object is omitted
@@ -242,11 +335,13 @@ void restoreTrack (Track& t, const juce::var& v)
     setBool  (t.strip.mute,         "mute");
     setBool  (t.strip.solo,         "solo");
     setBool  (t.strip.phaseInvert,  "phase_invert");
+    setInt   (t.strip.faderGroupId, "fader_group");
     setBool  (t.inputMonitor,       "input_monitor");
     setBool  (t.printEffects,       "print_effects");
     setInt   (t.inputSource,        "input_source");
     setInt   (t.inputSourceR,       "input_source_r");
     setInt   (t.midiInputIndex,     "midi_input_idx");
+    setInt   (t.midiChannel,        "midi_channel");
     setInt   (t.mode,               "track_mode");
 
     if (auto buses = v["bus_assign"]; buses.isArray())
@@ -403,6 +498,77 @@ void restoreTrack (Track& t, const juce::var& v)
             t.regions.push_back (std::move (r));
         }
     }
+
+    // MIDI regions. Symmetric with the writer above; absent for audio
+    // tracks. Helpers parse note + cc arrays out of a juce::var so the
+    // top-level region and each take share the same code path.
+    // Clamp every parsed field to its MIDI-spec range so a hand-edited or
+    // truncated session.json can't seed out-of-range values into the model.
+    auto parseNotes = [] (const juce::var& notesVar, std::vector<MidiNote>& dst)
+    {
+        if (! notesVar.isArray()) return;
+        dst.reserve ((size_t) notesVar.size());
+        for (int k = 0; k < notesVar.size(); ++k)
+        {
+            auto nv = notesVar[k];
+            if (! nv.isObject()) continue;
+            MidiNote n;
+            n.channel       = juce::jlimit (1, 16,  nv.hasProperty ("ch")    ? (int) nv["ch"]    : 1);
+            n.noteNumber    = juce::jlimit (0, 127, nv.hasProperty ("note")  ? (int) nv["note"]  : 60);
+            n.velocity      = juce::jlimit (1, 127, nv.hasProperty ("vel")   ? (int) nv["vel"]   : 100);
+            n.startTick     = juce::jmax<juce::int64> (0, nv.hasProperty ("start") ? (juce::int64) nv["start"] : 0);
+            n.lengthInTicks = juce::jmax<juce::int64> (0, nv.hasProperty ("len")   ? (juce::int64) nv["len"]   : 0);
+            dst.push_back (n);
+        }
+    };
+    auto parseCcs = [] (const juce::var& ccsVar, std::vector<MidiCc>& dst)
+    {
+        if (! ccsVar.isArray()) return;
+        dst.reserve ((size_t) ccsVar.size());
+        for (int k = 0; k < ccsVar.size(); ++k)
+        {
+            auto cv = ccsVar[k];
+            if (! cv.isObject()) continue;
+            MidiCc c;
+            c.channel    = juce::jlimit (1, 16,  cv.hasProperty ("ch")   ? (int) cv["ch"]   : 1);
+            c.controller = juce::jlimit (0, 127, cv.hasProperty ("ctrl") ? (int) cv["ctrl"] : 0);
+            c.value      = juce::jlimit (0, 127, cv.hasProperty ("val")  ? (int) cv["val"]  : 0);
+            c.atTick     = juce::jmax<juce::int64> (0, cv.hasProperty ("at")   ? (juce::int64) cv["at"] : 0);
+            dst.push_back (c);
+        }
+    };
+
+    t.midiRegions.clear();
+    if (auto midiRegions = v["midi_regions"]; midiRegions.isArray())
+    {
+        for (int i = 0; i < midiRegions.size(); ++i)
+        {
+            auto rv = midiRegions[i];
+            if (! rv.isObject()) continue;
+            MidiRegion r;
+            r.timelineStart   = (juce::int64) rv["timeline_start"];
+            r.lengthInSamples = (juce::int64) rv["length_samples"];
+            r.lengthInTicks   = (juce::int64) rv["length_ticks"];
+            parseNotes (rv["notes"], r.notes);
+            parseCcs   (rv["ccs"],   r.ccs);
+
+            if (auto prior = rv["previous_takes"]; prior.isArray())
+            {
+                for (int k = 0; k < prior.size(); ++k)
+                {
+                    auto tv = prior[k];
+                    if (! tv.isObject()) continue;
+                    MidiTakeRef take;
+                    take.lengthInTicks = (juce::int64) tv["length_ticks"];
+                    parseNotes (tv["notes"], take.notes);
+                    parseCcs   (tv["ccs"],   take.ccs);
+                    r.previousTakes.push_back (std::move (take));
+                }
+            }
+
+            t.midiRegions.push_back (std::move (r));
+        }
+    }
 }
 
 void restoreBus (Bus& a, const juce::var& v)
@@ -528,6 +694,32 @@ bool SessionSerializer::save (const Session& s, const juce::File& target)
     tport->setProperty ("metronome_enabled", s.metronomeEnabled.load());
     tport->setProperty ("metronome_vol_db",  s.metronomeVolDb.load());
     tport->setProperty ("count_in_enabled",  s.countInEnabled.load());
+    // Tascam-style transport-cluster state. Persist so the user's
+    // jumpback amount and last-record point survive a reload.
+    tport->setProperty ("jumpback_seconds",   (double) s.jumpbackSeconds.load());
+    tport->setProperty ("last_record_point",  (juce::int64) s.lastRecordPointSamples.load());
+    tport->setProperty ("pre_roll_seconds",   (double) s.preRollSeconds.load());
+    tport->setProperty ("post_roll_seconds",  (double) s.postRollSeconds.load());
+
+    // MIDI controller bindings. Each entry stamps a (channel, dataNumber,
+    // trigger) source onto a target enum + per-strip index. Only emit
+    // when at least one binding exists so the JSON stays compact for
+    // sessions that never wire a controller.
+    if (! s.midiBindings.empty())
+    {
+        juce::Array<juce::var> arr;
+        for (const auto& b : s.midiBindings)
+        {
+            auto* o = new juce::DynamicObject();
+            o->setProperty ("channel",     b.channel);
+            o->setProperty ("data",        b.dataNumber);
+            o->setProperty ("trigger",     (int) b.trigger);
+            o->setProperty ("target",      (int) b.target);
+            o->setProperty ("target_idx",  b.targetIndex);
+            arr.add (juce::var (o));
+        }
+        tport->setProperty ("midi_bindings", arr);
+    }
     tport->setProperty ("oversampling_factor", s.oversamplingFactor.load());
     root->setProperty ("transport", juce::var (tport));
 
@@ -662,6 +854,53 @@ bool SessionSerializer::load (Session& s, const juce::File& source)
         if (tport.hasProperty ("metronome_enabled")) s.metronomeEnabled.store ((bool)   tport["metronome_enabled"]);
         if (tport.hasProperty ("metronome_vol_db"))  s.metronomeVolDb.store   ((float) (double) tport["metronome_vol_db"]);
         if (tport.hasProperty ("count_in_enabled"))  s.countInEnabled.store   ((bool)   tport["count_in_enabled"]);
+        if (tport.hasProperty ("jumpback_seconds"))  s.jumpbackSeconds.store  ((float)  (double) tport["jumpback_seconds"]);
+        if (tport.hasProperty ("last_record_point")) s.lastRecordPointSamples.store ((juce::int64) tport["last_record_point"]);
+        if (tport.hasProperty ("pre_roll_seconds"))  s.preRollSeconds.store   ((float)  (double) tport["pre_roll_seconds"]);
+        if (tport.hasProperty ("post_roll_seconds")) s.postRollSeconds.store  ((float)  (double) tport["post_roll_seconds"]);
+
+        s.midiBindings.clear();
+        if (auto arr = tport["midi_bindings"]; arr.isArray())
+        {
+            for (int i = 0; i < arr.size(); ++i)
+            {
+                auto v = arr[i];
+                if (! v.isObject()) continue;
+                MidiBinding b;
+                b.channel     = juce::jlimit (0, 16,
+                    v.hasProperty ("channel") ? (int) v["channel"] : 0);
+                b.dataNumber  = juce::jlimit (0, 127,
+                    v.hasProperty ("data") ? (int) v["data"] : 0);
+                const int rawTrig = v.hasProperty ("trigger") ? (int) v["trigger"]
+                                                              : (int) MidiBindingTrigger::CC;
+                b.trigger = (rawTrig == (int) MidiBindingTrigger::Note)
+                    ? MidiBindingTrigger::Note : MidiBindingTrigger::CC;
+                const int rawTgt = v.hasProperty ("target") ? (int) v["target"]
+                                                            : (int) MidiBindingTarget::None;
+                // Map every legal enumerator; everything else falls back to
+                // None so isValid() drops the binding.
+                switch (rawTgt)
+                {
+                    case (int) MidiBindingTarget::TransportPlay:
+                    case (int) MidiBindingTarget::TransportStop:
+                    case (int) MidiBindingTarget::TransportRecord:
+                    case (int) MidiBindingTarget::TransportToggle:
+                    case (int) MidiBindingTarget::TrackFader:
+                    case (int) MidiBindingTarget::TrackPan:
+                    case (int) MidiBindingTarget::TrackMute:
+                    case (int) MidiBindingTarget::TrackSolo:
+                    case (int) MidiBindingTarget::TrackArm:
+                    case (int) MidiBindingTarget::MasterFader:
+                        b.target = (MidiBindingTarget) rawTgt; break;
+                    default:
+                        b.target = MidiBindingTarget::None; break;
+                }
+                b.targetIndex = juce::jlimit (0, Session::kNumTracks - 1,
+                    v.hasProperty ("target_idx") ? (int) v["target_idx"] : 0);
+                if (b.isValid())
+                    s.midiBindings.push_back (b);
+            }
+        }
         if (tport.hasProperty ("oversampling_factor"))
         {
             const int f = (int) tport["oversampling_factor"];

@@ -72,6 +72,14 @@ public:
     // EQ + Comp on a single channel and pans the mono signal to (L, R) on
     // accumulation. With a non-null inR the strip processes 2 channels end-
     // to-end and applies (panGainL, panGainR) as a per-channel balance.
+    //
+    // When `isMidi` is true the strip ignores inL/inR entirely and instead
+    // sources its stereo audio from the loaded plugin (an instrument). The
+    // `trackMidi` buffer holds the per-track-filtered MIDI events for this
+    // block; the engine fills it before calling. EQ + Comp + sends + pan +
+    // fader run on the synth's stereo output exactly like a stereo audio
+    // track. `trackMidi` should be empty for non-MIDI calls.
+    //
     // Internals: HPF + 4-band EQ (single source from dsp-cores) → comp →
     // accumulates:
     //   • post-fader stereo signal into masterL/masterR (when not bus-routed)
@@ -80,6 +88,8 @@ public:
     //     pre- or post-fader per auxSendPreFader[N]
     void processAndAccumulate (const float* inL,
                                const float* inR,                   // nullptr = mono path
+                               juce::MidiBuffer& trackMidi,         // filtered MIDI for this track
+                               bool  isMidi,                        // true => synth source
                                float* masterL, float* masterR,
                                const std::array<float*, kNumBuses>& busL,
                                const std::array<float*, kNumBuses>& busR,
@@ -127,6 +137,12 @@ private:
     // so the user can drop a guitar amp / synth / character processor in
     // the signal path before the channel's EQ + comp shape it.
     PluginSlot pluginSlot;
+
+    // Empty MIDI buffer passed to the channel insert plugin. PluginSlot's
+    // processBlock now requires a MidiBuffer& for instrument hosting in
+    // 4a-5; insert effects ignore it. Held as a member so the audio thread
+    // never default-constructs one. Stays empty in the effect-insert path.
+    juce::MidiBuffer pluginMidiScratch;
 
 #if FOCAL_HAS_DUSK_DSP
     BritishEQProcessor eq;

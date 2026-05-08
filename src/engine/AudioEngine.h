@@ -11,6 +11,7 @@
 #include "../dsp/MasterBus.h"
 #include "../dsp/MasteringChain.h"
 #include "../dsp/Metronome.h"
+#include "../dsp/PitchDetector.h"
 #include "../session/Session.h"
 #include "MasteringPlayer.h"
 #include "PlaybackEngine.h"
@@ -23,7 +24,8 @@ namespace focal
 {
 // Phase 2 engine: input -> channel strip (live or playback source) -> aux/master.
 // Adds Transport state, recording (RecordManager), and playback (PlaybackEngine).
-class AudioEngine final : public juce::AudioIODeviceCallback
+class AudioEngine final : public juce::AudioIODeviceCallback,
+                            public juce::MidiInputCallback
 {
 public:
     // Workflow stages - drives which signal flow the audio callback runs
@@ -86,6 +88,17 @@ public:
     void stop();
     void record();
 
+    // Transport-cluster jumps. Message-thread only. The marker variants
+    // walk session.markers (already kept sorted by timelineSamples) and
+    // pick the nearest neighbour relative to the current playhead. With
+    // no markers, jumpToPrevMarker hits zero and jumpToNextMarker is a
+    // no-op (matches Tascam behaviour - no overshoot beyond known points).
+    void jumpToPrevMarker();
+    void jumpToNextMarker();
+    void jumpToZero();
+    void jumpToLastRecordPoint();
+    void jumpbackBySeconds();   // current playhead - jumpbackSeconds, clamped at 0
+
     void audioDeviceIOCallbackWithContext (const float* const* inputChannelData,
                                            int numInputChannels,
                                            float* const* outputChannelData,
@@ -95,6 +108,14 @@ public:
 
     void audioDeviceAboutToStart (juce::AudioIODevice* device) override;
     void audioDeviceStopped() override;
+
+    // juce::MidiInputCallback. Bound to AudioDeviceManager via
+    // addMidiInputDeviceCallback("", this) — empty deviceIdentifier means
+    // "all enabled MIDI inputs". The callback fires from JUCE's MIDI input
+    // thread (NOT the audio thread); we route to a per-input collector so
+    // the audio thread can drain a per-block MidiBuffer without locks.
+    void handleIncomingMidiMessage (juce::MidiInput* source,
+                                       const juce::MidiMessage& message) override;
 
     // Self-test entry: prepare engine state (strip/aux/master DSP, mix
     // buffers) for a given sample rate and block size WITHOUT a real
@@ -129,6 +150,13 @@ public:
     // audioDeviceIOCallbackWithContext.
     int    getXRunCount() const noexcept         { return xrunCount.load         (std::memory_order_relaxed); }
 
+    // Smoothed CPU usage as a 0..1 fraction of the buffer's wall-clock
+    // budget consumed by audioDeviceIOCallbackWithContext. 1.0 means the
+    // callback consumed the entire block period; xruns are imminent above
+    // ~0.85. Updated every callback with a one-pole LPF so the UI doesn't
+    // jitter on per-block spikes.
+    float  getCpuUsage() const noexcept          { return cpuUsage.load          (std::memory_order_relaxed); }
+
     // Backend-side xrun count (e.g. ALSA snd_pcm_recover EPIPE events). Read
     // from AudioIODevice::getXRunCount on the message thread; returns 0 if no
     // device is currently open. Independent from the engine-side counter
@@ -160,6 +188,7 @@ private:
     MasteringPlayer  masteringPlayer;
     MasteringChain   masteringChain;
     Metronome        metronome;
+    PitchDetector    pitchDetector;
     std::atomic<Stage> stage { Stage::Mixing };
 
     std::array<ChannelStrip, Session::kNumTracks> strips;
@@ -173,9 +202,30 @@ private:
     std::vector<float> playbackScratch;   // per-track playback L (or mono)
     std::vector<float> playbackScratchR;  // per-track playback R (stereo regions only)
 
+    // MIDI input plumbing. One MidiMessageCollector per registered MIDI
+    // input device (parallel to the device list). The MIDI input thread
+    // calls handleIncomingMidiMessage which addMessageToQueue's into the
+    // matching collector; the audio thread drains each collector per
+    // block via removeNextBlockOfMessages into perInputMidi[i] — both
+    // sides are lock-free per JUCE's MidiMessageCollector contract.
+    // Identifiers are cached so a hot-plug re-enumeration can keep
+    // existing collectors aligned to their devices.
+    juce::Array<juce::MidiDeviceInfo> midiInputDevices;
+    std::vector<std::unique_ptr<juce::MidiMessageCollector>> midiInputCollectors;
+    std::vector<juce::MidiBuffer> perInputMidi;
+    juce::MidiBuffer perTrackMidiScratch;  // reused per-block per-track filter target
+
+    // Construct-time-only wiring of MIDI input collectors. Mutates the
+    // three vectors above which the audio and MIDI threads then read
+    // lock-free, so a second call would race both. The body short-circuits
+    // on re-entry (release-build guard) and asserts (debug-build guard);
+    // together those keep the once-only contract enforceable.
+    void bindMidiInputCollectorsOnce();
+
     std::atomic<double> currentSampleRate { 0.0 };
     std::atomic<int>    currentBlockSize  { 0 };
     std::atomic<int>    xrunCount         { 0 };
+    std::atomic<float>  cpuUsage          { 0.0f };
 
     // Cached 1.0 / juce::Time::getHighResolutionTicksPerSecond(). The
     // tick->seconds conversion runs twice per audio callback (xrun watchdog
@@ -195,5 +245,16 @@ private:
     // sample so the metronome can tick a pre-roll, and writes are skipped
     // until the playhead catches up. INT64_MIN sentinel = no record active.
     std::atomic<juce::int64> activeRecordStart { std::numeric_limits<juce::int64>::min() };
+
+    // Audio-thread-only state for hanging-note protection. wasRolling holds
+    // the previous callback's transport-rolling state; lastBlockEndSample is
+    // the previous block's exclusive end. Together they let us detect two
+    // events that must trigger a per-block "All Notes Off" flush:
+    //   • Transport rolling -> stopped: any held note from playback or
+    //     live input would otherwise sustain forever.
+    //   • Playhead discontinuity (loop wrap, scrub): notes whose Note Off
+    //     event is after the jump never fire, so the synth gets stuck.
+    bool         wasRolling          = false;
+    juce::int64  lastBlockEndSample  = 0;
 };
 } // namespace focal

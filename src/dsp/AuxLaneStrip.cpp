@@ -45,8 +45,9 @@ void AuxLaneStrip::processStereoBlock (float* L, float* R, int numSamples) noexc
 
     // Plugins in series. Each slot is a no-op when nothing's loaded; the
     // time-budget watchdog inside PluginSlot auto-bypasses on stalls.
+    pluginMidiScratch.clear();
     for (auto& s : slots)
-        s.processStereoBlock (L, R, numSamples);
+        s.processStereoBlock (L, R, numSamples, pluginMidiScratch);
 
     // Return level + meter peak.
     float postPeakL = 0.0f, postPeakR = 0.0f;

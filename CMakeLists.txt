@@ -73,8 +73,12 @@ target_sources(Focal PRIVATE
     src/session/MarkerEditActions.cpp
     src/session/RecentSessions.cpp
     src/session/RegionEditActions.cpp
+    src/dsp/ChordAnalyzer.cpp
+    src/session/MidiBindings.cpp
     src/session/Session.cpp
     src/session/SessionSerializer.cpp
+    src/session/SessionTemplates.cpp
+    src/ui/AnalogVuMeter.cpp
     src/ui/AppConfig.cpp
     src/ui/AudioSettingsPanel.cpp
     src/ui/AuxLaneComponent.cpp
@@ -95,6 +99,7 @@ target_sources(Focal PRIVATE
     src/ui/MasteringLimiterEditor.cpp
     src/ui/MasteringView.cpp
     src/ui/MasterStripComponent.cpp
+    src/ui/PianoRollComponent.cpp
     src/ui/PluginPickerHelpers.cpp
     src/ui/SystemStatusBar.cpp
     src/ui/TapeStrip.cpp

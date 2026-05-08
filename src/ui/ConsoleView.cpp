@@ -18,6 +18,7 @@ ConsoleView::ConsoleView (Session& session, AudioEngine& engine) : sessionRef (s
     }
     masterStrip = std::make_unique<MasterStripComponent> (
         session.master(),
+        session,
 #if FOCAL_HAS_DUSK_DSP
         &engine.getMasterBus().getTapeProcessor());
 #else
@@ -202,5 +203,12 @@ void ConsoleView::setStripsMixingMode (bool mixing)
     for (auto& strip : strips)
         if (strip != nullptr)
             strip->setMixingMode (mixing);
+}
+
+void ConsoleView::setOnStripFocusRequested (std::function<void (int)> cb)
+{
+    for (auto& strip : strips)
+        if (strip != nullptr)
+            strip->onTrackFocusRequested = cb;
 }
 } // namespace focal

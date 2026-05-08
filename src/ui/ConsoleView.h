@@ -2,6 +2,7 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <array>
+#include <functional>
 #include <memory>
 #include "BusComponent.h"
 #include "ChannelStripComponent.h"
@@ -73,6 +74,12 @@ public:
     // each strip swaps its input/IN/ARM/PRINT block for a row of 4 AUX send
     // knobs (the tracking controls only matter while recording).
     void setStripsMixingMode (bool mixing);
+
+    // Wire each strip's onTrackFocusRequested callback. MainComponent uses
+    // this to forward strip clicks to the TapeStrip's track selection so
+    // keyboard shortcuts (A / S / X) target the strip the user touched
+    // even when no region has been selected.
+    void setOnStripFocusRequested (std::function<void (int)> cb);
 
 private:
     // SUMMARY can be requested by the user (TAPE button) OR by the layout

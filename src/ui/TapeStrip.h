@@ -54,6 +54,24 @@ public:
     bool pasteAtPlayhead();
     bool deleteSelectedRegion();
 
+    // Click-to-edit hook for MIDI regions. Fired when the user clicks the
+    // body of a MidiRegion in the timeline. The host (MainComponent) is
+    // expected to spawn the piano-roll overlay; this strip stays focused
+    // on layout / drawing and doesn't own the editor.
+    std::function<void (int trackIdx, int regionIdx)> onMidiRegionClicked;
+
+    // Selected track index (the track that owns the most-recently-clicked
+    // region) or -1 if nothing is selected. Used by keyboard shortcuts in
+    // MainComponent to target arm / solo / mute toggles at "the focus
+    // track". Returning the internal selection state avoids inventing a
+    // separate selection model.
+    int  getSelectedTrack() const noexcept { return selectedTrack; }
+
+    // Set track focus from outside (e.g. ChannelStripComponent click).
+    // Clears any region selection since the user's gesture wasn't
+    // region-specific. Repaints so the highlighted row updates.
+    void setSelectedTrack (int t) noexcept;
+
 private:
     void timerCallback() override;
     void changeListenerCallback (juce::ChangeBroadcaster*) override;

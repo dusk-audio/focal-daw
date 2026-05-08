@@ -1,6 +1,7 @@
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <array>
 #include "../engine/AudioEngine.h"
 
 namespace focal
@@ -13,15 +14,29 @@ namespace focal
 class TransportIconButton final : public juce::Button
 {
 public:
-    enum class Icon { Stop, Play, Record };
+    enum class Icon { Stop, Play, Record, Rewind, Forward };
 
     TransportIconButton (const juce::String& name, Icon icon, juce::Colour activeColour);
 
     void paintButton (juce::Graphics&, bool isMouseOver, bool isButtonDown) override;
 
+    // True while held since the most recent mouseDown. Used by the
+    // TransportBar's scrub timer to drive 10x playhead motion. Public so
+    // the timer can poll it without friending the bar; the read is cheap
+    // (a single member access) and it's set by JUCE's standard
+    // Button::isDown() infrastructure that we shadow here.
+    bool isHeldDown() const noexcept { return heldDown; }
+
+protected:
+    // Track held-state on top of JUCE's stateChanged so we can poll
+    // synchronously from a timer without needing Button::isDown which
+    // queries via the underlying state machine.
+    void buttonStateChanged() override;
+
 private:
     Icon iconType;
     juce::Colour activeColour;
+    bool heldDown = false;
 };
 
 class TransportBar final : public juce::Component, private juce::Timer
@@ -32,6 +47,10 @@ public:
 
     void paint (juce::Graphics&) override;
     void resized() override;
+    // Catches right-clicks routed up from child buttons via
+    // addMouseListener. Currently used by the jumpback button to surface
+    // its preset menu on a secondary click.
+    void mouseDown (const juce::MouseEvent&) override;
 
     // MainComponent overlays the stage + bank buttons on top of this bar so
     // it can show all the controls in a single row. When that overlay is
@@ -44,12 +63,29 @@ private:
     void refreshButtonStates();
 
     AudioEngine& engine;
-    TransportIconButton stopButton   { "Stop",   TransportIconButton::Icon::Stop,
+    TransportIconButton stopButton   { "Stop",     TransportIconButton::Icon::Stop,
                                         juce::Colour (0xffd0d0d0) };
-    TransportIconButton playButton   { "Play",   TransportIconButton::Icon::Play,
+    TransportIconButton rewButton    { "Rewind",   TransportIconButton::Icon::Rewind,
+                                        juce::Colour (0xffd0d0d0) };
+    TransportIconButton playButton   { "Play",     TransportIconButton::Icon::Play,
                                         juce::Colour (0xff60c060) };
-    TransportIconButton recordButton { "Record", TransportIconButton::Icon::Record,
+    TransportIconButton ffwdButton   { "Forward",  TransportIconButton::Icon::Forward,
+                                        juce::Colour (0xffd0d0d0) };
+    TransportIconButton recordButton { "Record",   TransportIconButton::Icon::Record,
                                         juce::Colour (0xffd03030) };
+
+    // Brief-press vs hold dispatch for REW / FFWD.
+    //   < kHoldThresholdMs   -> brief press; fires the marker-jump or
+    //                            stop-modifier intent on mouse-up.
+    //   >= kHoldThresholdMs  -> hold; the scrub timer drives the playhead
+    //                            until the button releases.
+    static constexpr int kHoldThresholdMs   = 180;
+    static constexpr float kScrubMultiplier = 10.0f;
+    juce::int64 rewPressedAtMs  = 0;
+    juce::int64 ffwdPressedAtMs = 0;
+    bool        rewIsScrubbing  = false;
+    bool        ffwdIsScrubbing = false;
+    juce::int64 lastScrubTickMs = 0;
     juce::TextButton loopToggle    { "LOOP" };
     juce::TextButton punchToggle   { "PUNCH" };
     juce::TextButton snapToggle    { "SNAP" };
@@ -57,6 +93,26 @@ private:
     juce::TextButton countInToggle { "C/I" };
     juce::Label      bpmCaption;
     juce::Label      bpmValue;
+    juce::TextButton tapButton      { "TAP" };
+    juce::TextButton jumpbackButton { juce::CharPointer_UTF8 ("\xc2\xab 5s") };  // "« 5s"
+    juce::TextButton tuneButton     { "TUNE" };
+    void refreshJumpbackLabel();
+    void showJumpbackMenu();
+    // Right-click on the PUNCH toggle opens a popup with pre-roll /
+    // post-roll value pickers + an explanation banner.
+    void showPunchSettingsMenu();
+
+    // Tap-tempo state. Each click stamps now() into the ring; on each
+    // subsequent click within the kTapTimeoutMs window we average the
+    // inter-tap interval over the last kTapWindow stamps and write the
+    // resulting BPM to the session. A tap after the timeout resets the
+    // ring (the user's starting a new pulse). Message-thread-only state.
+    static constexpr int kTapWindow      = 4;
+    static constexpr int kTapTimeoutMs   = 2000;
+    std::array<juce::int64, kTapWindow> tapStamps {};
+    int  tapStampCount = 0;
+    void onTap();
+
     juce::TextButton tapeToggle    { juce::CharPointer_UTF8 ("\xe2\x96\xbe SUMMARY") };  // "▾ SUMMARY" - toggles the arrangement/summary view
     juce::Label      clockLabel;
     juce::Label      hintLabel;
@@ -66,6 +122,11 @@ public:
     // toggle state has flipped - the new collapsed/expanded state is the
     // boolean argument (true = expanded).
     std::function<void (bool)> onTapeStripToggle;
+
+    // Fired when the TUNE button is clicked. MainComponent owns the
+    // overlay (similar to the piano roll modal) so this stays decoupled
+    // from any specific track-selection lookup.
+    std::function<void()> onTunerToggle;
 
     void setTapeStripExpanded (bool expanded);
     bool isTapeStripExpanded() const;

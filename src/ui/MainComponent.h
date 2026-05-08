@@ -3,6 +3,7 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <memory>
+#include "EmbeddedModal.h"
 #include "FocalLookAndFeel.h"
 #include "ConsoleView.h"
 #include "../engine/AudioEngine.h"
@@ -41,6 +42,7 @@ public:
 private:
     void openAudioSettings();
     void openBounceDialog();
+    void cleanOutUnreferencedFiles();
     void launchStartupDialog();
     void switchToStage (AudioEngine::Stage);
     void doMixdown();
@@ -110,7 +112,9 @@ private:
     // it up at app exit (via ScopedJuceInitialiser_GUI's destructor, which
     // runs AFTER us), the listener removal would dereference a freed
     // AudioDeviceManager → SIGSEGV.
-    juce::Component::SafePointer<juce::DialogWindow> activeAudioDialog;
+    EmbeddedModal audioSettingsModal;
+    EmbeddedModal mixdownModal;
+    EmbeddedModal bounceModal;
     juce::Label statusLabel;
     std::unique_ptr<ConsoleView> consoleView;
     std::unique_ptr<class TransportBar>     transportBar;
@@ -124,5 +128,29 @@ private:
     std::unique_ptr<class StartupDialog> startupDialog;
     std::unique_ptr<class DimOverlay>    startupDim;
     void dismissStartupDialog();
+
+    // Piano-roll overlay - constructed on demand when the user clicks a
+    // MidiRegion in the tape strip; dismissed by clicking the dim backdrop
+    // or pressing Esc. The roll is the single visible exception to "no
+    // tabs / no hidden panels" per Focal.md (the spec calls it out).
+    // Tracks which region is currently open so the tape-strip click handler
+    // can toggle (same region) vs swap (different region).
+    std::unique_ptr<class DimOverlay>          pianoRollDim;
+    std::unique_ptr<class PianoRollComponent>  pianoRoll;
+    int pianoRollTrackIdx  = -1;
+    int pianoRollRegionIdx = -1;
+    void openPianoRoll  (int trackIdx, int regionIdx);
+    void closePianoRoll();
+
+    // Tuner overlay - same modal pattern as the piano roll. While open,
+    // a 30 Hz timer polls Session::tuneLatestHz / tuneLatestLevel into
+    // the overlay's setDetected(). The overlay's onDismiss closes the
+    // modal AND clears Session::tuneTrackIndex so the audio thread stops
+    // running the detector when nobody's looking.
+    std::unique_ptr<class DimOverlay>    tunerDim;
+    std::unique_ptr<class TunerOverlay>  tuner;
+    std::unique_ptr<class juce::Timer>   tunerPoller;
+    void toggleTuner();
+    void closeTuner();
 };
 } // namespace focal

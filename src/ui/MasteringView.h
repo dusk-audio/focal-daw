@@ -3,6 +3,7 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <memory>
+#include "EmbeddedModal.h"
 #include "../engine/AudioEngine.h"
 #include "../session/Session.h"
 
@@ -130,5 +131,9 @@ private:
     std::unique_ptr<juce::Component>              compPanelWrapper;
     juce::Label                                   compPanelTitle;
     juce::ToggleButton                            compPanelEnable { "ON" };
+
+    // Embedded modal host for the master export dialog. Same UX as the
+    // mixdown / bounce dialogs in MainComponent.
+    EmbeddedModal exportModal;
 };
 } // namespace focal
