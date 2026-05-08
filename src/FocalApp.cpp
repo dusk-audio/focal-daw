@@ -338,6 +338,18 @@ void FocalApp::initialise (const juce::String&)
         if (const auto* v = std::getenv ("FOCAL_ALSA_PERF_LOAD_US"))     opts.fakeDspLoadUs = juce::String (v).getIntValue();
         if (const auto* v = std::getenv ("FOCAL_ALSA_PERF_LOOPBACK"))    opts.runLoopback   = juce::String (v).getIntValue() != 0;
 
+        // Tier 2: comma-separated list, e.g. "44100,48000,96000". Empty
+        // (or unset) keeps the single-rate Tier 1 behaviour.
+        if (const auto* v = std::getenv ("FOCAL_ALSA_PERF_RATES"))
+        {
+            const auto tokens = juce::StringArray::fromTokens (juce::String (v), ",", "");
+            for (const auto& t : tokens)
+            {
+                const int rate = t.trim().getIntValue();
+                if (rate > 0) opts.sampleRates.add ((unsigned int) rate);
+            }
+        }
+
         const auto report = focal::AlsaPerformanceTest::runAll (opts);
         std::fprintf (stdout, "%s\n", report.toRawUTF8());
         std::fflush (stdout);

@@ -224,6 +224,14 @@ AlsaPerformanceTest::runBufferSweep (const Options& opts)
             continue;
         }
 
+        // Capture negotiated format info from the live device before stop,
+        // so the matrix report can highlight when the kernel snapped to a
+        // different bit depth (e.g. capture S32_LE / playback S24_3LE on
+        // class-compliant USB).
+        r.negotiatedBitDepth  = dev->getCurrentBitDepth();
+        r.activeOutChannels   = dev->getActiveOutputChannels().countNumberOfSetBits();
+        r.activeInChannels    = dev->getActiveInputChannels() .countNumberOfSetBits();
+
         juce::Thread::sleep (opts.durationMs);
 
         dev->stop();
@@ -473,45 +481,109 @@ AlsaPerformanceTest::runLoopbackProbe (const Options& opts)
 juce::String AlsaPerformanceTest::runAll (const Options& opts)
 {
     juce::StringArray out;
-    out.add ("=== ALSA Backend Performance Test (Tier 1) ===");
+
+    const bool willRunMatrix = opts.sampleRates.size() > 1;
+    out.add (willRunMatrix
+                ? juce::String ("=== ALSA Backend Performance Test (Tier 2: rate matrix) ===")
+                : juce::String ("=== ALSA Backend Performance Test (Tier 1) ==="));
     out.add (juce::String::formatted ("Time:     %s",
                                          juce::Time::getCurrentTime().toString (true, true).toRawUTF8()));
     out.add (juce::String::formatted ("Device:   %s", opts.deviceId.toRawUTF8()));
-    out.add (juce::String::formatted ("Rate:     %u Hz", opts.sampleRate));
+    if (willRunMatrix)
+    {
+        juce::StringArray rateLabels;
+        for (auto r : opts.sampleRates) rateLabels.add (juce::String (r));
+        out.add (juce::String::formatted ("Rates:    %s Hz", rateLabels.joinIntoString (", ").toRawUTF8()));
+    }
+    else
+    {
+        out.add (juce::String::formatted ("Rate:     %u Hz", opts.sampleRate));
+    }
     out.add (juce::String::formatted ("Duration: %d ms per buffer", opts.durationMs));
     out.add (juce::String::formatted ("DSP load: %d us / callback (synthetic)", opts.fakeDspLoadUs));
     out.add ("");
 
-    out.add ("--- Buffer-size sweep (output-only, silent) ---");
-    out.add (" Buffer | Budget    | Mean      | P95       | P99       | Max       | XRuns/run | Verdict");
-    out.add ("--------|-----------|-----------|-----------|-----------|-----------|-----------|---------");
+    // Build the rate list. Empty Options::sampleRates -> single rate from
+    // opts.sampleRate (Tier 1 behaviour). Non-empty -> Tier 2 matrix mode,
+    // a buffer sweep at each rate with its own table.
+    juce::Array<unsigned int> rates = opts.sampleRates;
+    if (rates.isEmpty())
+        rates.add (opts.sampleRate);
 
-    const auto sweep = runBufferSweep (opts);
-    int recommendedMin = -1;
-    for (const auto& r : sweep)
+    const bool matrixMode = rates.size() > 1;
+    out.add (juce::String (matrixMode ? "--- Rate x Buffer matrix (duplex, silent) ---"
+                                        : "--- Buffer-size sweep (duplex, silent) ---"));
+    out.add ("");
+
+    int globalRecommendedMin = -1;
+
+    for (unsigned int rate : rates)
     {
-        out.add (formatTableRow (r));
-        if (recommendedMin < 0 && (r.verdict == "SAFE" || r.verdict == "MARGINAL"))
+        Options perRate = opts;
+        perRate.sampleRate = rate;
+        const auto sweep = runBufferSweep (perRate);
+
+        // Per-rate header: pick negotiated format info from the first
+        // successful cell. If every cell failed to open at this rate,
+        // surface that explicitly.
+        juce::String formatLabel;
+        for (const auto& r : sweep)
         {
-            const auto bufStr = r.configuration.fromFirstOccurrenceOf ("buf=", false, false)
-                                                .upToFirstOccurrenceOf (" ", false, false);
-            recommendedMin = bufStr.getIntValue();
+            if (r.negotiatedBitDepth > 0)
+            {
+                formatLabel = juce::String::formatted ("%d-bit int / %d out, %d in",
+                                                          r.negotiatedBitDepth,
+                                                          r.activeOutChannels,
+                                                          r.activeInChannels);
+                break;
+            }
         }
-        if (r.details.isNotEmpty())
-            out.add (juce::String ("        ") + r.details);
-    }
-    out.add ("");
+        if (formatLabel.isEmpty())
+            formatLabel = "(no successful open at this rate)";
 
-    if (recommendedMin > 0)
-    {
-        out.add (juce::String::formatted ("Recommended minimum buffer for this hardware: %d frames", recommendedMin));
-        out.add (juce::String::formatted ("Safer choice with 50%% headroom:               %d frames", recommendedMin * 2));
+        out.add (juce::String::formatted ("Rate: %u Hz   Format: %s",
+                                             rate, formatLabel.toRawUTF8()));
+        out.add (" Buffer | Budget    | Mean      | P95       | P99       | Max       | XRuns/run | Verdict");
+        out.add ("--------|-----------|-----------|-----------|-----------|-----------|-----------|---------");
+
+        int rateRecommendedMin = -1;
+        for (const auto& r : sweep)
+        {
+            out.add (formatTableRow (r));
+            if (rateRecommendedMin < 0 && (r.verdict == "SAFE" || r.verdict == "MARGINAL"))
+            {
+                const auto bufStr = r.configuration.fromFirstOccurrenceOf ("buf=", false, false)
+                                                    .upToFirstOccurrenceOf (" ", false, false);
+                rateRecommendedMin = bufStr.getIntValue();
+            }
+            if (r.details.isNotEmpty())
+                out.add (juce::String ("        ") + r.details);
+        }
+
+        if (rateRecommendedMin > 0)
+            out.add (juce::String::formatted (
+                "  Recommended min buffer at %u Hz: %d frames (50%% headroom: %d)",
+                rate, rateRecommendedMin, rateRecommendedMin * 2));
+        else
+            out.add ("  No buffer size stable at this rate.");
+
+        // The "global" recommended min is the highest minimum across all
+        // rates - the safest default that works everywhere.
+        if (rateRecommendedMin > globalRecommendedMin)
+            globalRecommendedMin = rateRecommendedMin;
+
+        out.add ("");
     }
-    else
+
+    if (matrixMode)
     {
-        out.add ("No buffer size in the swept range was stable. Check the open errors above.");
+        if (globalRecommendedMin > 0)
+            out.add (juce::String::formatted (
+                "Global recommended min buffer (max across rates): %d frames", globalRecommendedMin));
+        else
+            out.add ("No buffer size was stable at any rate. Check open errors above.");
+        out.add ("");
     }
-    out.add ("");
 
     out.add ("--- Open/close cycle stress ---");
     {

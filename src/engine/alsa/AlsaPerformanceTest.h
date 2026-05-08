@@ -36,20 +36,29 @@ public:
         double maxCallbackMs   = 0.0;
         int    callbackCount   = 0;
 
+        // Negotiated format information from the most recent successful
+        // open under this configuration. Populated per-cell so the matrix
+        // report can flag rates where the device fell back to a different
+        // bit depth than expected.
+        int          negotiatedBitDepth = 0;     // 16 / 24 / 32, 0 if open failed
+        int          activeOutChannels   = 0;
+        int          activeInChannels    = 0;
+
         juce::String verdict;           // "SAFE" / "MARGINAL" / "UNSAFE" / "FAIL"
         juce::String details;
     };
 
     struct Options
     {
-        juce::String     deviceId        = "hw:0,0";
-        unsigned int     sampleRate      = 48000;
-        int              durationMs      = 5000;     // per buffer-size step
-        int              fakeDspLoadUs   = 0;        // synthetic CPU work in callback
-        int              openCloseCycles = 50;
-        int              startStopCycles = 20;
-        bool             runLoopback     = false;    // require user-supplied loopback path
-        juce::Array<int> bufferSizes;                // empty -> use default ladder
+        juce::String              deviceId        = "hw:0,0";
+        unsigned int              sampleRate      = 48000;
+        int                       durationMs      = 5000;     // per buffer-size step
+        int                       fakeDspLoadUs   = 0;        // synthetic CPU work in callback
+        int                       openCloseCycles = 50;
+        int                       startStopCycles = 20;
+        bool                      runLoopback     = false;    // require user-supplied loopback path
+        juce::Array<int>          bufferSizes;                // empty -> use default ladder
+        juce::Array<unsigned int> sampleRates;                // empty -> just opts.sampleRate
     };
 
     // Loopback round-trip measurement. Only meaningful when there is a
