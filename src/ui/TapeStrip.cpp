@@ -2232,25 +2232,49 @@ bool TapeStrip::nudgeSelectedRegion (juce::int64 deltaSamples)
 
 bool TapeStrip::splitSelectedAtPlayhead()
 {
-    if (selectedTrack < 0 || selectedRegion < 0) return false;
-    const auto& regs = session.track (selectedTrack).regions;
-    if (selectedRegion >= (int) regs.size()) return false;
+    auto selection = allSelectedRegions();
+    if (selection.empty()) return false;
 
-    const auto& region = regs[(size_t) selectedRegion];
-    const auto playhead   = engine.getTransport().getPlayhead();
-    const auto regionEnd  = region.timelineStart + region.lengthInSamples;
-    // Same gate the right-click menu uses: split only meaningful when
-    // the playhead lands strictly inside the region. SplitRegionAction
-    // tolerates edge cases internally but a click without movement
-    // shouldn't change anything.
-    if (playhead <= region.timelineStart || playhead >= regionEnd)
-        return false;
+    const auto playhead = engine.getTransport().getPlayhead();
+
+    // Filter down to regions whose range strictly contains the
+    // playhead. SplitRegionAction tolerates edge cases internally
+    // but a click without movement shouldn't change anything; the
+    // strict-inside gate matches the right-click menu's behaviour.
+    auto containsPlayhead = [this, playhead] (const RegionId& id)
+    {
+        const auto& regs = session.track (id.track).regions;
+        if (id.regionIdx < 0 || id.regionIdx >= (int) regs.size()) return false;
+        const auto& r = regs[(size_t) id.regionIdx];
+        return playhead > r.timelineStart
+            && playhead < r.timelineStart + r.lengthInSamples;
+    };
+    selection.erase (std::remove_if (selection.begin(), selection.end(),
+                                       [&] (const RegionId& id)
+                                       { return ! containsPlayhead (id); }),
+                       selection.end());
+    if (selection.empty()) return false;
+
+    // SplitRegionAction inserts the new piece at idx+1, shifting any
+    // higher indices on the same track up by one. Process splits in
+    // (track ASC, regionIdx DESC) so each split's index stays valid
+    // through the loop. Same idiom as deleteSelectedRegion.
+    std::sort (selection.begin(), selection.end(),
+        [] (const RegionId& a, const RegionId& b)
+        {
+            return a.track != b.track ? a.track < b.track
+                                       : a.regionIdx > b.regionIdx;
+        });
 
     auto& um = engine.getUndoManager();
-    um.beginNewTransaction ("Split region");
-    um.perform (new SplitRegionAction (session, engine,
-                                         selectedTrack, selectedRegion,
-                                         playhead));
+    um.beginNewTransaction (selection.size() == 1 ? "Split region"
+                                                    : "Split regions");
+    for (const auto& id : selection)
+    {
+        um.perform (new SplitRegionAction (session, engine,
+                                             id.track, id.regionIdx,
+                                             playhead));
+    }
     repaint();
     return true;
 }
