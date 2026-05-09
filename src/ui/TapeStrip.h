@@ -178,6 +178,22 @@ private:
         juce::int64 origFadeIn        = 0;
         juce::int64 origFadeOut       = 0;
         float       origGainDb        = 0.0f;
+
+        // Per-additional-selection orig state captured at mouseDown
+        // for group Move / AdjustGain drags. Empty vector = single-
+        // region drag (only the anchor). track / regionIdx point
+        // back into Session, NOT into additionalSelections - the
+        // latter can be reordered between mouseDown and mouseUp by
+        // a concurrent record / undo, so identifying by (track,
+        // regionIdx) at capture time is the stable form.
+        struct AdditionalOrig
+        {
+            int track;
+            int regionIdx;
+            juce::int64 origTimelineStart;
+            float       origGainDb;
+        };
+        std::vector<AdditionalOrig> additional;
     };
     ActiveDrag drag;
 
@@ -221,11 +237,48 @@ private:
     };
     BracketDrag bracketDrag;
 
-    // The most recently clicked region - selection target for keyboard
-    // copy/cut/paste/delete. -1 / -1 means nothing selected. Cleared on
-    // undo/redo because the action might have shifted indices.
+    // Primary / anchor selection - the most-recently-clicked region.
+    // Single-region operations (clipboard, paste, anchor for drag deltas)
+    // act on this; group operations also include `additionalSelections`.
+    // -1 / -1 means nothing selected. Cleared on undo/redo because the
+    // action might have shifted indices.
     int selectedTrack    = -1;
     int selectedRegion   = -1;
+
+    // Extra regions selected via Shift / Cmd-click on top of the
+    // primary. The primary is NOT included in this vector - the full
+    // selection set is `(selectedTrack, selectedRegion)` ∪ this.
+    // Sorted-and-deduped to keep group ops (delete, nudge, gain) from
+    // double-iterating the same region. Cleared whenever the primary
+    // collapses to "nothing" (plain-click on empty space, undo, etc.).
+    struct RegionId
+    {
+        int track;
+        int regionIdx;
+        bool operator== (const RegionId& other) const noexcept
+        {
+            return track == other.track && regionIdx == other.regionIdx;
+        }
+        bool operator< (const RegionId& other) const noexcept
+        {
+            return track < other.track
+                || (track == other.track && regionIdx < other.regionIdx);
+        }
+    };
+    std::vector<RegionId> additionalSelections;
+
+    // True if (track, idx) is the primary OR appears in additional.
+    bool isRegionSelected (int track, int idx) const noexcept;
+    // Full selection list (primary first if set, then additional).
+    std::vector<RegionId> allSelectedRegions() const;
+    // Reset both primary and additional. Used by changeListenerCallback
+    // (undo/redo may have shifted indices) and by plain-click on empty
+    // timeline.
+    void clearAllSelections() noexcept;
+    // Add (or remove if already present) a region to the selection.
+    // Used by Shift / Cmd-click to extend the selection without
+    // collapsing back to a single anchor.
+    void toggleRegionSelected (int track, int idx);
 
     // Hover state - set in mouseMove, cleared in mouseExit. Drives
     // affordance visibility (fade handles only paint on the hovered

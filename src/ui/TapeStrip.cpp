@@ -20,10 +20,10 @@ void TapeStrip::changeListenerCallback (juce::ChangeBroadcaster*)
 {
     // Undo / redo just mutated the regions - repaint to reflect the swap.
     // The action itself called preparePlayback if stopped, so audio is
-    // already aligned with what we'll draw. Selection indices might now
-    // point at a region that has been deleted or shifted, so clear them.
-    selectedTrack  = -1;
-    selectedRegion = -1;
+    // already aligned with what we'll draw. Every selection index might
+    // now point at a region that has been deleted or shifted, so clear
+    // both primary and additional.
+    clearAllSelections();
     repaint();
 }
 
@@ -171,6 +171,73 @@ TapeStrip::RegionHit TapeStrip::hitTestRegion (int x, int y) const noexcept
         }
     }
     return {};
+}
+
+bool TapeStrip::isRegionSelected (int track, int idx) const noexcept
+{
+    if (track == selectedTrack && idx == selectedRegion) return true;
+    const RegionId q { track, idx };
+    return std::binary_search (additionalSelections.begin(),
+                                  additionalSelections.end(), q);
+}
+
+std::vector<TapeStrip::RegionId> TapeStrip::allSelectedRegions() const
+{
+    std::vector<RegionId> result;
+    if (selectedTrack >= 0 && selectedRegion >= 0)
+        result.push_back ({ selectedTrack, selectedRegion });
+    for (auto& id : additionalSelections)
+        result.push_back (id);
+    return result;
+}
+
+void TapeStrip::clearAllSelections() noexcept
+{
+    selectedTrack  = -1;
+    selectedRegion = -1;
+    additionalSelections.clear();
+}
+
+void TapeStrip::toggleRegionSelected (int track, int idx)
+{
+    if (track < 0 || idx < 0) return;
+    // Toggle the primary itself.
+    if (track == selectedTrack && idx == selectedRegion)
+    {
+        // Collapsing the primary: promote first-additional to
+        // primary if any, else clear.
+        if (additionalSelections.empty())
+        {
+            selectedTrack = -1;
+            selectedRegion = -1;
+        }
+        else
+        {
+            const auto promoted = additionalSelections.front();
+            additionalSelections.erase (additionalSelections.begin());
+            selectedTrack  = promoted.track;
+            selectedRegion = promoted.regionIdx;
+        }
+        return;
+    }
+    // Toggle within additional.
+    const RegionId id { track, idx };
+    auto it = std::lower_bound (additionalSelections.begin(),
+                                  additionalSelections.end(), id);
+    if (it != additionalSelections.end() && *it == id)
+    {
+        additionalSelections.erase (it);
+        return;
+    }
+    // Not currently selected. If there is no primary, become primary;
+    // otherwise add to additional.
+    if (selectedTrack < 0)
+    {
+        selectedTrack  = track;
+        selectedRegion = idx;
+        return;
+    }
+    additionalSelections.insert (it, id);
 }
 
 void TapeStrip::setSelectedTrack (int t) noexcept
@@ -499,6 +566,24 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
 
     if (hit.op != RegionOp::None)
     {
+        // Shift / Cmd-click on a region body toggles it in/out of the
+        // multi-selection without starting a drag. Edge ops (trim,
+        // fade, take badge) ignore the modifier - those are still
+        // single-region operations even when other regions are
+        // selected. Group drag begins from a plain (no-modifier)
+        // click on an already-selected region body.
+        const bool extendSelection = (e.mods.isShiftDown() || e.mods.isCommandDown());
+        if (extendSelection
+            && (hit.op == RegionOp::Move
+                || hit.op == RegionOp::TrimStart
+                || hit.op == RegionOp::TrimEnd))
+        {
+            toggleRegionSelected (hit.track, hit.regionIdx);
+            drag.op = RegionOp::None;   // no drag mode entered
+            repaint();
+            return;
+        }
+
         const auto& region = session.track (hit.track).regions[(size_t) hit.regionIdx];
         drag.track             = hit.track;
         drag.regionIdx         = hit.regionIdx;
@@ -517,9 +602,61 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
         drag.origFadeIn        = region.fadeInSamples;
         drag.origFadeOut       = region.fadeOutSamples;
         drag.origGainDb        = region.gainDb;
+        drag.additional.clear();
 
-        selectedTrack  = hit.track;
-        selectedRegion = hit.regionIdx;
+        // Selection logic: if the clicked region was already selected
+        // (in the multi-set), keep the existing selection so group
+        // drag works. Otherwise collapse to single-region. Same
+        // pattern as the piano roll's note multi-select.
+        const bool wasSelected = isRegionSelected (hit.track, hit.regionIdx);
+        if (! wasSelected)
+        {
+            clearAllSelections();
+            selectedTrack  = hit.track;
+            selectedRegion = hit.regionIdx;
+        }
+        else
+        {
+            // Promote the clicked region to primary if it was an
+            // additional. Drag delta is computed against primary's
+            // origs; per-additional origs are captured below.
+            if (hit.track != selectedTrack || hit.regionIdx != selectedRegion)
+            {
+                // Find + erase from additional, then make it primary.
+                const RegionId clickedId { hit.track, hit.regionIdx };
+                auto it = std::lower_bound (additionalSelections.begin(),
+                                              additionalSelections.end(), clickedId);
+                if (it != additionalSelections.end() && *it == clickedId)
+                    additionalSelections.erase (it);
+                // Demote former primary into additional.
+                if (selectedTrack >= 0 && selectedRegion >= 0)
+                {
+                    const RegionId formerPrimary { selectedTrack, selectedRegion };
+                    auto pos = std::lower_bound (additionalSelections.begin(),
+                                                    additionalSelections.end(),
+                                                    formerPrimary);
+                    additionalSelections.insert (pos, formerPrimary);
+                }
+                selectedTrack  = hit.track;
+                selectedRegion = hit.regionIdx;
+            }
+        }
+
+        // Capture per-additional origs for group Move / AdjustGain.
+        // Trim / Fade are anchor-only - skip the work.
+        if (drag.op == RegionOp::Move || drag.op == RegionOp::AdjustGain)
+        {
+            for (auto& add : additionalSelections)
+            {
+                const auto& addRegions = session.track (add.track).regions;
+                if (add.regionIdx < 0 || add.regionIdx >= (int) addRegions.size())
+                    continue;
+                const auto& ar = addRegions[(size_t) add.regionIdx];
+                drag.additional.push_back ({ add.track, add.regionIdx,
+                                                ar.timelineStart, ar.gainDb });
+            }
+        }
+
         repaint();
         return;
     }
@@ -547,9 +684,11 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
         }
     }
 
-    // Click on empty timeline → seek the playhead AND clear the selection.
-    selectedTrack  = -1;
-    selectedRegion = -1;
+    // Click on empty timeline → seek the playhead AND clear every
+    // selection (primary + additional). Shift-click on empty space is
+    // reserved for a future rubber-band drag; for now it falls through
+    // to the same clear-and-seek behaviour.
+    clearAllSelections();
 
     const auto sample = sampleAtX (e.x);
     engine.getTransport().setPlayhead (sample);
@@ -694,8 +833,22 @@ void TapeStrip::mouseDrag (const juce::MouseEvent& e)
     {
         case RegionOp::Move:
         {
-            r.timelineStart = juce::jmax ((juce::int64) 0,
-                                drag.origTimelineStart + deltaSamples);
+            // Group-clamp: the smallest origTimelineStart across the
+            // anchor + every additional sets the floor on -delta so
+            // no region in the group falls off the timeline.
+            juce::int64 minOrig = drag.origTimelineStart;
+            for (const auto& a : drag.additional)
+                minOrig = juce::jmin (minOrig, a.origTimelineStart);
+            const juce::int64 clampedDelta = juce::jmax (deltaSamples, -minOrig);
+            r.timelineStart = drag.origTimelineStart + clampedDelta;
+            for (const auto& a : drag.additional)
+            {
+                auto& addRegions = session.track (a.track).regions;
+                if (a.regionIdx < 0 || a.regionIdx >= (int) addRegions.size())
+                    continue;
+                addRegions[(size_t) a.regionIdx].timelineStart =
+                    a.origTimelineStart + clampedDelta;
+            }
             break;
         }
         case RegionOp::TrimStart:
@@ -750,13 +903,22 @@ void TapeStrip::mouseDrag (const juce::MouseEvent& e)
             // Vertical pixels -> dB. Up = louder, down = quieter.
             // 0.1 dB per pixel gives a comfortable range without the
             // user having to drag wildly: 60 px = 6 dB, 120 px = the
-            // full +12 dB ceiling. Clamped to [-24, +12] dB at the
-            // UI; PlaybackEngine::preparePlayback re-clamps to a
-            // wider [-60, +24] safety net.
+            // full +12 dB ceiling. Apply the same dB delta to every
+            // selected region (anchor + additional); per-region clamp
+            // to [-24, +12] is fine even when origs differ - the
+            // group goes "out of lockstep" only at the boundaries.
             const float deltaPx = (float) (e.getMouseDownY() - e.y);
             const float deltaDb = deltaPx * 0.10f;
             r.gainDb = juce::jlimit (-24.0f, 12.0f,
                                        drag.origGainDb + deltaDb);
+            for (const auto& a : drag.additional)
+            {
+                auto& addRegions = session.track (a.track).regions;
+                if (a.regionIdx < 0 || a.regionIdx >= (int) addRegions.size())
+                    continue;
+                addRegions[(size_t) a.regionIdx].gainDb =
+                    juce::jlimit (-24.0f, 12.0f, a.origGainDb + deltaDb);
+            }
             break;
         }
         case RegionOp::None:
@@ -919,17 +1081,38 @@ void TapeStrip::mouseUp (const juce::MouseEvent& e)
             || beforeState.fadeOutSamples  != afterState.fadeOutSamples
             || beforeState.gainDb          != afterState.gainDb)
         {
+            const bool isGroup = ! drag.additional.empty()
+                && (drag.op == RegionOp::Move || drag.op == RegionOp::AdjustGain);
             const char* label =
-                drag.op == RegionOp::Move        ? "Move region" :
+                drag.op == RegionOp::Move        ? (isGroup ? "Move regions" : "Move region") :
                 drag.op == RegionOp::FadeIn      ? "Adjust fade-in" :
                 drag.op == RegionOp::FadeOut     ? "Adjust fade-out" :
-                drag.op == RegionOp::AdjustGain  ? "Adjust region gain" :
+                drag.op == RegionOp::AdjustGain  ? (isGroup ? "Adjust regions gain" : "Adjust region gain") :
                                                     "Trim region";
             auto& um = engine.getUndoManager();
             um.beginNewTransaction (label);
             um.perform (new RegionEditAction (session, engine,
                                                 drag.track, drag.regionIdx,
                                                 beforeState, afterState));
+            // Group drag: emit one RegionEditAction per additional
+            // selection, all bundled into the transaction we just
+            // started so undo reverts the whole group at once.
+            for (const auto& a : drag.additional)
+            {
+                auto& addRegions = session.track (a.track).regions;
+                if (a.regionIdx < 0 || a.regionIdx >= (int) addRegions.size())
+                    continue;
+                AudioRegion addAfter  = addRegions[(size_t) a.regionIdx];
+                AudioRegion addBefore = addAfter;
+                addBefore.timelineStart = a.origTimelineStart;
+                addBefore.gainDb        = a.origGainDb;
+                if (addBefore.timelineStart == addAfter.timelineStart
+                    && addBefore.gainDb == addAfter.gainDb)
+                    continue;
+                um.perform (new RegionEditAction (session, engine,
+                                                    a.track, a.regionIdx,
+                                                    addBefore, addAfter));
+            }
         }
     }
 
@@ -1231,7 +1414,7 @@ void TapeStrip::paint (juce::Graphics& g)
                                   .getIntersection (col.withTrimmedTop (1).withTrimmedBottom (1));
             if (regionRect.isEmpty()) continue;
 
-            const bool isSelected = (t == selectedTrack && ri == selectedRegion);
+            const bool isSelected = isRegionSelected (t, ri);
 
             // Block fill - track color, slightly darker so the row label still pops.
             // Selected regions get a brighter mix so they read as the focused thing.
@@ -1786,64 +1969,92 @@ bool TapeStrip::pasteAtPlayhead()
 
 bool TapeStrip::deleteSelectedRegion()
 {
-    if (selectedTrack < 0 || selectedRegion < 0) return false;
-    const auto& regs = session.track (selectedTrack).regions;
-    if (selectedRegion >= (int) regs.size()) return false;
+    auto selection = allSelectedRegions();
+    if (selection.empty()) return false;
+
+    // Erase in descending order PER TRACK so earlier indices on the
+    // same track stay valid through the loop. Sort by (track ASC,
+    // regionIdx DESC) and walk linearly.
+    std::sort (selection.begin(), selection.end(),
+        [] (const RegionId& a, const RegionId& b)
+        {
+            return a.track != b.track ? a.track < b.track
+                                       : a.regionIdx > b.regionIdx;
+        });
 
     auto& um = engine.getUndoManager();
-    um.beginNewTransaction ("Delete region");
-    um.perform (new DeleteRegionAction (session, engine,
-                                          selectedTrack, selectedRegion));
-
-    selectedTrack  = -1;
-    selectedRegion = -1;
+    um.beginNewTransaction (selection.size() == 1 ? "Delete region"
+                                                    : "Delete regions");
+    for (const auto& id : selection)
+    {
+        const auto& regs = session.track (id.track).regions;
+        if (id.regionIdx < 0 || id.regionIdx >= (int) regs.size()) continue;
+        um.perform (new DeleteRegionAction (session, engine,
+                                              id.track, id.regionIdx));
+    }
+    clearAllSelections();
     repaint();
     return true;
 }
 
 bool TapeStrip::duplicateSelectedRegion()
 {
-    if (selectedTrack < 0 || selectedRegion < 0) return false;
-    const auto& regs = session.track (selectedTrack).regions;
-    if (selectedRegion >= (int) regs.size()) return false;
-
-    AudioRegion clone = regs[(size_t) selectedRegion];
-    // Drop take history on the duplicate - it's a fresh region as far
-    // as the user is concerned; cycling alternate takes on the clone
-    // would be confusing. The original keeps its history intact.
-    clone.previousTakes.clear();
-    clone.timelineStart = regs[(size_t) selectedRegion].timelineStart
-                         + regs[(size_t) selectedRegion].lengthInSamples;
+    const auto selection = allSelectedRegions();
+    if (selection.empty()) return false;
 
     auto& um = engine.getUndoManager();
-    um.beginNewTransaction ("Duplicate region");
-    um.perform (new PasteRegionAction (session, engine, selectedTrack, clone));
+    um.beginNewTransaction (selection.size() == 1 ? "Duplicate region"
+                                                    : "Duplicate regions");
+    for (const auto& id : selection)
+    {
+        const auto& regs = session.track (id.track).regions;
+        if (id.regionIdx < 0 || id.regionIdx >= (int) regs.size()) continue;
+        AudioRegion clone = regs[(size_t) id.regionIdx];
+        // Drop take history on the duplicate - it's a fresh region as
+        // far as the user is concerned; cycling alternate takes on the
+        // clone would be confusing. The original keeps its history.
+        clone.previousTakes.clear();
+        clone.timelineStart = regs[(size_t) id.regionIdx].timelineStart
+                             + regs[(size_t) id.regionIdx].lengthInSamples;
+        um.perform (new PasteRegionAction (session, engine, id.track, clone));
+    }
     repaint();
     return true;
 }
 
 bool TapeStrip::nudgeSelectedRegion (juce::int64 deltaSamples)
 {
-    if (selectedTrack < 0 || selectedRegion < 0) return false;
-    auto& regs = session.track (selectedTrack).regions;
-    if (selectedRegion >= (int) regs.size()) return false;
+    const auto selection = allSelectedRegions();
+    if (selection.empty()) return false;
     if (deltaSamples == 0) return false;
 
-    const auto& current = regs[(size_t) selectedRegion];
-    const auto clamped = juce::jmax ((juce::int64) 0,
-                                       current.timelineStart + deltaSamples);
-    if (clamped == current.timelineStart) return false;
-
-    AudioRegion afterState  = current;
-    AudioRegion beforeState = current;
-    afterState.timelineStart = clamped;
+    // Group-clamp: don't let any selected region's timelineStart go
+    // negative. So minSelectedStart sets the floor on -delta.
+    juce::int64 minStart = std::numeric_limits<juce::int64>::max();
+    for (const auto& id : selection)
+    {
+        const auto& regs = session.track (id.track).regions;
+        if (id.regionIdx < 0 || id.regionIdx >= (int) regs.size()) continue;
+        minStart = juce::jmin (minStart, regs[(size_t) id.regionIdx].timelineStart);
+    }
+    deltaSamples = juce::jmax (deltaSamples, -minStart);
+    if (deltaSamples == 0) return false;
 
     auto& um = engine.getUndoManager();
-    um.beginNewTransaction (deltaSamples > 0 ? "Nudge region right"
-                                              : "Nudge region left");
-    um.perform (new RegionEditAction (session, engine,
-                                        selectedTrack, selectedRegion,
-                                        beforeState, afterState));
+    um.beginNewTransaction (deltaSamples > 0 ? "Nudge regions right"
+                                              : "Nudge regions left");
+    for (const auto& id : selection)
+    {
+        const auto& regs = session.track (id.track).regions;
+        if (id.regionIdx < 0 || id.regionIdx >= (int) regs.size()) continue;
+        const auto& current = regs[(size_t) id.regionIdx];
+        AudioRegion afterState  = current;
+        AudioRegion beforeState = current;
+        afterState.timelineStart = current.timelineStart + deltaSamples;
+        um.perform (new RegionEditAction (session, engine,
+                                            id.track, id.regionIdx,
+                                            beforeState, afterState));
+    }
     repaint();
     return true;
 }
