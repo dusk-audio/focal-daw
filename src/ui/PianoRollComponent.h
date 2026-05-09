@@ -66,6 +66,7 @@ public:
     static constexpr int kNumKeys           = 128;
     static constexpr int kFullGridHeight    = kNumKeys * kNoteHeight;
     static constexpr int kVelocityStripH    = 56;   // bottom strip for vel bars
+    static constexpr int kCcStripH          = 56;   // CC lane below velocity
 
 private:
     Session& session;
@@ -93,12 +94,62 @@ private:
     // region's end is welcome - 4d's punch-stack will resize the region).
     int scrollX = 0;
 
-    // Currently-selected note, indexed into the region's notes vector.
-    // -1 = nothing selected.
-    int selectedNote = -1;
+    // Selected notes. Indices into region->notes; sorted ascending and
+    // deduplicated. Operations that mutate notes (delete) iterate in
+    // descending order so earlier indices stay valid. Empty = nothing
+    // selected.
+    std::vector<int> selectedNotes;
 
-    enum class DragMode { None, MoveNote, ResizeNote, CreateNote, EditVelocity };
+    // Anchor note for a multi-note drag - the note actually under the
+    // cursor at mouseDown. Drag deltas are computed against this note;
+    // every other selected note follows the same delta. Resize applies
+    // only to the anchor (multi-resize is ambiguous).
+    int dragAnchor = -1;
+
+    // Per-selected-note snapshot taken at mouseDown so MoveNote can
+    // apply a consistent delta to every selected note even after some
+    // of them get clamped against the region boundary. Parallel to
+    // selectedNotes (one entry per selected note in the same order).
+    struct DragSnapshot
+    {
+        juce::int64 startTick     = 0;
+        int         noteNumber    = 0;
+        juce::int64 lengthInTicks = 0;
+    };
+    std::vector<DragSnapshot> dragSnapshots;
+
+    // Active rubber-band rectangle in screen coords during BoxSelect.
+    // Empty rect = no box-select in flight (paint skips the overlay).
+    juce::Rectangle<int> rubberBand;
+
+    enum class DragMode { None, MoveNote, ResizeNote, CreateNote, EditVelocity, BoxSelect, EditCcValue };
     DragMode dragMode = DragMode::None;
+
+    // Active CC controller shown in the CC lane. Starts on CC 1 (mod
+    // wheel) - the most-used continuous controller. 'L' cycles through
+    // common ones (1, 7, 11, 64, 74). The lane only displays CCs whose
+    // controller matches this; events on other controllers stay in the
+    // region's ccs vector and pass through to the synth at playback.
+    int activeCcController = 1;
+
+    // Scale-highlight overlay. When `scale != Scale::Off`, rows whose
+    // note isn't in the selected scale get a translucent dark wash so
+    // in-scale notes pop visually. 'S' opens the picker popup.
+    enum class Scale { Off, Major, Minor, Dorian, Phrygian, Lydian, Mixolydian, Locrian };
+    Scale scale = Scale::Off;
+    int   scaleRoot = 0;   // 0=C, 1=C#, ... 11=B
+    // Index into region->ccs of the CC event currently being dragged in
+    // the CC lane (set during EditCcValue, -1 otherwise). The vector
+    // doesn't get mutated mid-drag, so the index stays stable.
+    int draggedCcIdx = -1;
+
+    // Note coloring. Pitch maps 12 semitones to 12 distinct hues (chord
+    // shapes pop at a glance); Velocity is the legacy single-blue tinted
+    // by 0..127; Channel is a 16-way hue cycle (useful for multi-channel
+    // captures from a controller). 'C' cycles. Default Pitch matches
+    // commercial DAWs.
+    enum class ColorMode { Pitch, Velocity, Channel };
+    ColorMode colorMode = ColorMode::Pitch;
     juce::int64 dragOriginTick    = 0;
     int         dragOriginNoteNum = 0;
     juce::int64 dragNoteStartTick = 0;
@@ -130,9 +181,53 @@ private:
     void paintBeatRuler     (juce::Graphics&, juce::Rectangle<int> area);
     void paintNotes         (juce::Graphics&, juce::Rectangle<int> area);
     void paintVelocityStrip (juce::Graphics&, juce::Rectangle<int> area);
+    void paintCcStrip       (juce::Graphics&, juce::Rectangle<int> area);
+
+    // Hit-test for CC bars in the CC lane. Returns the index into
+    // region->ccs whose tick maps to a screen-x within kHitSlopPx
+    // of the click, restricted to events on activeCcController.
+    int hitTestCcBar (int x, juce::Rectangle<int> stripArea) const;
 
     // Hit-test helper for the velocity strip. Returns the index into
     // notes whose vertical bar contains x; -1 if no note matches.
     int hitTestVelocityBar (int x, juce::Rectangle<int> stripArea) const;
+
+    // Resolve the fill colour for a note under the active colorMode.
+    // Selection state is the caller's concern (paint applies the
+    // selection highlight on top); this only returns the base fill.
+    juce::Colour colourForNote (const MidiNote& n) const noexcept;
+
+    // Selection helpers. Selection is stored sorted/deduped so set
+    // operations (toggle / contains) are O(log n) on a vector of ints.
+    bool isNoteSelected (int idx) const noexcept;
+    void clearSelection();
+    void selectOnly (int idx);
+    void toggleSelected (int idx);
+    void addToSelection (int idx);
+    // Snapshot every selected note's start / pitch / length into
+    // dragSnapshots so MoveNote can apply a consistent group delta.
+    // Set dragAnchor to `anchorIdx` (the note under the cursor).
+    void beginGroupDrag (int anchorIdx);
+    // Shift every selected note by (deltaTicks, deltaPitch). Clamps
+    // the delta against the group's bounding box so no note ends up
+    // out of [0, lengthInTicks] or [0, 127].
+    void applyGroupMove (juce::int64 deltaTicks, int deltaPitch);
+    // Transpose every selected note by `semitones`, clamped per note
+    // to [0, 127]. Used by Up/Down arrow handlers.
+    void transposeSelected (int semitones);
+
+    // Quantize selected notes (or all notes if nothing selected) to
+    // `gridTicks`, blended at `strength` 0..1. strength=1.0 fully
+    // snaps to grid; strength=0.5 moves halfway from original tick to
+    // snapped tick (humanises without losing the original feel).
+    void quantizeSelected (juce::int64 gridTicks, float strength);
+
+    // True if `noteNumber` is in the active scale (or scale is Off).
+    bool isInScale (int noteNumber) const noexcept;
+
+    // 'Q' / 'S' popup launchers - show the menu and apply the chosen
+    // action. Both run on the message thread inside keyPressed.
+    void showQuantizePopup();
+    void showScalePopup();
 };
 } // namespace focal
