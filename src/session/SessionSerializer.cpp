@@ -200,6 +200,11 @@ juce::DynamicObject::Ptr trackToObject (const Track& t)
         // either by a default-construct (0.0f) or by an explicit user
         // drag - no float-arithmetic accumulation path exists.
         if (r.gainDb != 0.0f) rObj->setProperty ("gain_db", (double) r.gainDb);
+        // Custom colour - only when the user explicitly set one
+        // (default-constructed is transparent = "use track colour").
+        // Stored as an 8-digit ARGB hex string via Colour::toString().
+        if (! r.customColour.isTransparent())
+            rObj->setProperty ("custom_colour", r.customColour.toString());
 
         // Take history. Empty array on the common case (no overdubs); only
         // serialised when at least one prior take has been captured to keep
@@ -576,6 +581,9 @@ void restoreTrack (Track& t, const juce::var& v)
             r.fadeOutSamples  = rv.hasProperty ("fade_out") ? (juce::int64) rv["fade_out"] : 0;
             r.numChannels     = rv.hasProperty ("num_channels") ? (int) rv["num_channels"] : 1;
             r.gainDb          = rv.hasProperty ("gain_db")  ? (float) (double) rv["gain_db"] : 0.0f;
+            r.customColour    = rv.hasProperty ("custom_colour")
+                                 ? juce::Colour::fromString (rv["custom_colour"].toString())
+                                 : juce::Colour();
 
             if (auto prior = rv["previous_takes"]; prior.isArray())
             {

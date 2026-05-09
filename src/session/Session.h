@@ -376,6 +376,14 @@ struct AudioRegion
     // [-24, +12] dB); the field itself is just a float.
     float gainDb = 0.0f;
 
+    // Optional per-region colour override. Default-constructed
+    // (transparent) means "use the parent track's colour". When the
+    // user picks a custom colour from the right-click region menu,
+    // this gets set and the tape-strip painter uses it instead of
+    // session.track(t).colour. Lets the user mark sections (verse /
+    // chorus / etc.) without changing the whole track's tint.
+    juce::Colour customColour;
+
     // Older takes that occupied this region's timeline range, captured by
     // RecordManager::stopRecording when the new take's range fully contains
     // an existing region. Front of the vector = next to surface on a cycle.

@@ -1394,6 +1394,37 @@ void TapeStrip::showRegionContextMenu (const RegionHit& hit, juce::Point<int> sc
                     safeThis->repaint();
                 });
     m.addSeparator();
+
+    // Color submenu - 8 curated accent options + "Reset to track
+    // colour". Setting goes through RegionEditAction so undo/redo
+    // round-trip cleanly. Acts on every selected region (the user's
+    // multi-selection) when the right-clicked region is part of one;
+    // single-region otherwise. Same logic as note-properties popup.
+    juce::PopupMenu colourSub;
+    struct PaletteEntry { const char* label; juce::uint32 argb; };
+    static const PaletteEntry kPalette[] = {
+        { "Reset to track colour", 0x00000000 },   // 0 alpha = transparent = unset
+        { "Red",          0xffd05f5f },
+        { "Orange",       0xffd09060 },
+        { "Yellow",       0xffd0c060 },
+        { "Green",        0xff60c070 },
+        { "Cyan",         0xff60c0c0 },
+        { "Blue",         0xff6090d0 },
+        { "Purple",       0xff9070c0 },
+        { "Magenta",      0xffc060a0 },
+    };
+    for (int i = 0; i < (int) (sizeof (kPalette) / sizeof (kPalette[0])); ++i)
+    {
+        const bool isReset = (i == 0);
+        colourSub.addItem (5000 + i,
+                            kPalette[i].label,
+                            true,
+                            isReset ? region.customColour.isTransparent()
+                                    : region.customColour.getARGB() == kPalette[i].argb);
+    }
+    m.addSubMenu ("Color", colourSub);
+
+    m.addSeparator();
     m.addItem ("Delete region",
                 [safeThis = juce::Component::SafePointer<TapeStrip> (this),
                  hitCopy = hit]
@@ -1409,7 +1440,46 @@ void TapeStrip::showRegionContextMenu (const RegionHit& hit, juce::Point<int> sc
 
     m.showMenuAsync (juce::PopupMenu::Options()
                         .withTargetScreenArea (
-                            juce::Rectangle<int> (screenPos.x, screenPos.y, 1, 1)));
+                            juce::Rectangle<int> (screenPos.x, screenPos.y, 1, 1)),
+        [safeThis = juce::Component::SafePointer<TapeStrip> (this), hitCopy = hit]
+        (int chosen)
+        {
+            if (safeThis == nullptr) return;
+            // Color choices land in the 5000-range. Other items handle
+            // themselves via their per-item lambdas above; we only act
+            // on the colour-submenu IDs here.
+            if (chosen < 5000 || chosen >= 5000 + (int) (sizeof (kPalette) / sizeof (kPalette[0])))
+                return;
+            const juce::uint32 newArgb = kPalette[chosen - 5000].argb;
+            const juce::Colour newColour (newArgb);
+
+            // Pick the target list - the multi-selection if the
+            // right-clicked region is part of one, otherwise just
+            // the right-clicked region.
+            std::vector<RegionId> targets;
+            if (safeThis->isRegionSelected (hitCopy.track, hitCopy.regionIdx))
+                targets = safeThis->allSelectedRegions();
+            else
+                targets.push_back ({ hitCopy.track, hitCopy.regionIdx });
+
+            auto& um = safeThis->engine.getUndoManager();
+            um.beginNewTransaction (targets.size() == 1 ? "Set region colour"
+                                                          : "Set regions colour");
+            for (const auto& id : targets)
+            {
+                const auto& regs = safeThis->session.track (id.track).regions;
+                if (id.regionIdx < 0 || id.regionIdx >= (int) regs.size()) continue;
+                const auto& current = regs[(size_t) id.regionIdx];
+                if (current.customColour == newColour) continue;
+                AudioRegion afterState  = current;
+                AudioRegion beforeState = current;
+                afterState.customColour = newColour;
+                um.perform (new RegionEditAction (safeThis->session, safeThis->engine,
+                                                    id.track, id.regionIdx,
+                                                    beforeState, afterState));
+            }
+            safeThis->repaint();
+        });
 }
 
 void TapeStrip::paint (juce::Graphics& g)
@@ -1497,10 +1567,19 @@ void TapeStrip::paint (juce::Graphics& g)
 
             const bool isSelected = isRegionSelected (t, ri);
 
-            // Block fill - track color, slightly darker so the row label still pops.
-            // Selected regions get a brighter mix so they read as the focused thing.
-            auto fillColour = session.track (t).colour.withMultipliedSaturation (0.85f)
-                                                       .withMultipliedBrightness (0.65f);
+            // Region colour - per-region override when set, otherwise
+            // the parent track's colour. customColour defaults to
+            // transparent so the test below cleanly distinguishes
+            // "user picked a colour" from "leave it on track default".
+            const auto regionAccent = region.customColour.isTransparent()
+                ? session.track (t).colour
+                : region.customColour;
+
+            // Block fill - region colour, slightly darker so the row label
+            // still pops. Selected regions get a brighter mix so they read
+            // as the focused thing.
+            auto fillColour = regionAccent.withMultipliedSaturation (0.85f)
+                                            .withMultipliedBrightness (0.65f);
             if (isSelected) fillColour = fillColour.brighter (0.30f);
             g.setColour (fillColour);
             g.fillRoundedRectangle (regionRect.toFloat(), 2.0f);
@@ -1513,7 +1592,7 @@ void TapeStrip::paint (juce::Graphics& g)
             }
             else
             {
-                g.setColour (session.track (t).colour.withAlpha (0.9f));
+                g.setColour (regionAccent.withAlpha (0.9f));
                 g.drawRoundedRectangle (regionRect.toFloat().reduced (0.5f), 2.0f, 0.8f);
             }
 
