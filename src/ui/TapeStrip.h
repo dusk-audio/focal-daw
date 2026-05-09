@@ -134,6 +134,13 @@ private:
     BracketHit hitTestBracket (int x, int y) const noexcept;
     void rebuildPlaybackIfStopped();
     void showRegionContextMenu (const RegionHit&, juce::Point<int> screenPos);
+    // Right-click context for MIDI regions. Smaller than the audio
+    // version (no edge gutters, no fade handles, no take badge yet)
+    // - just Rename and Color. Mutates via midiRegions.currentMutable()
+    // since MIDI regions don't currently have an undoable edit-action
+    // surface; matches how the piano roll handles per-note edits.
+    void showMidiRegionContextMenu (int trackIdx, int regionIdx,
+                                       juce::Point<int> screenPos);
 
     Session& session;
     AudioEngine& engine;

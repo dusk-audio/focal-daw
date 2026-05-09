@@ -334,6 +334,13 @@ struct MidiRegion
     // region. Front of the vector = next to surface on a cycle, same
     // semantics as AudioRegion::previousTakes.
     std::vector<MidiTakeRef> previousTakes;
+
+    // Per-region accent colour override + user-supplied label. Same
+    // semantics as AudioRegion::customColour / label - default values
+    // mean "use track defaults / no label", the painter respects
+    // both, and SessionSerializer round-trips them.
+    juce::Colour customColour;
+    juce::String label;
 };
 
 // Audio region - references a mono WAV file on disk. Multiple recordings

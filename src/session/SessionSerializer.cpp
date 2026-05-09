@@ -275,6 +275,13 @@ juce::DynamicObject::Ptr trackToObject (const Track& t)
                 rObj->setProperty ("ccs", ccs);
             }
 
+            // Same custom-colour / label fields as AudioRegion -
+            // skipped when unset so older sessions stay diff-clean.
+            if (! r.customColour.isTransparent())
+                rObj->setProperty ("custom_colour", r.customColour.toString());
+            if (r.label.isNotEmpty())
+                rObj->setProperty ("label", r.label);
+
             // MIDI take history mirrors audio: previously-recorded versions
             // of the same range stack here when an overdub fully overlaps
             // an existing region.
@@ -661,6 +668,11 @@ void restoreTrack (Track& t, const juce::var& v)
             r.timelineStart   = (juce::int64) rv["timeline_start"];
             r.lengthInSamples = (juce::int64) rv["length_samples"];
             r.lengthInTicks   = (juce::int64) rv["length_ticks"];
+            r.customColour    = rv.hasProperty ("custom_colour")
+                                 ? juce::Colour::fromString (rv["custom_colour"].toString())
+                                 : juce::Colour();
+            r.label           = rv.hasProperty ("label") ? rv["label"].toString()
+                                                          : juce::String();
             parseNotes (rv["notes"], r.notes);
             parseCcs   (rv["ccs"],   r.ccs);
 

@@ -389,6 +389,25 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
             showRegionContextMenu (hit, e.getScreenPosition());
             return;
         }
+        // No audio hit - try MIDI. MIDI regions don't have edge gutters
+        // / fade handles / take badges, so we just check whether the
+        // cursor sits inside any region's painted rect.
+        for (int t = 0; t < Session::kNumTracks; ++t)
+        {
+            const auto row = rowBounds (t);
+            if (! row.contains (e.x, e.y)) continue;
+            const auto& mr = session.track (t).midiRegions.current();
+            for (int i = (int) mr.size() - 1; i >= 0; --i)
+            {
+                const auto& r = mr[(size_t) i];
+                const int x0 = xForSample (r.timelineStart);
+                const int x1 = xForSample (r.timelineStart + r.lengthInSamples);
+                if (e.x < x0 || e.x > x1) continue;
+                showMidiRegionContextMenu (t, i, e.getScreenPosition());
+                return;
+            }
+            break;
+        }
     }
 
     // Right-click anywhere over the ruler or track area opens a context menu
@@ -1532,6 +1551,99 @@ void TapeStrip::showRegionContextMenu (const RegionHit& hit, juce::Point<int> sc
         });
 }
 
+void TapeStrip::showMidiRegionContextMenu (int trackIdx, int regionIdx,
+                                              juce::Point<int> screenPos)
+{
+    const auto& mr = session.track (trackIdx).midiRegions.current();
+    if (regionIdx < 0 || regionIdx >= (int) mr.size()) return;
+    const auto& region = mr[(size_t) regionIdx];
+
+    juce::PopupMenu m;
+    m.addSectionHeader (juce::String::formatted ("Track %d MIDI region %d",
+                                                  trackIdx + 1, regionIdx + 1));
+
+    // Rename / clear-label. AlertWindow modal text input, same flow
+    // as the audio version. Mutation goes through
+    // midiRegions.currentMutable() - the message thread is the only
+    // mutator and the audio thread reads via its acquire-loaded
+    // pointer, same race profile the existing per-note PianoRoll
+    // edits already accept.
+    const auto currentLabel = region.label;
+    const juce::String renameLabel = currentLabel.isEmpty()
+        ? juce::String ("Add label\xe2\x80\xa6")
+        : juce::String ("Rename label\xe2\x80\xa6");
+    m.addItem (renameLabel,
+                [safeThis = juce::Component::SafePointer<TapeStrip> (this),
+                 trackIdx, regionIdx, currentLabel]
+                {
+                    if (safeThis == nullptr) return;
+                    auto window = std::make_shared<juce::AlertWindow> (
+                        "MIDI region label",
+                        "Type a label for this region:",
+                        juce::AlertWindow::NoIcon);
+                    window->addTextEditor ("text", currentLabel,
+                                              juce::String(), false);
+                    window->addButton ("OK",     1,
+                                          juce::KeyPress (juce::KeyPress::returnKey));
+                    window->addButton ("Cancel", 0,
+                                          juce::KeyPress (juce::KeyPress::escapeKey));
+                    auto* raw = window.get();
+                    raw->enterModalState (true, juce::ModalCallbackFunction::create (
+                        [safeThis, trackIdx, regionIdx, holder = window] (int result) mutable
+                        {
+                            if (result != 1 || safeThis == nullptr) return;
+                            const auto newLabel = holder->getTextEditorContents ("text");
+                            auto& live = safeThis->session.track (trackIdx)
+                                            .midiRegions.currentMutable();
+                            if (regionIdx < 0 || regionIdx >= (int) live.size()) return;
+                            live[(size_t) regionIdx].label = newLabel;
+                            safeThis->repaint();
+                        }), false);
+                });
+
+    m.addSeparator();
+
+    // Same 8-colour palette + Reset as the audio menu.
+    juce::PopupMenu colourSub;
+    struct PaletteEntry { const char* label; juce::uint32 argb; };
+    static const PaletteEntry kPalette[] = {
+        { "Reset to track colour", 0x00000000 },
+        { "Red",     0xffd05f5f }, { "Orange",  0xffd09060 },
+        { "Yellow",  0xffd0c060 }, { "Green",   0xff60c070 },
+        { "Cyan",    0xff60c0c0 }, { "Blue",    0xff6090d0 },
+        { "Purple",  0xff9070c0 }, { "Magenta", 0xffc060a0 },
+    };
+    for (int i = 0; i < (int) (sizeof (kPalette) / sizeof (kPalette[0])); ++i)
+    {
+        const bool isReset = (i == 0);
+        colourSub.addItem (5000 + i,
+                            kPalette[i].label,
+                            true,
+                            isReset ? region.customColour.isTransparent()
+                                    : region.customColour.getARGB() == kPalette[i].argb);
+    }
+    m.addSubMenu ("Color", colourSub);
+
+    m.showMenuAsync (juce::PopupMenu::Options()
+                        .withTargetScreenArea (
+                            juce::Rectangle<int> (screenPos.x, screenPos.y, 1, 1)),
+        [safeThis = juce::Component::SafePointer<TapeStrip> (this),
+         trackIdx, regionIdx]
+        (int chosen)
+        {
+            if (safeThis == nullptr) return;
+            if (chosen < 5000
+                || chosen >= 5000 + (int) (sizeof (kPalette) / sizeof (kPalette[0])))
+                return;
+            const juce::Colour newColour { kPalette[chosen - 5000].argb };
+            auto& live = safeThis->session.track (trackIdx)
+                            .midiRegions.currentMutable();
+            if (regionIdx < 0 || regionIdx >= (int) live.size()) return;
+            live[(size_t) regionIdx].customColour = newColour;
+            safeThis->repaint();
+        });
+}
+
 void TapeStrip::paint (juce::Graphics& g)
 {
     g.fillAll (juce::Colour (0xff0e0e10));
@@ -1803,13 +1915,35 @@ void TapeStrip::paint (juce::Graphics& g)
                                   .getIntersection (col.withTrimmedTop (1).withTrimmedBottom (1));
             if (regionRect.isEmpty()) continue;
 
-            // Block fill - desaturated track colour with a subtle inset
-            // so it reads "MIDI" vs the brighter audio block colour.
-            const auto base = session.track (t).colour;
+            // Block fill - desaturated region accent (custom colour
+            // when set, otherwise track) with a subtle inset so it
+            // reads "MIDI" vs the brighter audio block colour.
+            const auto base = region.customColour.isTransparent()
+                ? session.track (t).colour
+                : region.customColour;
             g.setColour (base.withMultipliedSaturation (0.5f).withMultipliedBrightness (0.55f));
             g.fillRoundedRectangle (regionRect.toFloat(), 2.0f);
             g.setColour (base.withAlpha (0.85f));
             g.drawRoundedRectangle (regionRect.toFloat().reduced (0.5f), 2.0f, 0.8f);
+
+            // User-supplied label, top-left of the region body. Same
+            // shadow + white-text combo the audio painter uses.
+            if (region.label.isNotEmpty()
+                && regionRect.getHeight() >= 10
+                && regionRect.getWidth()  >= 24)
+            {
+                auto labelArea = regionRect.withTrimmedLeft (4).withTrimmedRight (4);
+                if (labelArea.getWidth() > 0)
+                {
+                    g.setColour (juce::Colours::black.withAlpha (0.55f));
+                    g.setFont (juce::Font (juce::FontOptions (9.0f, juce::Font::bold)));
+                    g.drawText (region.label, labelArea.translated (1, 1),
+                                 juce::Justification::topLeft, true);
+                    g.setColour (juce::Colours::white.withAlpha (0.92f));
+                    g.drawText (region.label, labelArea,
+                                 juce::Justification::topLeft, true);
+                }
+            }
 
             // Note dots. Walk the region's notes; each note's start tick
             // converted back to a fraction of region length gives an X
