@@ -120,6 +120,28 @@ TapeStrip::RegionHit TapeStrip::hitTestRegion (int x, int y) const noexcept
             hit.track = t;
             hit.regionIdx = i;
 
+            // Fade-handle hit zone: top kFadeHandleH px of the region.
+            // Within this band, the cursor's distance to either fade-end
+            // x-position determines which handle is grabbed. Outside
+            // the band, falls through to the existing edge / move
+            // logic. Fade handles take priority over the take badge so
+            // the user can still adjust fade-in even on regions with
+            // alternate takes (the badge sits below the fade band).
+            const int yTopBand = row.getY() + 1;
+            const bool inFadeBand = (y >= yTopBand && y < yTopBand + kFadeHandleH);
+            if (inFadeBand)
+            {
+                const auto& reg = regions[(size_t) i];
+                const auto fadeInSamples  = juce::jmax ((juce::int64) 0, reg.fadeInSamples);
+                const auto fadeOutSamples = juce::jmax ((juce::int64) 0, reg.fadeOutSamples);
+                const double pxPerSample = (double) (x1 - x0)
+                    / (double) juce::jmax ((juce::int64) 1, reg.lengthInSamples);
+                const int fadeInEndX  = x0 + (int) std::round ((double) fadeInSamples  * pxPerSample);
+                const int fadeOutBegX = x1 - (int) std::round ((double) fadeOutSamples * pxPerSample);
+                if (std::abs (x - fadeInEndX)  <= kFadeHitPx) { hit.op = RegionOp::FadeIn;  return hit; }
+                if (std::abs (x - fadeOutBegX) <= kFadeHitPx) { hit.op = RegionOp::FadeOut; return hit; }
+            }
+
             // Take-history badge takes precedence over the trim-start gutter
             // since the two share screen area at the region's top-left. Same
             // bounds as the painter so the click target visibly lines up.
@@ -485,6 +507,8 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
         drag.origTimelineStart = region.timelineStart;
         drag.origLength        = region.lengthInSamples;
         drag.origSourceOffset  = region.sourceOffset;
+        drag.origFadeIn        = region.fadeInSamples;
+        drag.origFadeOut       = region.fadeOutSamples;
 
         selectedTrack  = hit.track;
         selectedRegion = hit.regionIdx;
@@ -689,6 +713,30 @@ void TapeStrip::mouseDrag (const juce::MouseEvent& e)
             r.lengthInSamples = newLen;
             break;
         }
+        case RegionOp::FadeIn:
+        {
+            // Drag right grows the fade-in. Clamp so fadeIn + fadeOut
+            // never exceeds the region's length (the renderer assumes
+            // the two ramps don't overlap; an overlapping pair would
+            // attenuate the middle to a value below 1.0 unintentionally).
+            const auto maxFadeIn = juce::jmax ((juce::int64) 0,
+                                                  r.lengthInSamples - drag.origFadeOut);
+            r.fadeInSamples = juce::jlimit ((juce::int64) 0,
+                                              maxFadeIn,
+                                              drag.origFadeIn + deltaSamples);
+            break;
+        }
+        case RegionOp::FadeOut:
+        {
+            // Mirror of FadeIn. Drag LEFT (negative delta) grows the
+            // fade-out, so subtract delta from the original length.
+            const auto maxFadeOut = juce::jmax ((juce::int64) 0,
+                                                   r.lengthInSamples - drag.origFadeIn);
+            r.fadeOutSamples = juce::jlimit ((juce::int64) 0,
+                                               maxFadeOut,
+                                               drag.origFadeOut - deltaSamples);
+            break;
+        }
         case RegionOp::None:
         case RegionOp::TakeBadge:
             break;  // mouseDown handled the rotation; no drag semantics
@@ -837,15 +885,23 @@ void TapeStrip::mouseUp (const juce::MouseEvent& e)
         beforeState.timelineStart   = drag.origTimelineStart;
         beforeState.lengthInSamples = drag.origLength;
         beforeState.sourceOffset    = drag.origSourceOffset;
+        beforeState.fadeInSamples   = drag.origFadeIn;
+        beforeState.fadeOutSamples  = drag.origFadeOut;
 
         // Skip if nothing actually moved (a click without a drag).
         if (beforeState.timelineStart   != afterState.timelineStart
             || beforeState.lengthInSamples != afterState.lengthInSamples
-            || beforeState.sourceOffset    != afterState.sourceOffset)
+            || beforeState.sourceOffset    != afterState.sourceOffset
+            || beforeState.fadeInSamples   != afterState.fadeInSamples
+            || beforeState.fadeOutSamples  != afterState.fadeOutSamples)
         {
+            const char* label =
+                drag.op == RegionOp::Move    ? "Move region" :
+                drag.op == RegionOp::FadeIn  ? "Adjust fade-in" :
+                drag.op == RegionOp::FadeOut ? "Adjust fade-out" :
+                                                "Trim region";
             auto& um = engine.getUndoManager();
-            um.beginNewTransaction (drag.op == RegionOp::Move ? "Move region"
-                                                               : "Trim region");
+            um.beginNewTransaction (label);
             um.perform (new RegionEditAction (session, engine,
                                                 drag.track, drag.regionIdx,
                                                 beforeState, afterState));
@@ -971,6 +1027,12 @@ void TapeStrip::mouseMove (const juce::MouseEvent& e)
     {
         case RegionOp::TrimStart:
         case RegionOp::TrimEnd:
+        case RegionOp::FadeIn:
+        case RegionOp::FadeOut:
+            // Same horizontal-resize cursor for both edge trim and fade
+            // handle - the user sees they can drag horizontally either
+            // way. The y-position (top band vs full edge) tells them
+            // which mode they're in; we don't need a separate cursor.
             setMouseCursor (juce::MouseCursor::LeftRightResizeCursor);
             break;
         case RegionOp::Move:
@@ -1142,6 +1204,55 @@ void TapeStrip::paint (juce::Graphics& g)
             const float midY = (float) regionRect.getCentreY();
             g.drawHorizontalLine ((int) midY, (float) regionRect.getX() + 2.0f,
                                    (float) regionRect.getRight() - 2.0f);
+
+            // Fade-in / fade-out visualisation. Slope line from the
+            // bottom corner of the fade zone up to the top corner at
+            // the fade end-point, plus a tiny grab handle (filled
+            // square) at the top so the user has something to aim
+            // for. Always drawn so the user can drag from a fade=0
+            // region to create a fade.
+            if (region.lengthInSamples > 0)
+            {
+                const auto fadeInSamples  = juce::jmax ((juce::int64) 0, region.fadeInSamples);
+                const auto fadeOutSamples = juce::jmax ((juce::int64) 0, region.fadeOutSamples);
+                const double pxPerSample = (double) regionRect.getWidth()
+                    / (double) region.lengthInSamples;
+                const float fadeColAlpha = 0.85f;
+                const auto fadeCol = juce::Colours::yellow.withAlpha (fadeColAlpha);
+                const float topY    = (float) regionRect.getY();
+                const float bottomY = (float) regionRect.getBottom();
+
+                // Fade-in slope.
+                if (fadeInSamples > 0)
+                {
+                    const float xEnd = (float) regionRect.getX()
+                        + (float) std::round ((double) fadeInSamples * pxPerSample);
+                    g.setColour (fadeCol);
+                    g.drawLine ((float) regionRect.getX(), bottomY, xEnd, topY, 1.2f);
+                }
+                // Fade-out slope.
+                if (fadeOutSamples > 0)
+                {
+                    const float xStart = (float) regionRect.getRight()
+                        - (float) std::round ((double) fadeOutSamples * pxPerSample);
+                    g.setColour (fadeCol);
+                    g.drawLine (xStart, topY,
+                                 (float) regionRect.getRight(), bottomY, 1.2f);
+                }
+
+                // Grab handles - filled 4x4 squares at the fade
+                // end-points along the top edge. Drawn for every
+                // region (even at fade=0) so the affordance is always
+                // discoverable: the user sees a handle at the
+                // corner and learns by dragging.
+                const float fadeInEndX  = (float) regionRect.getX()
+                    + (float) std::round ((double) fadeInSamples * pxPerSample);
+                const float fadeOutBegX = (float) regionRect.getRight()
+                    - (float) std::round ((double) fadeOutSamples * pxPerSample);
+                g.setColour (juce::Colours::yellow);
+                g.fillRect (juce::Rectangle<float> (fadeInEndX  - 2.0f, topY, 4.0f, 4.0f));
+                g.fillRect (juce::Rectangle<float> (fadeOutBegX - 2.0f, topY, 4.0f, 4.0f));
+            }
 
             // Take-history badge. Shows total take count (current + prior)
             // anchored to the region's top-left when there's at least one

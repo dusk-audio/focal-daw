@@ -88,8 +88,12 @@ private:
 
     // Region hit-testing for the editing surface. `op` reports which
     // sub-area of the region the cursor lies over (body / left edge /
-    // right edge); kEdgeHitPx controls how wide the resize gutter is.
-    enum class RegionOp { None, Move, TrimStart, TrimEnd, TakeBadge };
+    // right edge / top-corner fade handles); kEdgeHitPx controls how
+    // wide the resize gutter is, kFadeHandleH the height of the top
+    // band reserved for fade handles.
+    enum class RegionOp { None, Move, TrimStart, TrimEnd, TakeBadge, FadeIn, FadeOut };
+    static constexpr int kFadeHandleH = 6;
+    static constexpr int kFadeHitPx   = 5;
     static constexpr int kEdgeHitPx = 6;
     struct RegionHit
     {
@@ -155,6 +159,8 @@ private:
         juce::int64 origTimelineStart = 0;
         juce::int64 origLength        = 0;
         juce::int64 origSourceOffset  = 0;
+        juce::int64 origFadeIn        = 0;
+        juce::int64 origFadeOut       = 0;
     };
     ActiveDrag drag;
 
