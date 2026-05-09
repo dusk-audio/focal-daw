@@ -286,6 +286,11 @@ void PianoRollComponent::paintToolbar (juce::Graphics& g, juce::Rectangle<int> a
 
 void PianoRollComponent::paintNoteGrid (juce::Graphics& g, juce::Rectangle<int> area)
 {
+    // ScopedSaveState restores the clip region on scope exit so
+    // subsequent paint passes (toolbar / ruler / keyboard / velocity
+    // / CC) aren't clipped to the grid. Without this, only the grid
+    // + notes render and every other UI band is invisible.
+    juce::Graphics::ScopedSaveState saved (g);
     g.reduceClipRegion (area);
 
     // Row stripes - alternate so each octave reads as a unit. White-key
@@ -449,6 +454,7 @@ void PianoRollComponent::paintNotes (juce::Graphics& g, juce::Rectangle<int> are
 {
     const auto* r = region();
     if (r == nullptr) return;
+    juce::Graphics::ScopedSaveState saved (g);
     g.reduceClipRegion (area);
 
     for (int i = 0; i < (int) r->notes.size(); ++i)
@@ -480,6 +486,7 @@ void PianoRollComponent::paintVelocityStrip (juce::Graphics& g, juce::Rectangle<
 
     const auto* r = region();
     if (r == nullptr || r->lengthInTicks <= 0) return;
+    juce::Graphics::ScopedSaveState saved (g);
     g.reduceClipRegion (area);
 
     // Floor + ceiling baselines so the strip reads as a "level meter" -
@@ -1169,6 +1176,7 @@ void PianoRollComponent::paintCcStrip (juce::Graphics& g, juce::Rectangle<int> a
 
     const auto* r = region();
     if (r == nullptr || r->lengthInTicks <= 0) return;
+    juce::Graphics::ScopedSaveState saved (g);
     g.reduceClipRegion (area);
 
     const float ax = (float) area.getX();
