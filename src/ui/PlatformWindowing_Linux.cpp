@@ -6,6 +6,8 @@
 
 #include "PlatformWindowing.h"
 
+#include <cstdio>
+
 namespace focal::platform
 {
 namespace
@@ -22,6 +24,25 @@ namespace
 {
     auto* sys = juce::XWindowSystem::getInstanceWithoutCreating();
     return sys != nullptr ? sys->getDisplay() : nullptr;
+}
+
+// Return the native X window of any visible top-level OTHER than the
+// one departing, or None when none exists (genuine final shutdown).
+::Window pickSiblingFocusTarget (juce::Component& departing)
+{
+    auto* departingPeer = departing.getPeer();
+    if (departingPeer == nullptr) return None;
+
+    const int n = juce::TopLevelWindow::getNumTopLevelWindows();
+    for (int i = 0; i < n; ++i)
+    {
+        auto* tlw = juce::TopLevelWindow::getTopLevelWindow (i);
+        if (tlw == nullptr || ! tlw->isVisible()) continue;
+        auto* peer = tlw->getPeer();
+        if (peer == nullptr || peer == departingPeer) continue;
+        return (::Window) (uintptr_t) peer->getNativeHandle();
+    }
+    return None;
 }
 } // namespace
 
@@ -89,35 +110,31 @@ void prepareNativePeerForChildAttach (juce::ComponentPeer&)
 
 void prepareForTopLevelDestruction (juce::Component& topLevel)
 {
-    // Two layers of focus need to come off the window before destroy:
-    //
-    //   1. JUCE's internal component-tree focus model (unfocusAll +
-    //      giveAwayKeyboardFocus). Without this, JUCE-level focus
-    //      callbacks fire on a half-destroyed widget tree.
-    //   2. The X protocol's input focus, tracked separately by the
-    //      compositor. Mutter's focus_window only updates when it
-    //      observes a FocusOut event on the X server; JUCE's calls
-    //      above DON'T issue XSetInputFocus, so the compositor
-    //      keeps recording our window as focused. When setVisible
-    //      (false) then unmaps the toplevel, mutter aborts at
-    //      meta_window_unmanage with "focus_window != window" and
-    //      takes the Wayland session down with it.
-    //
-    // PointerRoot is "focus follows pointer" - under XWayland, mutter
-    // does not always translate that to focus_window=NULL on the
-    // Wayland side, and meta_window_unmanage later asserts.
-    // None/RevertToNone is the unambiguous "nothing has focus" form
-    // the XWayland bridge honours.
     juce::Component::unfocusAllComponents();
     topLevel.giveAwayKeyboardFocus();
 
     if (auto* d = juceDisplay())
     {
-        ::XSetInputFocus (d, None, RevertToNone, CurrentTime);
+        const auto sibling = pickSiblingFocusTarget (topLevel);
+        if (sibling != None)
+        {
+            // Pointing focus at a live sibling keeps mutter's wayland-
+            // side focus_window coherent across the upcoming UnmapNotify;
+            // XSync round-trips the X protocol but does NOT wait for
+            // mutter to drain its event queue, so a None target can
+            // race the unmap and trip meta_window_unmanage.
+            ::XSetInputFocus (d, sibling, RevertToParent, CurrentTime);
+            std::fprintf (stderr,
+                          "[Focal/X] focus -> sibling 0x%lx\n",
+                          (unsigned long) sibling);
+        }
+        else
+        {
+            ::XSetInputFocus (d, None, RevertToNone, CurrentTime);
+            std::fprintf (stderr, "[Focal/X] focus -> None (no sibling)\n");
+        }
+        std::fflush (stderr);
 
-        // Withdrawing the toplevel triggers mutter's Withdrawn-state
-        // path, which clears focus_window as part of the transition -
-        // before the destroy event would otherwise hit the assertion.
         if (auto* peer = topLevel.getPeer())
         {
             const auto win = (::Window) (uintptr_t) peer->getNativeHandle();
