@@ -1350,6 +1350,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             {
                 for (const auto& region : midiRegionsForBlock)
                 {
+                    if (region.muted) continue;
                     const auto regStart = region.timelineStart;
                     for (const auto& n : region.notes)
                     {
@@ -1368,6 +1369,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 
             for (const auto& region : midiRegionsForBlock)
             {
+                if (region.muted) continue;
                 const auto regStart = region.timelineStart;
                 const auto regEnd   = regStart + region.lengthInSamples;
                 // Skip regions that don't overlap the SHIFTED block at all.

@@ -1464,6 +1464,43 @@ void TapeStrip::showRegionContextMenu (const RegionHit& hit, juce::Point<int> sc
 
     m.addSeparator();
 
+    // Mute toggle. Single-region action - giving every member of a
+    // multi-selection the same mute state IS useful (mute all, then
+    // unmute one), so we fold it into a group op when the right-
+    // clicked region is part of the multi-selection. Same idiom as
+    // the Color submenu below.
+    m.addItem (region.muted ? "Unmute region" : "Mute region",
+                [safeThis = juce::Component::SafePointer<TapeStrip> (this),
+                 hitCopy = hit, currentlyMuted = region.muted]
+                {
+                    if (safeThis == nullptr) return;
+                    const bool target = ! currentlyMuted;
+                    std::vector<RegionId> targets;
+                    if (safeThis->isRegionSelected (hitCopy.track, hitCopy.regionIdx))
+                        targets = safeThis->allSelectedRegions();
+                    else
+                        targets.push_back ({ hitCopy.track, hitCopy.regionIdx });
+                    auto& um = safeThis->engine.getUndoManager();
+                    um.beginNewTransaction (target ? "Mute regions" : "Unmute regions");
+                    for (const auto& id : targets)
+                    {
+                        const auto& regs = safeThis->session.track (id.track).regions;
+                        if (id.regionIdx < 0 || id.regionIdx >= (int) regs.size()) continue;
+                        const auto& current = regs[(size_t) id.regionIdx];
+                        if (current.muted == target) continue;
+                        AudioRegion afterState  = current;
+                        AudioRegion beforeState = current;
+                        afterState.muted = target;
+                        um.perform (new RegionEditAction (
+                            safeThis->session, safeThis->engine,
+                            id.track, id.regionIdx, beforeState, afterState));
+                    }
+                    safeThis->rebuildPlaybackIfStopped();
+                    safeThis->repaint();
+                });
+
+    m.addSeparator();
+
     // Color submenu - 8 curated accent options + "Reset to track
     // colour". Setting goes through RegionEditAction so undo/redo
     // round-trip cleanly. Acts on every selected region (the user's
@@ -1599,6 +1636,24 @@ void TapeStrip::showMidiRegionContextMenu (int trackIdx, int regionIdx,
                             live[(size_t) regionIdx].label = newLabel;
                             safeThis->repaint();
                         }), false);
+                });
+
+    m.addSeparator();
+
+    // Mute toggle - mutates via currentMutable() since MIDI regions
+    // don't have an undoable edit-action surface today (matches how
+    // PianoRoll handles per-note edits). The audio thread reads the
+    // same memory so toggling takes effect on the next block.
+    m.addItem (region.muted ? "Unmute region" : "Mute region",
+                [safeThis = juce::Component::SafePointer<TapeStrip> (this),
+                 trackIdx, regionIdx, currentlyMuted = region.muted]
+                {
+                    if (safeThis == nullptr) return;
+                    auto& live = safeThis->session.track (trackIdx)
+                                    .midiRegions.currentMutable();
+                    if (regionIdx < 0 || regionIdx >= (int) live.size()) return;
+                    live[(size_t) regionIdx].muted = ! currentlyMuted;
+                    safeThis->repaint();
                 });
 
     m.addSeparator();
@@ -1739,10 +1794,14 @@ void TapeStrip::paint (juce::Graphics& g)
 
             // Block fill - region colour, slightly darker so the row label
             // still pops. Selected regions get a brighter mix so they read
-            // as the focused thing.
+            // as the focused thing. Muted regions get desaturated + half
+            // alpha so they read as "skipped" without disappearing.
             auto fillColour = regionAccent.withMultipliedSaturation (0.85f)
                                             .withMultipliedBrightness (0.65f);
             if (isSelected) fillColour = fillColour.brighter (0.30f);
+            if (region.muted)
+                fillColour = fillColour.withMultipliedSaturation (0.20f)
+                                       .withMultipliedAlpha (0.45f);
             g.setColour (fillColour);
             g.fillRoundedRectangle (regionRect.toFloat(), 2.0f);
 
@@ -1917,13 +1976,18 @@ void TapeStrip::paint (juce::Graphics& g)
 
             // Block fill - desaturated region accent (custom colour
             // when set, otherwise track) with a subtle inset so it
-            // reads "MIDI" vs the brighter audio block colour.
+            // reads "MIDI" vs the brighter audio block colour. Muted
+            // regions get further desaturated + half alpha to read
+            // as "skipped".
             const auto base = region.customColour.isTransparent()
                 ? session.track (t).colour
                 : region.customColour;
-            g.setColour (base.withMultipliedSaturation (0.5f).withMultipliedBrightness (0.55f));
+            auto midiFill = base.withMultipliedSaturation (0.5f).withMultipliedBrightness (0.55f);
+            if (region.muted)
+                midiFill = midiFill.withMultipliedSaturation (0.20f).withMultipliedAlpha (0.45f);
+            g.setColour (midiFill);
             g.fillRoundedRectangle (regionRect.toFloat(), 2.0f);
-            g.setColour (base.withAlpha (0.85f));
+            g.setColour (base.withAlpha (region.muted ? 0.45f : 0.85f));
             g.drawRoundedRectangle (regionRect.toFloat().reduced (0.5f), 2.0f, 0.8f);
 
             // User-supplied label, top-left of the region body. Same

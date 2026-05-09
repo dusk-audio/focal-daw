@@ -74,6 +74,12 @@ private:
         // Linear gain factor (dB-converted at preparePlayback so the
         // audio thread doesn't pay for the conversion per sample). 1.0 = unity.
         float       gainLinear      = 1.0f;
+        // Snapshot of AudioRegion::muted at preparePlayback time.
+        // readForTrack skips muted streams entirely. Toggling
+        // AudioRegion::muted while playing takes effect on the next
+        // stop+play (i.e. next preparePlayback call); rebuild
+        // mid-play is unsafe.
+        bool        muted           = false;
     };
 
     struct PerTrackStream

@@ -208,6 +208,7 @@ juce::DynamicObject::Ptr trackToObject (const Track& t)
         // Label - skip when empty so unedited regions stay diff-clean.
         if (r.label.isNotEmpty())
             rObj->setProperty ("label", r.label);
+        if (r.muted) rObj->setProperty ("muted", true);
 
         // Take history. Empty array on the common case (no overdubs); only
         // serialised when at least one prior take has been captured to keep
@@ -281,6 +282,7 @@ juce::DynamicObject::Ptr trackToObject (const Track& t)
                 rObj->setProperty ("custom_colour", r.customColour.toString());
             if (r.label.isNotEmpty())
                 rObj->setProperty ("label", r.label);
+            if (r.muted) rObj->setProperty ("muted", true);
 
             // MIDI take history mirrors audio: previously-recorded versions
             // of the same range stack here when an overdub fully overlaps
@@ -596,6 +598,7 @@ void restoreTrack (Track& t, const juce::var& v)
                                  : juce::Colour();
             r.label           = rv.hasProperty ("label") ? rv["label"].toString()
                                                           : juce::String();
+            r.muted           = rv.hasProperty ("muted") && (bool) rv["muted"];
 
             if (auto prior = rv["previous_takes"]; prior.isArray())
             {
@@ -673,6 +676,7 @@ void restoreTrack (Track& t, const juce::var& v)
                                  : juce::Colour();
             r.label           = rv.hasProperty ("label") ? rv["label"].toString()
                                                           : juce::String();
+            r.muted           = rv.hasProperty ("muted") && (bool) rv["muted"];
             parseNotes (rv["notes"], r.notes);
             parseCcs   (rv["ccs"],   r.ccs);
 

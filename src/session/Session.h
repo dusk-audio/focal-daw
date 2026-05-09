@@ -341,6 +341,13 @@ struct MidiRegion
     // both, and SessionSerializer round-trips them.
     juce::Colour customColour;
     juce::String label;
+
+    // Per-region mute - same semantics as AudioRegion::muted. The
+    // disk-MIDI scheduler in AudioEngine skips notes / CCs from
+    // muted regions, so toggling takes effect on the next audio
+    // block (no playback rebuild needed - MIDI regions are lock-
+    // free-readable from the audio thread via AtomicSnapshot).
+    bool muted = false;
 };
 
 // Audio region - references a mono WAV file on disk. Multiple recordings
@@ -395,6 +402,14 @@ struct AudioRegion
     // region body. Empty string = no label. Set via the right-click
     // "Rename..." action; persists per-region in session.json.
     juce::String label;
+
+    // Per-region mute. true = skip during playback (the audio is
+    // still on disk and the region's other state - fades, gain,
+    // edits - are preserved; toggling unmute brings the region
+    // back without re-recording). Audio takes effect on the next
+    // preparePlayback (i.e. next stop+play); the painter dims
+    // muted regions immediately.
+    bool muted = false;
 
     // Older takes that occupied this region's timeline range, captured by
     // RecordManager::stopRecording when the new take's range fully contains

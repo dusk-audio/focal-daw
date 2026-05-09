@@ -80,6 +80,7 @@ void PlaybackEngine::preparePlayback()
             // play. The Alt-drag clamps tighter ([-24, +12]) at the UI.
             rs.gainLinear = juce::Decibels::decibelsToGain (
                 juce::jlimit (-60.0f, 24.0f, region.gainDb), -60.0f);
+            rs.muted = region.muted;
             // Enforce non-overlap: if fadeIn + fadeOut > length the multiplied
             // ramps produce a gain-notch in the middle. Shrink proportionally
             // so the ramps meet at a single sample instead.
@@ -134,6 +135,7 @@ void PlaybackEngine::readForTrack (int trackIndex,
     for (auto& r : slot->regions)
     {
         if (r.reader == nullptr) continue;
+        if (r.muted) continue;
 
         // Regions are sorted by timelineStart - once we see one that begins
         // past the block, no later region can overlap us either.
