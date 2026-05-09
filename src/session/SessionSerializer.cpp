@@ -194,6 +194,12 @@ juce::DynamicObject::Ptr trackToObject (const Track& t)
         // don't gain noise. PlaybackEngine treats absent fields as 0.
         if (r.fadeInSamples  > 0) rObj->setProperty ("fade_in",  (juce::int64) r.fadeInSamples);
         if (r.fadeOutSamples > 0) rObj->setProperty ("fade_out", (juce::int64) r.fadeOutSamples);
+        // Skip gain_db when at unity to keep older sessions diff-clean
+        // and avoid bloating the JSON for unedited regions. Float
+        // exact-zero comparison is fine because the field is set
+        // either by a default-construct (0.0f) or by an explicit user
+        // drag - no float-arithmetic accumulation path exists.
+        if (r.gainDb != 0.0f) rObj->setProperty ("gain_db", (double) r.gainDb);
 
         // Take history. Empty array on the common case (no overdubs); only
         // serialised when at least one prior take has been captured to keep
@@ -569,6 +575,7 @@ void restoreTrack (Track& t, const juce::var& v)
             r.fadeInSamples   = rv.hasProperty ("fade_in")  ? (juce::int64) rv["fade_in"]  : 0;
             r.fadeOutSamples  = rv.hasProperty ("fade_out") ? (juce::int64) rv["fade_out"] : 0;
             r.numChannels     = rv.hasProperty ("num_channels") ? (int) rv["num_channels"] : 1;
+            r.gainDb          = rv.hasProperty ("gain_db")  ? (float) (double) rv["gain_db"] : 0.0f;
 
             if (auto prior = rv["previous_takes"]; prior.isArray())
             {

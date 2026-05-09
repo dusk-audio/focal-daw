@@ -503,12 +503,20 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
         drag.track             = hit.track;
         drag.regionIdx         = hit.regionIdx;
         drag.op                = hit.op;
+        // Alt held while clicking the body promotes the drag to gain
+        // adjust - vertical drag changes dB instead of horizontal
+        // motion changing the timeline start. Doesn't affect the
+        // edge gutters or fade handles (which already do something
+        // useful with Alt held).
+        if (drag.op == RegionOp::Move && e.mods.isAltDown())
+            drag.op = RegionOp::AdjustGain;
         drag.mouseDownSample   = sampleAtX (e.x);
         drag.origTimelineStart = region.timelineStart;
         drag.origLength        = region.lengthInSamples;
         drag.origSourceOffset  = region.sourceOffset;
         drag.origFadeIn        = region.fadeInSamples;
         drag.origFadeOut       = region.fadeOutSamples;
+        drag.origGainDb        = region.gainDb;
 
         selectedTrack  = hit.track;
         selectedRegion = hit.regionIdx;
@@ -737,6 +745,20 @@ void TapeStrip::mouseDrag (const juce::MouseEvent& e)
                                                drag.origFadeOut - deltaSamples);
             break;
         }
+        case RegionOp::AdjustGain:
+        {
+            // Vertical pixels -> dB. Up = louder, down = quieter.
+            // 0.1 dB per pixel gives a comfortable range without the
+            // user having to drag wildly: 60 px = 6 dB, 120 px = the
+            // full +12 dB ceiling. Clamped to [-24, +12] dB at the
+            // UI; PlaybackEngine::preparePlayback re-clamps to a
+            // wider [-60, +24] safety net.
+            const float deltaPx = (float) (e.getMouseDownY() - e.y);
+            const float deltaDb = deltaPx * 0.10f;
+            r.gainDb = juce::jlimit (-24.0f, 12.0f,
+                                       drag.origGainDb + deltaDb);
+            break;
+        }
         case RegionOp::None:
         case RegionOp::TakeBadge:
             break;  // mouseDown handled the rotation; no drag semantics
@@ -887,19 +909,22 @@ void TapeStrip::mouseUp (const juce::MouseEvent& e)
         beforeState.sourceOffset    = drag.origSourceOffset;
         beforeState.fadeInSamples   = drag.origFadeIn;
         beforeState.fadeOutSamples  = drag.origFadeOut;
+        beforeState.gainDb          = drag.origGainDb;
 
         // Skip if nothing actually moved (a click without a drag).
         if (beforeState.timelineStart   != afterState.timelineStart
             || beforeState.lengthInSamples != afterState.lengthInSamples
             || beforeState.sourceOffset    != afterState.sourceOffset
             || beforeState.fadeInSamples   != afterState.fadeInSamples
-            || beforeState.fadeOutSamples  != afterState.fadeOutSamples)
+            || beforeState.fadeOutSamples  != afterState.fadeOutSamples
+            || beforeState.gainDb          != afterState.gainDb)
         {
             const char* label =
-                drag.op == RegionOp::Move    ? "Move region" :
-                drag.op == RegionOp::FadeIn  ? "Adjust fade-in" :
-                drag.op == RegionOp::FadeOut ? "Adjust fade-out" :
-                                                "Trim region";
+                drag.op == RegionOp::Move        ? "Move region" :
+                drag.op == RegionOp::FadeIn      ? "Adjust fade-in" :
+                drag.op == RegionOp::FadeOut     ? "Adjust fade-out" :
+                drag.op == RegionOp::AdjustGain  ? "Adjust region gain" :
+                                                    "Trim region";
             auto& um = engine.getUndoManager();
             um.beginNewTransaction (label);
             um.perform (new RegionEditAction (session, engine,
@@ -1048,7 +1073,15 @@ void TapeStrip::mouseMove (const juce::MouseEvent& e)
             setMouseCursor (juce::MouseCursor::LeftRightResizeCursor);
             break;
         case RegionOp::Move:
-            setMouseCursor (juce::MouseCursor::DraggingHandCursor);
+            // Alt over the body promotes Move -> AdjustGain on click;
+            // signal it with an up/down resize cursor so the user
+            // doesn't drag horizontally and accidentally move.
+            setMouseCursor (e.mods.isAltDown()
+                              ? juce::MouseCursor::UpDownResizeCursor
+                              : juce::MouseCursor::DraggingHandCursor);
+            break;
+        case RegionOp::AdjustGain:
+            setMouseCursor (juce::MouseCursor::UpDownResizeCursor);
             break;
         case RegionOp::TakeBadge:
             setMouseCursor (juce::MouseCursor::PointingHandCursor);
@@ -1226,6 +1259,30 @@ void TapeStrip::paint (juce::Graphics& g)
             const float midY = (float) regionRect.getCentreY();
             g.drawHorizontalLine ((int) midY, (float) regionRect.getX() + 2.0f,
                                    (float) regionRect.getRight() - 2.0f);
+
+            // Region-gain badge: small "+3.0 dB" / "-6.0 dB" readout
+            // at the top-right of the region body. Only painted when
+            // gain is meaningfully off unity so an unedited timeline
+            // reads clean. Alt-drag adjusts.
+            if (std::abs (region.gainDb) >= 0.05f)
+            {
+                const auto label = juce::String::formatted (
+                    "%+.1f dB", region.gainDb);
+                const int badgeW = juce::jmin (regionRect.getWidth(), 56);
+                const int badgeH = juce::jmin (regionRect.getHeight() - 2, 10);
+                if (badgeW >= 28 && badgeH >= 6)
+                {
+                    juce::Rectangle<int> badge (regionRect.getRight() - badgeW,
+                                                  regionRect.getY() + 1,
+                                                  badgeW, badgeH);
+                    g.setColour (juce::Colours::black.withAlpha (0.55f));
+                    g.fillRoundedRectangle (badge.toFloat(), 1.5f);
+                    g.setColour (region.gainDb > 0 ? juce::Colour (0xffffd060)
+                                                     : juce::Colour (0xff70c0ff));
+                    g.setFont (juce::Font (juce::FontOptions (8.0f, juce::Font::bold)));
+                    g.drawText (label, badge, juce::Justification::centred, false);
+                }
+            }
 
             // Fade-in / fade-out visualisation. Slope line is always
             // drawn so non-zero fades read at a glance; the grab

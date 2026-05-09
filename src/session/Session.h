@@ -368,6 +368,14 @@ struct AudioRegion
     juce::int64 fadeInSamples  = 0;
     juce::int64 fadeOutSamples = 0;
 
+    // Per-region gain in dB. Default 0.0 = unity (no change). Applied
+    // multiplicatively in PlaybackEngine's per-sample loop, on top of
+    // the fade envelope, BEFORE the channel strip's processing - so
+    // strip EQ / compression sees the user's chosen level instead of
+    // the raw take. Range is enforced at the UI (Alt-drag clamps to
+    // [-24, +12] dB); the field itself is just a float.
+    float gainDb = 0.0f;
+
     // Older takes that occupied this region's timeline range, captured by
     // RecordManager::stopRecording when the new take's range fully contains
     // an existing region. Front of the vector = next to surface on a cycle.

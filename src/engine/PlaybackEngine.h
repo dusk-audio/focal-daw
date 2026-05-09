@@ -71,6 +71,9 @@ private:
         juce::int64 fadeOutSamples  = 0;
         int         numChannels     = 1;  // 1 = mono region (duplicate to R when stereo strip),
                                            // 2 = stereo region (read L+R from file).
+        // Linear gain factor (dB-converted at preparePlayback so the
+        // audio thread doesn't pay for the conversion per sample). 1.0 = unity.
+        float       gainLinear      = 1.0f;
     };
 
     struct PerTrackStream

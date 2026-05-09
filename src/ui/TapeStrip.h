@@ -97,7 +97,7 @@ private:
     // right edge / top-corner fade handles); kEdgeHitPx controls how
     // wide the resize gutter is, kFadeHandleH the height of the top
     // band reserved for fade handles.
-    enum class RegionOp { None, Move, TrimStart, TrimEnd, TakeBadge, FadeIn, FadeOut };
+    enum class RegionOp { None, Move, TrimStart, TrimEnd, TakeBadge, FadeIn, FadeOut, AdjustGain };
     static constexpr int kFadeHandleH = 6;
     static constexpr int kFadeHitPx   = 5;
     static constexpr int kEdgeHitPx = 6;
@@ -167,6 +167,7 @@ private:
         juce::int64 origSourceOffset  = 0;
         juce::int64 origFadeIn        = 0;
         juce::int64 origFadeOut       = 0;
+        float       origGainDb        = 0.0f;
     };
     ActiveDrag drag;
 

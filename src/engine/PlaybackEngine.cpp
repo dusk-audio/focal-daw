@@ -73,6 +73,13 @@ void PlaybackEngine::preparePlayback()
             rs.fadeInSamples   = juce::jmax ((juce::int64) 0, region.fadeInSamples);
             rs.fadeOutSamples  = juce::jmax ((juce::int64) 0, region.fadeOutSamples);
             rs.numChannels     = juce::jlimit (1, 2, region.numChannels);
+            // Convert dB once on the message thread; the audio loop
+            // multiplies by the linear factor per sample. Clamp the
+            // dB at extreme values to avoid wild values from a hand-
+            // edited session.json producing audible clip on first
+            // play. The Alt-drag clamps tighter ([-24, +12]) at the UI.
+            rs.gainLinear = juce::Decibels::decibelsToGain (
+                juce::jlimit (-60.0f, 24.0f, region.gainDb), -60.0f);
             // Enforce non-overlap: if fadeIn + fadeOut > length the multiplied
             // ramps produce a gain-notch in the middle. Shrink proportionally
             // so the ramps meet at a single sample instead.
@@ -168,10 +175,11 @@ void PlaybackEngine::readForTrack (int trackIndex,
         const juce::int64 fadeOutGain = (fadeOut > 0) ? fadeOut : 1;
         const auto* srcL = readScratch.getReadPointer (0);
         const auto* srcR = readStereo ? readScratch.getReadPointer (1) : srcL;
+        const float regionGain = r.gainLinear;
         for (int i = 0; i < withinSamples; ++i)
         {
             const juce::int64 timelineSample = firstWithin + i;
-            float gain = 1.0f;
+            float gain = regionGain;
             if (fadeIn > 0)
             {
                 const juce::int64 inPos = timelineSample - regionStart;
