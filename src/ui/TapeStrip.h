@@ -286,5 +286,16 @@ private:
     int hoveredTrack  = -1;
     int hoveredRegion = -1;
     void mouseExit (const juce::MouseEvent&) override;
+
+    // Rubber-band box-select state. Active during a Shift / Cmd +
+    // drag from empty track-row space. Origin is captured on
+    // mouseDown; current is updated each mouseDrag; on mouseUp every
+    // audio region whose painted rect intersects the box gets added
+    // to the multi-selection. MIDI regions are skipped (their
+    // click-to-open-roll path is separate). Rectangle stored in
+    // screen coords so the painter and intersection test share the
+    // same frame of reference.
+    bool                  rubberBandActive = false;
+    juce::Rectangle<int>  rubberBand;
 };
 } // namespace focal

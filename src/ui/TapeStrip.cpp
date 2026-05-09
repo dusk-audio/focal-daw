@@ -684,10 +684,24 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
         }
     }
 
-    // Click on empty timeline → seek the playhead AND clear every
-    // selection (primary + additional). Shift-click on empty space is
-    // reserved for a future rubber-band drag; for now it falls through
-    // to the same clear-and-seek behaviour.
+    // Shift / Cmd + click on empty track-row space starts a rubber-
+    // band box-select. Skip the seek + clear so the existing
+    // selection is preserved; mouseUp intersects each region's rect
+    // with the box and adds matches to additionalSelections. Outside
+    // the tracks column (e.g. on the left-edge label gutter) the
+    // rubber band would have nothing to hit, so we only enter this
+    // mode inside tracksColumnBounds.
+    if ((e.mods.isShiftDown() || e.mods.isCommandDown())
+        && tracksColumnBounds().contains (e.x, e.y))
+    {
+        rubberBandActive = true;
+        rubberBand = juce::Rectangle<int> (e.x, e.y, 0, 0);
+        repaint();
+        return;
+    }
+
+    // Plain click on empty timeline → seek the playhead AND clear
+    // every selection (primary + additional).
     clearAllSelections();
 
     const auto sample = sampleAtX (e.x);
@@ -697,6 +711,19 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
 
 void TapeStrip::mouseDrag (const juce::MouseEvent& e)
 {
+    // Rubber-band drag - update the screen-space rectangle from the
+    // mouseDown origin to the current point. mouseUp finalises the
+    // selection.
+    if (rubberBandActive)
+    {
+        const int x0 = e.getMouseDownX();
+        const int y0 = e.getMouseDownY();
+        rubberBand = juce::Rectangle<int> (juce::jmin (x0, e.x), juce::jmin (y0, e.y),
+                                              std::abs (e.x - x0), std::abs (e.y - y0));
+        repaint();
+        return;
+    }
+
     // Marker drag - reposition a marker once the cursor moves more than
     // a small threshold from the click. Below threshold, it's still a
     // click (mouseUp will seek). The marker's array index stays valid
@@ -930,6 +957,60 @@ void TapeStrip::mouseDrag (const juce::MouseEvent& e)
 
 void TapeStrip::mouseUp (const juce::MouseEvent& e)
 {
+    // Rubber-band finalisation. Walk every audio region; any whose
+    // painted rect intersects the box gets added to additional-
+    // Selections. We don't replace the existing selection - the
+    // user's modifier was Shift/Cmd, which is "extend", not
+    // "replace". Empty box (a click without drag) is a no-op so the
+    // user's existing selection stays intact.
+    if (rubberBandActive)
+    {
+        if (! rubberBand.isEmpty())
+        {
+            const auto col = tracksColumnBounds();
+            for (int t = 0; t < Session::kNumTracks; ++t)
+            {
+                const auto row = rowBounds (t);
+                if (row.isEmpty()) continue;
+                if (rubberBand.getBottom() < row.getY()) continue;
+                if (rubberBand.getY() > row.getBottom()) continue;
+                const auto& regions = session.track (t).regions;
+                for (int i = 0; i < (int) regions.size(); ++i)
+                {
+                    const auto& r = regions[(size_t) i];
+                    const int x0 = xForSample (r.timelineStart);
+                    const int x1 = xForSample (r.timelineStart + r.lengthInSamples);
+                    auto regionRect = juce::Rectangle<int> (
+                            x0, row.getY() + 1,
+                            juce::jmax (2, x1 - x0),
+                            row.getHeight() - 2)
+                        .getIntersection (col.withTrimmedTop (1).withTrimmedBottom (1));
+                    if (regionRect.isEmpty()) continue;
+                    if (! rubberBand.intersects (regionRect)) continue;
+
+                    // Promote the first hit to primary if no primary
+                    // exists; otherwise add to the additional set.
+                    if (selectedTrack < 0 || selectedRegion < 0)
+                    {
+                        selectedTrack  = t;
+                        selectedRegion = i;
+                    }
+                    else if (! isRegionSelected (t, i))
+                    {
+                        const RegionId id { t, i };
+                        auto pos = std::lower_bound (additionalSelections.begin(),
+                                                        additionalSelections.end(), id);
+                        additionalSelections.insert (pos, id);
+                    }
+                }
+            }
+        }
+        rubberBandActive = false;
+        rubberBand = {};
+        repaint();
+        return;
+    }
+
     // Bracket drag finalisation. Transport state is already up-to-date
     // from each mouseDrag call; nothing to do beyond clearing the drag
     // so future mouseDrags route through the right path.
@@ -1826,6 +1907,17 @@ void TapeStrip::paint (juce::Graphics& g)
     {
         g.setColour (juce::Colour (0xffe04040));
         g.drawVerticalLine (phX, 0.0f, (float) getHeight());
+    }
+
+    // ── Rubber-band overlay (Shift/Cmd + drag box-select) ──
+    // Drawn last so it sits on top of every region / playhead / marker.
+    if (rubberBandActive && ! rubberBand.isEmpty())
+    {
+        const auto highlight = juce::Colour (0xff70b0e0);   // Focal accent blue
+        g.setColour (highlight.withAlpha (0.15f));
+        g.fillRect (rubberBand);
+        g.setColour (highlight.withAlpha (0.85f));
+        g.drawRect (rubberBand, 1);
     }
 }
 
