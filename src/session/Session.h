@@ -384,6 +384,11 @@ struct AudioRegion
     // chorus / etc.) without changing the whole track's tint.
     juce::Colour customColour;
 
+    // Optional user-supplied label painted at the top-left of the
+    // region body. Empty string = no label. Set via the right-click
+    // "Rename..." action; persists per-region in session.json.
+    juce::String label;
+
     // Older takes that occupied this region's timeline range, captured by
     // RecordManager::stopRecording when the new take's range fully contains
     // an existing region. Front of the vector = next to surface on a cycle.

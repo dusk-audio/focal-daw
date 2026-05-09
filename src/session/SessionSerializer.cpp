@@ -205,6 +205,9 @@ juce::DynamicObject::Ptr trackToObject (const Track& t)
         // Stored as an 8-digit ARGB hex string via Colour::toString().
         if (! r.customColour.isTransparent())
             rObj->setProperty ("custom_colour", r.customColour.toString());
+        // Label - skip when empty so unedited regions stay diff-clean.
+        if (r.label.isNotEmpty())
+            rObj->setProperty ("label", r.label);
 
         // Take history. Empty array on the common case (no overdubs); only
         // serialised when at least one prior take has been captured to keep
@@ -584,6 +587,8 @@ void restoreTrack (Track& t, const juce::var& v)
             r.customColour    = rv.hasProperty ("custom_colour")
                                  ? juce::Colour::fromString (rv["custom_colour"].toString())
                                  : juce::Colour();
+            r.label           = rv.hasProperty ("label") ? rv["label"].toString()
+                                                          : juce::String();
 
             if (auto prior = rv["previous_takes"]; prior.isArray())
             {

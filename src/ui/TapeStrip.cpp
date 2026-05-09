@@ -1395,6 +1395,56 @@ void TapeStrip::showRegionContextMenu (const RegionHit& hit, juce::Point<int> sc
                 });
     m.addSeparator();
 
+    // Rename / clear-label action. Single-region only - giving every
+    // member of a multi-selection the same name is rarely useful;
+    // users rename one at a time.
+    const auto currentLabel = region.label;
+    const juce::String renameLabel = currentLabel.isEmpty()
+        ? juce::String ("Add label\xe2\x80\xa6")           // "Add label..."
+        : juce::String ("Rename label\xe2\x80\xa6");        // "Rename label..."
+    m.addItem (renameLabel,
+                [safeThis = juce::Component::SafePointer<TapeStrip> (this),
+                 hitCopy = hit, currentLabel]
+                {
+                    if (safeThis == nullptr) return;
+                    auto window = std::make_shared<juce::AlertWindow> (
+                        "Region label",
+                        "Type a label for this region:",
+                        juce::AlertWindow::NoIcon);
+                    window->addTextEditor ("text", currentLabel,
+                                              juce::String(), false);
+                    window->addButton ("OK",     1,
+                                          juce::KeyPress (juce::KeyPress::returnKey));
+                    window->addButton ("Cancel", 0,
+                                          juce::KeyPress (juce::KeyPress::escapeKey));
+                    auto* raw = window.get();
+                    raw->enterModalState (true, juce::ModalCallbackFunction::create (
+                        [safeThis, hitCopy, holder = window] (int result) mutable
+                        {
+                            if (result != 1 || safeThis == nullptr) return;
+                            const auto newLabel = holder->getTextEditorContents ("text");
+                            auto& regs = safeThis->session.track (hitCopy.track).regions;
+                            if (hitCopy.regionIdx < 0
+                                || hitCopy.regionIdx >= (int) regs.size()) return;
+                            const auto& current = regs[(size_t) hitCopy.regionIdx];
+                            if (current.label == newLabel) return;
+                            AudioRegion afterState  = current;
+                            AudioRegion beforeState = current;
+                            afterState.label = newLabel;
+                            auto& um = safeThis->engine.getUndoManager();
+                            um.beginNewTransaction (newLabel.isEmpty()
+                                                       ? "Clear region label"
+                                                       : "Rename region");
+                            um.perform (new RegionEditAction (
+                                safeThis->session, safeThis->engine,
+                                hitCopy.track, hitCopy.regionIdx,
+                                beforeState, afterState));
+                            safeThis->repaint();
+                        }), false);
+                });
+
+    m.addSeparator();
+
     // Color submenu - 8 curated accent options + "Reset to track
     // colour". Setting goes through RegionEditAction so undo/redo
     // round-trip cleanly. Acts on every selected region (the user's
@@ -1602,6 +1652,35 @@ void TapeStrip::paint (juce::Graphics& g)
             const float midY = (float) regionRect.getCentreY();
             g.drawHorizontalLine ((int) midY, (float) regionRect.getX() + 2.0f,
                                    (float) regionRect.getRight() - 2.0f);
+
+            // User-supplied region label, drawn over the body's
+            // top-left. Only when set + the region is wide enough
+            // for a few characters; auto-truncated by the renderer
+            // otherwise. Take-history badge sits in the same corner;
+            // the label paints on top so the user can see what they
+            // typed. Skip when the row is too short to fit text.
+            if (region.label.isNotEmpty()
+                && regionRect.getHeight() >= 10
+                && regionRect.getWidth()  >= 24)
+            {
+                const int padX = 4;
+                const int badgeOffset = ! region.previousTakes.empty() ? 18 : 0;
+                auto labelArea = regionRect.withTrimmedLeft (padX + badgeOffset)
+                                            .withTrimmedRight (padX);
+                if (labelArea.getWidth() > 0)
+                {
+                    g.setColour (juce::Colours::black.withAlpha (0.55f));
+                    g.setFont (juce::Font (juce::FontOptions (9.0f, juce::Font::bold)));
+                    // Single-pixel shadow at +1,+1 makes the label
+                    // legible regardless of region accent brightness.
+                    g.drawText (region.label,
+                                 labelArea.translated (1, 1),
+                                 juce::Justification::topLeft, true);
+                    g.setColour (juce::Colours::white.withAlpha (0.92f));
+                    g.drawText (region.label, labelArea,
+                                 juce::Justification::topLeft, true);
+                }
+            }
 
             // Region-gain badge: small "+3.0 dB" / "-6.0 dB" readout
             // at the top-right of the region body. Only painted when
