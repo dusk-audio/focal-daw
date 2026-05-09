@@ -6,6 +6,7 @@
 
 namespace focal
 {
+class AudioEngine;
 // Piano-roll editor for one MidiRegion. Anchored on a (track, region) pair
 // at construction; the component validates indices each paint so a
 // concurrent record / delete that mutates the regions vector doesn't crash
@@ -42,8 +43,21 @@ namespace focal
 class PianoRollComponent final : public juce::Component
 {
 public:
-    PianoRollComponent (Session& session, int trackIndex, int regionIndex);
+    PianoRollComponent (Session& session, AudioEngine& engine,
+                          int trackIndex, int regionIndex);
     ~PianoRollComponent() override;
+
+    // Step-record entry points. MainComponent wires these to the
+    // VirtualKeyboardComponent's onNoteOn / onNoteOff callbacks
+    // when both modals are open. Each VKB Note On lands as a
+    // MidiNote at the current playhead (or the start of the
+    // currently-in-progress chord); the playhead advances by one
+    // snap step when the chord clears.
+    void stepRecordNoteOn  (int noteNumber, int velocity);
+    void stepRecordNoteOff (int noteNumber);
+    // Reset step-record bookkeeping. Called when the VKB closes -
+    // any in-flight chord state would be stale next time.
+    void resetStepRecordState() noexcept;
 
     // Esc-to-close hook. The host (MainComponent) sets this so the user
     // can dismiss the overlay without reaching for the mouse. The roll
@@ -71,8 +85,18 @@ public:
 
 private:
     Session& session;
+    AudioEngine& engine;
     int trackIdx;
     int regionIdx;
+
+    // Step-record (VKB-driven) state. Held-counter tracks how many
+    // VKB keys are currently down; chordHadNotes flips true on the
+    // first Note On of a chord and back to false when the count
+    // drops to zero. The first Note On of the NEXT chord advances
+    // the playhead before placing - chord notes themselves share a
+    // start position.
+    int  stepRecordHeld     = 0;
+    bool stepRecordChordHad = false;
 
     // Pixels per tick: drives horizontal scale. Default 24 px/quarter at
     // 480 ticks/quarter = 0.05 px/tick.

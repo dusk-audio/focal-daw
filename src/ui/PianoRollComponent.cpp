@@ -1,4 +1,5 @@
 #include "PianoRollComponent.h"
+#include "../engine/AudioEngine.h"
 #include <algorithm>
 #include <map>
 
@@ -61,8 +62,8 @@ const char* noteNameForC (int noteNumber)
 }
 } // namespace
 
-PianoRollComponent::PianoRollComponent (Session& s, int t, int r)
-    : session (s), trackIdx (t), regionIdx (r)
+PianoRollComponent::PianoRollComponent (Session& s, AudioEngine& e, int t, int r)
+    : session (s), engine (e), trackIdx (t), regionIdx (r)
 {
     setOpaque (true);
     setWantsKeyboardFocus (true);
@@ -750,6 +751,74 @@ void PianoRollComponent::duplicateSelectedNotes()
     }
     selectedNotes = std::move (newSelection);
     std::sort (selectedNotes.begin(), selectedNotes.end());
+}
+
+void PianoRollComponent::stepRecordNoteOn (int noteNumber, int velocity)
+{
+    auto* r = region();
+    if (r == nullptr) return;
+    const double sr  = engine.getCurrentSampleRate();
+    const float  bpm = session.tempoBpm.load (std::memory_order_relaxed);
+    if (sr <= 0.0 || bpm <= 0.0f) return;
+
+    // Step length: piano-roll snap when set, otherwise default to a
+    // 1/16 note. snapTicks=0 means "no snap" for note-edit drags;
+    // step record still needs SOME advance so we fall back to 1/16.
+    const juce::int64 stepTicks = snapTicks > 0
+        ? snapTicks
+        : (kMidiTicksPerQuarter / 4);
+
+    // First note of a NEW chord (held drops to 0 between chords)
+    // advances the playhead by step before placing. Subsequent notes
+    // within the same chord share the start position.
+    if (stepRecordHeld == 0 && stepRecordChordHad)
+    {
+        const juce::int64 advanceSamples = ticksToSamples (stepTicks, sr, bpm);
+        engine.getTransport().setPlayhead (
+            engine.getTransport().getPlayhead() + advanceSamples);
+        stepRecordChordHad = false;
+    }
+
+    const auto playhead = engine.getTransport().getPlayhead();
+    const juce::int64 sampleOffset = playhead - r->timelineStart;
+    if (sampleOffset < 0) return;   // playhead is before the region; ignore
+    const juce::int64 startTick = samplesToTicks (sampleOffset, sr, bpm);
+
+    // Extend the region if the new note would go past its current
+    // end. Without this the painter clips the note and the engine
+    // wouldn't schedule it during playback.
+    if (startTick + stepTicks > r->lengthInTicks)
+    {
+        r->lengthInTicks = startTick + stepTicks;
+        r->lengthInSamples = ticksToSamples (r->lengthInTicks, sr, bpm);
+    }
+
+    MidiNote n;
+    n.channel       = 1;
+    n.noteNumber    = juce::jlimit (0, kNumKeys - 1, noteNumber);
+    n.velocity      = juce::jlimit (1, 127, velocity);
+    n.startTick     = startTick;
+    n.lengthInTicks = stepTicks;
+    r->notes.push_back (n);
+
+    ++stepRecordHeld;
+    stepRecordChordHad = true;
+    repaint();
+}
+
+void PianoRollComponent::stepRecordNoteOff (int /*noteNumber*/)
+{
+    if (stepRecordHeld > 0)
+        --stepRecordHeld;
+    // Don't advance playhead here - we wait for the NEXT Note On
+    // so chord input stays clean (place all notes, release all,
+    // place next chord, ...).
+}
+
+void PianoRollComponent::resetStepRecordState() noexcept
+{
+    stepRecordHeld     = 0;
+    stepRecordChordHad = false;
 }
 
 void PianoRollComponent::nudgeSelectedTicks (juce::int64 deltaTicks)

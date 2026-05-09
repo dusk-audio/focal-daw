@@ -1721,7 +1721,7 @@ void MainComponent::openPianoRoll (int trackIdx, int regionIdx)
         if (sameRegion) return;
     }
 
-    pianoRoll = std::make_unique<PianoRollComponent> (session, trackIdx, regionIdx);
+    pianoRoll = std::make_unique<PianoRollComponent> (session, engine, trackIdx, regionIdx);
     pianoRollTrackIdx  = trackIdx;
     pianoRollRegionIdx = regionIdx;
     pianoRollDim = std::make_unique<DimOverlay>();
@@ -1822,10 +1822,39 @@ void MainComponent::closeTuner()
 
 void MainComponent::toggleVirtualKeyboard()
 {
-    if (virtualKeyboardModal.isOpen()) { virtualKeyboardModal.close(); return; }
+    if (virtualKeyboardModal.isOpen())
+    {
+        // Closing the VKB: also reset any in-flight step-record
+        // chord state on the open piano roll. Stale held-counters
+        // would otherwise survive across VKB open/close cycles.
+        if (pianoRoll != nullptr)
+            pianoRoll->resetStepRecordState();
+        virtualKeyboardModal.close();
+        return;
+    }
 
     auto body = std::make_unique<VirtualKeyboardComponent> (engine);
     body->setSize (720, 220);
+
+    // Step-record wiring: when the piano roll is open at the time
+    // each VKB note fires, the note also lands as a MidiNote at
+    // the playhead. We capture by SafePointer so closing either
+    // modal can't dangle. The roll's stepRecordNoteOn/Off handle
+    // the chord-aware playhead-advance logic.
+    juce::Component::SafePointer<MainComponent> safeThis (this);
+    body->onNoteOn = [safeThis] (int note, int vel)
+    {
+        if (auto* self = safeThis.getComponent())
+            if (self->pianoRoll != nullptr)
+                self->pianoRoll->stepRecordNoteOn (note, vel);
+    };
+    body->onNoteOff = [safeThis] (int note)
+    {
+        if (auto* self = safeThis.getComponent())
+            if (self->pianoRoll != nullptr)
+                self->pianoRoll->stepRecordNoteOff (note);
+    };
+
     virtualKeyboardModal.show (*this, std::move (body));
 }
 } // namespace focal
