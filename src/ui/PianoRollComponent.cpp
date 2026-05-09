@@ -1,5 +1,6 @@
 #include "PianoRollComponent.h"
 #include <algorithm>
+#include <map>
 
 namespace focal
 {
@@ -574,6 +575,169 @@ void PianoRollComponent::quantizeSelected (juce::int64 gridTicks, float strength
             if (idx < 0 || idx >= (int) r->notes.size()) continue;
             applyToOne (r->notes[(size_t) idx]);
         }
+    }
+}
+
+void PianoRollComponent::humanizeVelocity (int rangePercent)
+{
+    auto* r = region();
+    if (r == nullptr) return;
+    rangePercent = juce::jlimit (1, 100, rangePercent);
+    const int range = (int) std::round (127.0 * (double) rangePercent / 100.0);
+    juce::Random rng;
+    auto applyToOne = [&] (MidiNote& n)
+    {
+        const int delta = rng.nextInt ({ -range, range + 1 });
+        n.velocity = juce::jlimit (1, 127, n.velocity + delta);
+    };
+    if (selectedNotes.empty()) for (auto& n : r->notes) applyToOne (n);
+    else
+        for (int idx : selectedNotes)
+            if (idx >= 0 && idx < (int) r->notes.size())
+                applyToOne (r->notes[(size_t) idx]);
+}
+
+void PianoRollComponent::setVelocityFor (int value)
+{
+    auto* r = region();
+    if (r == nullptr) return;
+    const int v = juce::jlimit (1, 127, value);
+    if (selectedNotes.empty()) for (auto& n : r->notes) n.velocity = v;
+    else
+        for (int idx : selectedNotes)
+            if (idx >= 0 && idx < (int) r->notes.size())
+                r->notes[(size_t) idx].velocity = v;
+}
+
+void PianoRollComponent::showVelocityPopup()
+{
+    juce::PopupMenu m;
+    // Two sections: humanise (random ±N% of 127) at the top, set-to
+    // exact values below. Mirrors the quantize popup's structure.
+    m.addSectionHeader ("Humanise (random ± of 127)");
+    m.addItem (1, juce::String ("\xc2\xb1 5 %"));
+    m.addItem (2, juce::String ("\xc2\xb1 10 %"));
+    m.addItem (3, juce::String ("\xc2\xb1 20 %"));
+    m.addItem (4, juce::String ("\xc2\xb1 30 %"));
+    m.addSeparator();
+    m.addSectionHeader ("Set velocity");
+    m.addItem (101, "Set to 127 (max)");
+    m.addItem (102, "Set to 100");
+    m.addItem (103, "Set to 80");
+    m.addItem (104, "Set to 64 (mid)");
+    m.addItem (105, "Set to 32");
+    juce::Component::SafePointer<PianoRollComponent> safe (this);
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this),
+        [safe] (int chosen)
+        {
+            auto* self = safe.getComponent();
+            if (self == nullptr || chosen <= 0) return;
+            switch (chosen)
+            {
+                case 1:   self->humanizeVelocity (5);   break;
+                case 2:   self->humanizeVelocity (10);  break;
+                case 3:   self->humanizeVelocity (20);  break;
+                case 4:   self->humanizeVelocity (30);  break;
+                case 101: self->setVelocityFor (127);   break;
+                case 102: self->setVelocityFor (100);   break;
+                case 103: self->setVelocityFor (80);    break;
+                case 104: self->setVelocityFor (64);    break;
+                case 105: self->setVelocityFor (32);    break;
+                default: return;
+            }
+            self->repaint();
+        });
+}
+
+void PianoRollComponent::glueSelectedNotes()
+{
+    auto* r = region();
+    if (r == nullptr || selectedNotes.size() < 2) return;
+
+    // Group selected notes by pitch. Within each group, sort by
+    // startTick, then walk consecutive pairs - if the second's
+    // startTick falls at or before the first's endTick, absorb it
+    // into the first (extending the first's length to cover both).
+    // Track absorbed indices so we can erase them at the end in
+    // descending order without invalidating earlier indices.
+    std::map<int, std::vector<int>> byPitch;
+    for (int idx : selectedNotes)
+    {
+        if (idx < 0 || idx >= (int) r->notes.size()) continue;
+        byPitch[r->notes[(size_t) idx].noteNumber].push_back (idx);
+    }
+
+    std::vector<int> toErase;
+    for (auto& [pitch, indices] : byPitch)
+    {
+        std::sort (indices.begin(), indices.end(),
+            [&] (int a, int b) {
+                return r->notes[(size_t) a].startTick < r->notes[(size_t) b].startTick;
+            });
+
+        for (size_t i = 0; i + 1 < indices.size(); )
+        {
+            const int aIdx = indices[i];
+            const int bIdx = indices[i + 1];
+            auto& a = r->notes[(size_t) aIdx];
+            auto& b = r->notes[(size_t) bIdx];
+            const auto aEnd = a.startTick + a.lengthInTicks;
+            const auto bEnd = b.startTick + b.lengthInTicks;
+
+            if (b.startTick <= aEnd)
+            {
+                // Absorb b into a. New length = max-end - a.startTick.
+                a.lengthInTicks = juce::jmax (aEnd, bEnd) - a.startTick;
+                toErase.push_back (bIdx);
+                indices.erase (indices.begin() + (long) (i + 1));
+                // Don't advance i - the new merged a may now be
+                // contiguous with the (former i+2, now i+1) note.
+            }
+            else
+            {
+                ++i;
+            }
+        }
+    }
+
+    if (toErase.empty()) return;
+    std::sort (toErase.begin(), toErase.end(), std::greater<int>());
+    for (int idx : toErase)
+    {
+        if (idx >= 0 && idx < (int) r->notes.size())
+            r->notes.erase (r->notes.begin() + idx);
+    }
+    // Selection indices are now stale (erases shifted later notes
+    // down). Clearing is the simplest correct response - the user
+    // can re-select if they need to.
+    clearSelection();
+}
+
+void PianoRollComponent::nudgeSelectedTicks (juce::int64 deltaTicks)
+{
+    auto* r = region();
+    if (r == nullptr || selectedNotes.empty()) return;
+
+    // Group-clamp so relative spacing is preserved and no note ends
+    // up out of bounds. Same pattern as applyGroupMove but without a
+    // drag snapshot - we read live state and clamp once.
+    juce::int64 minStart = std::numeric_limits<juce::int64>::max();
+    juce::int64 maxEnd   = std::numeric_limits<juce::int64>::min();
+    for (int idx : selectedNotes)
+    {
+        if (idx < 0 || idx >= (int) r->notes.size()) continue;
+        const auto& n = r->notes[(size_t) idx];
+        minStart = juce::jmin (minStart, n.startTick);
+        maxEnd   = juce::jmax (maxEnd,   n.startTick + n.lengthInTicks);
+    }
+    deltaTicks = juce::jlimit (-minStart,
+                                  r->lengthInTicks - maxEnd,
+                                  deltaTicks);
+    if (deltaTicks == 0) return;
+    for (int idx : selectedNotes)
+    {
+        if (idx < 0 || idx >= (int) r->notes.size()) continue;
+        r->notes[(size_t) idx].startTick += deltaTicks;
     }
 }
 
@@ -1193,6 +1357,39 @@ bool PianoRollComponent::keyPressed (const juce::KeyPress& k)
     if (k.getKeyCode() == 'S')
     {
         showScalePopup();
+        return true;
+    }
+    // 'V' opens the velocity popup (humanise + set-to). Like the
+    // quantize popup, an empty selection means "apply to whole region".
+    if (k.getKeyCode() == 'V')
+    {
+        showVelocityPopup();
+        return true;
+    }
+    // 'G' glues every selected same-pitch contiguous note pair into
+    // one note. Useful for repairing stutter from sloppy playing
+    // captured by the recorder. No-op when fewer than two notes are
+    // selected.
+    if (k.getKeyCode() == 'G' && selectedNotes.size() >= 2)
+    {
+        glueSelectedNotes();
+        repaint();
+        return true;
+    }
+    // Left / Right arrow keys nudge every selected note by one snap
+    // step. Falls back to a fine-grained 30-tick nudge when snap is
+    // off so the keys still do something useful. Shift+arrow nudges
+    // by a full beat for coarse positioning.
+    if (! selectedNotes.empty()
+        && (k == juce::KeyPress::leftKey || k == juce::KeyPress::rightKey))
+    {
+        const bool coarse = k.getModifiers().isShiftDown();
+        const juce::int64 step =
+            coarse           ? kMidiTicksPerQuarter :
+            (snapTicks > 0)  ? snapTicks :
+                                30;
+        nudgeSelectedTicks (k == juce::KeyPress::leftKey ? -step : step);
+        repaint();
         return true;
     }
     return false;

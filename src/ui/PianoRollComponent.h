@@ -222,6 +222,29 @@ private:
     // snapped tick (humanises without losing the original feel).
     void quantizeSelected (juce::int64 gridTicks, float strength);
 
+    // Velocity helpers for selected notes (or all notes if nothing
+    // selected, mirroring quantizeSelected's "no-selection = whole-
+    // region" rule). humanizeVelocity adds a random offset in
+    // [-rangePercent..+rangePercent] of full-scale (127) per note;
+    // setVelocityFor clamps every note to a fixed value. Both clamp
+    // the result to [1, 127].
+    void humanizeVelocity (int rangePercent);
+    void setVelocityFor (int value);
+    void showVelocityPopup();
+
+    // Glue every selected same-pitch + contiguous note into one. Two
+    // notes are "contiguous" when the second's startTick falls at or
+    // before the first's endTick. The lower-index note absorbs the
+    // others; absorbed notes are erased in descending index order so
+    // earlier indices stay valid. Selection is cleared on success
+    // because the indices we held are now stale.
+    void glueSelectedNotes();
+
+    // Shift every selected note's startTick by deltaTicks, clamped so
+    // no note ends up out of [0, lengthInTicks - lengthInTicks_of_note].
+    // Used by Left/Right arrow nudge handlers.
+    void nudgeSelectedTicks (juce::int64 deltaTicks);
+
     // True if `noteNumber` is in the active scale (or scale is Off).
     bool isInScale (int noteNumber) const noexcept;
 
