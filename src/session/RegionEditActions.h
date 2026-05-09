@@ -74,6 +74,38 @@ private:
     int insertedAt = -1;
 };
 
+// Adds a fresh empty MidiRegion to a MIDI track at a given timeline
+// sample. Used by the SUMMARY-view double-click-to-create gesture so a
+// user can hand-author MIDI without first having to record. Undo
+// removes the region; redo re-inserts at the same position. Note pile
+// stays empty - the user adds notes via the piano roll separately.
+class CreateMidiRegionAction final : public juce::UndoableAction
+{
+public:
+    CreateMidiRegionAction (Session& session,
+                              int trackIdx,
+                              juce::int64 timelineStart,
+                              juce::int64 lengthInSamples,
+                              juce::int64 lengthInTicks);
+
+    bool perform() override;
+    bool undo()    override;
+    int  getSizeInUnits() override { return 1; }
+
+    // Index of the just-created region in track.midiRegions. Valid only
+    // after a successful perform(); -1 otherwise. Callers use this to
+    // open the piano roll on the new region.
+    int getInsertedIndex() const noexcept { return insertedAt; }
+
+private:
+    Session&    session;
+    int         trackIdx;
+    juce::int64 timelineStart;
+    juce::int64 lengthInSamples;
+    juce::int64 lengthInTicks;
+    int         insertedAt = -1;
+};
+
 // Removes a region; undo re-inserts it at its original index.
 class DeleteRegionAction final : public juce::UndoableAction
 {

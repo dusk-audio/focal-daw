@@ -84,6 +84,13 @@ public:
         return midiOutputDevices;
     }
 
+    // Synthetic "Virtual Keyboard (Focal)" entry appended to midiInputDevices
+    // by rebuildMidiInputBank. The VirtualKeyboardComponent pushes typed-note
+    // events into this collector via addMessageToQueue (lock-free); the audio
+    // thread drains it through the same per-input → per-track filter as real
+    // hardware. Returns nullptr if the bank hasn't been built yet.
+    juce::MidiMessageCollector* getVirtualKeyboardCollector() noexcept;
+
     // Lazy-open a MIDI output port and start its background-delivery
     // thread. Called by the message thread when a track is routed to an
     // output (channel-strip dropdown onChange, post-session-load). Cheap
@@ -188,8 +195,30 @@ public:
     // pluginStateBase64 fields so the serializer can pick them up.
     // consume reads those Track fields back and asks each PluginSlot to
     // re-create + restore.
-    void publishPluginStateForSave();
+    //
+    // audioCallbackDetached: pass true ONLY when the caller has already
+    // removed this engine from the AudioDeviceManager's callback list.
+    // The atomic-park sleep that defends against audio-thread re-entry
+    // becomes a no-op (there's no audio thread to wait for), which on
+    // a session with several heavy plugins drops total message-thread
+    // block time from hundreds of milliseconds to roughly the cost of
+    // the plugin-state I/O alone. Default false matches the autosave
+    // path where the audio thread is still live.
+    void publishPluginStateForSave (bool audioCallbackDetached = false);
     void consumePluginStateAfterLoad();
+
+    // Suspend every loaded plugin (track + aux + master tape) by calling
+    // releaseResources on each instance. Used by the shutdown path to
+    // flip every plugin's IComponent::setActive(false) BEFORE the engine
+    // starts destructing. Diva's terminate() (called inside
+    // ~VST3PluginInstance) attempts callbacks back into the host's
+    // VST3 context; doing them on an already-inactive plugin is safe,
+    // but doing them while the plugin still believes it's rendering
+    // has been observed to abort with __cxa_pure_virtual. Idempotent;
+    // calling on an already-released plugin is a no-op. Caller MUST
+    // have already removed the audio callback - this is not safe to
+    // call while processBlock could fire.
+    void releaseAllPluginResources();
 
     // Transport (loop + punch) persistence - same publish/consume bookend.
     // The atomics live on Transport for audio-thread access; the serializer
@@ -275,6 +304,11 @@ private:
     std::vector<std::unique_ptr<juce::MidiMessageCollector>> midiInputCollectors;
     std::vector<juce::MidiBuffer> perInputMidi;
     juce::MidiBuffer perTrackMidiScratch;  // reused per-block per-track filter target
+
+    // Index into midiInputCollectors of the synthetic Virtual Keyboard
+    // collector, recomputed every rebuildMidiInputBank so hot-plug doesn't
+    // invalidate it. -1 until the first rebuild completes.
+    int virtualKeyboardCollectorIndex { -1 };
 
     // Backing store for stageTestMidiInjection. SPSC handoff: the message
     // thread writes the buffer + index, then publishes via testInjectReady

@@ -23,9 +23,8 @@
 #if JUCE_LINUX
  #include <sys/mman.h>
  #include <sys/resource.h>
- #include <X11/Xlib.h>
- #include <X11/Xatom.h>
 #endif
+#include "ui/PlatformWindowing.h"
 
 namespace focal
 {
@@ -77,71 +76,17 @@ public:
 
         setVisible (true);
 
-       #if JUCE_LINUX
-        // GNOME/Mutter (and other ICCCM-strict WMs) iconify a freshly-
-        // mapped window whose `_NET_WM_USER_TIME` is unset/0 - their
-        // focus-stealing prevention policy. JUCE doesn't set
-        // `_NET_WM_USER_TIME`, and `XWindowSystem::setMinimised(false)`
-        // is a no-op on Linux, so without this fixup the dock shows a
-        // black thumbnail and the user has no way to restore it.
-        //
-        // Defer the deminimise to the next message-loop tick so Mutter
-        // has finished its synchronous iconify-on-map. Then send the
-        // ICCCM-defined WM_CHANGE_STATE → NormalState ClientMessage,
-        // followed by _NET_ACTIVE_WINDOW with a fresh user time (set
-        // first on the window) so Mutter trusts the activate request.
+        // Defer foreground-promotion to the next message-loop tick so
+        // JUCE's peer setup is complete and any synchronous iconify-
+        // on-map (Mutter on Linux/XWayland) has settled before we
+        // poke. bringWindowToFront is a no-op on non-Linux builds.
         juce::Component::SafePointer<MainWindow> safeThis (this);
         juce::MessageManager::callAsync ([safeThis]
         {
-            if (safeThis == nullptr) return;
-            auto* peer = safeThis->getPeer();
-            if (peer == nullptr) return;
-
-            auto* x = ::XOpenDisplay (nullptr);
-            if (x == nullptr) return;
-
-            const auto win = (::Window) (uintptr_t) peer->getNativeHandle();
-            const auto userTimeAtom = ::XInternAtom (x, "_NET_WM_USER_TIME",   False);
-            const auto changeStateAtom = ::XInternAtom (x, "WM_CHANGE_STATE",  False);
-            const auto activeWinAtom = ::XInternAtom (x, "_NET_ACTIVE_WINDOW", False);
-
-            // Use a max-int timestamp so user_time >= any prior user-input
-            // time the WM has on file, satisfying the focus-stealing-
-            // prevention check unconditionally.
-            unsigned long t = 0x7FFFFFFFUL;
-            ::XChangeProperty (x, win, userTimeAtom, XA_CARDINAL, 32,
-                                PropModeReplace,
-                                reinterpret_cast<unsigned char*> (&t), 1);
-
-            // 1) WM_CHANGE_STATE NormalState - ICCCM "deminimise" request.
-            ::XEvent demin{};
-            demin.xclient.type         = ClientMessage;
-            demin.xclient.window       = win;
-            demin.xclient.message_type = changeStateAtom;
-            demin.xclient.format       = 32;
-            demin.xclient.data.l[0]    = 1;  // NormalState
-            ::XSendEvent (x, DefaultRootWindow (x), False,
-                           SubstructureRedirectMask | SubstructureNotifyMask,
-                           &demin);
-
-            // 2) _NET_ACTIVE_WINDOW - EWMH activate. data.l[0] = 2 means
-            //    "source: pager/taskbar" which has higher trust under
-            //    Mutter than a regular client request.
-            ::XEvent act{};
-            act.xclient.type         = ClientMessage;
-            act.xclient.window       = win;
-            act.xclient.message_type = activeWinAtom;
-            act.xclient.format       = 32;
-            act.xclient.data.l[0]    = 2;
-            act.xclient.data.l[1]    = (long) t;
-            ::XSendEvent (x, DefaultRootWindow (x), False,
-                           SubstructureRedirectMask | SubstructureNotifyMask,
-                           &act);
-
-            ::XFlush (x);
-            ::XCloseDisplay (x);
+            if (auto* self = safeThis.getComponent())
+                if (auto* peer = self->getPeer())
+                    focal::platform::bringWindowToFront (*peer);
         });
-       #endif
     }
 
     void closeButtonPressed() override

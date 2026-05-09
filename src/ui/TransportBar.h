@@ -14,7 +14,7 @@ namespace focal
 class TransportIconButton final : public juce::Button
 {
 public:
-    enum class Icon { Stop, Play, Record, Rewind, Forward };
+    enum class Icon { Stop, Play, Record, Rewind, Forward, Loop, Punch, Keyboard };
 
     TransportIconButton (const juce::String& name, Icon icon, juce::Colour activeColour);
 
@@ -73,6 +73,12 @@ private:
                                         juce::Colour (0xffd0d0d0) };
     TransportIconButton recordButton { "Record",   TransportIconButton::Icon::Record,
                                         juce::Colour (0xffd03030) };
+    TransportIconButton loopButton    { "Loop",    TransportIconButton::Icon::Loop,
+                                          juce::Colour (0xff3aa860) };
+    TransportIconButton punchButton   { "Punch",   TransportIconButton::Icon::Punch,
+                                          juce::Colour (0xffd05a5a) };
+    TransportIconButton keyboardButton { "VKB",    TransportIconButton::Icon::Keyboard,
+                                          juce::Colour (0xff7fa0d0) };
 
     // Brief-press vs hold dispatch for REW / FFWD.
     //   < kHoldThresholdMs   -> brief press; fires the marker-jump or
@@ -86,8 +92,6 @@ private:
     bool        rewIsScrubbing  = false;
     bool        ffwdIsScrubbing = false;
     juce::int64 lastScrubTickMs = 0;
-    juce::TextButton loopToggle    { "LOOP" };
-    juce::TextButton punchToggle   { "PUNCH" };
     juce::TextButton snapToggle    { "SNAP" };
     juce::TextButton clickToggle   { "CLICK" };
     juce::TextButton countInToggle { "C/I" };
@@ -132,6 +136,11 @@ public:
     // overlay (similar to the piano roll modal) so this stays decoupled
     // from any specific track-selection lookup.
     std::function<void()> onTunerToggle;
+
+    // Fired when the keyboard icon is clicked (or the K hotkey is pressed
+    // and routed back through MainComponent). MainComponent owns the
+    // VirtualKeyboardComponent embedded modal.
+    std::function<void()> onVirtualKeyboardToggle;
 
     void setTapeStripExpanded (bool expanded);
     bool isTapeStripExpanded() const;

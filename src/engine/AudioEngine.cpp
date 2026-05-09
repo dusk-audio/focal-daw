@@ -180,8 +180,7 @@ void AudioEngine::rebuildMidiInputBank()
     // races the audio + MIDI threads and is undefined behaviour.
     midiInputDevices = juce::MidiInput::getAvailableDevices();
     midiInputCollectors.clear();
-    midiInputCollectors.reserve ((size_t) midiInputDevices.size());
-    perInputMidi.assign ((size_t) midiInputDevices.size(), juce::MidiBuffer{});
+    midiInputCollectors.reserve ((size_t) midiInputDevices.size() + 1);
     const double sr = currentSampleRate.load (std::memory_order_relaxed);
     for (int i = 0; i < midiInputDevices.size(); ++i)
     {
@@ -206,6 +205,31 @@ void AudioEngine::rebuildMidiInputBank()
         }
         midiInputCollectors.push_back (std::move (col));
     }
+
+    // Append the synthetic VKB device after real hardware so its index is
+    // stable across hot-plug (real devices come and go; the VKB is always
+    // last). Identifier is fixed so saved sessions resolve back to it on
+    // load. The collector is not bound to any OS device — VKB UI calls
+    // addMessageToQueue on it directly; the audio thread drains it as
+    // perInputMidi[virtualKeyboardCollectorIndex].
+    juce::MidiDeviceInfo virtualKb { "Virtual Keyboard (Focal)", "focal:virtual-keyboard" };
+    midiInputDevices.add (virtualKb);
+    {
+        auto vkbCol = std::make_unique<juce::MidiMessageCollector>();
+        if (sr > 0.0) vkbCol->reset (sr);
+        midiInputCollectors.push_back (std::move (vkbCol));
+    }
+    virtualKeyboardCollectorIndex = (int) midiInputCollectors.size() - 1;
+
+    perInputMidi.assign ((size_t) midiInputDevices.size(), juce::MidiBuffer{});
+}
+
+juce::MidiMessageCollector* AudioEngine::getVirtualKeyboardCollector() noexcept
+{
+    const int idx = virtualKeyboardCollectorIndex;
+    if (idx < 0 || idx >= (int) midiInputCollectors.size())
+        return nullptr;
+    return midiInputCollectors[(size_t) idx].get();
 }
 
 void AudioEngine::rebuildMidiOutputBank()
@@ -503,17 +527,43 @@ void AudioEngine::jumpToLastRecordPoint()
     transport.setPlayhead (session.lastRecordPointSamples.load (std::memory_order_relaxed));
 }
 
-void AudioEngine::publishPluginStateForSave()
+void AudioEngine::publishPluginStateForSave (bool audioCallbackDetached)
 {
     // Snapshot each track's PluginSlot into its session-model strings so
     // SessionSerializer (which only sees Session) can serialise plugin
     // state alongside everything else. Empty strings = no plugin loaded.
+    //
+    // Plugin state I/O briefly suspends each plugin (releaseResources /
+    // prepareToPlay around getStateInformation) - JUCE's contract says
+    // state I/O must not race the renderer, and plugins like u-he Diva
+    // crash hard when it does. The audio thread is parked across each
+    // suspension, so the engine's master output goes silent for a few
+    // milliseconds per loaded plugin during the save.
+    //
+    // For the autosave timer (audioCallbackDetached=false) that runs
+    // every 30 s during normal playback, that dropout is unacceptable.
+    // We skip plugin state entirely on that path: the existing values
+    // in Session::pluginStateBase64 (set by the most recent manual save
+    // or session load) are preserved, so a crash recovery still gets
+    // valid plugin state - just possibly stale relative to in-flight
+    // knob tweaks. Manual save (Ctrl+S, File>Save, quit-save) is the
+    // path that captures fresh plugin state.
+    if (! audioCallbackDetached)
+    {
+        // Plugin description/state strings on Session are kept as-is.
+        // Future enhancement: a "Save (with plugin state)" UI option
+        // that explicitly opts in to the audio dropout.
+        return;
+    }
+
+    const int parkSleepMs = 0;  // audio thread already gone; no need to wait
+
     for (int t = 0; t < Session::kNumTracks; ++t)
     {
         auto& track = session.track (t);
         auto& slot  = strips[(size_t) t].getPluginSlot();
-        track.pluginDescriptionXml = slot.getDescriptionXmlForSave();
-        track.pluginStateBase64    = slot.getStateBase64ForSave();
+        track.pluginDescriptionXml = slot.getDescriptionXmlForSave (parkSleepMs);
+        track.pluginStateBase64    = slot.getStateBase64ForSave   (parkSleepMs);
     }
     for (int a = 0; a < Session::kNumAuxLanes; ++a)
     {
@@ -521,8 +571,8 @@ void AudioEngine::publishPluginStateForSave()
         for (int s = 0; s < AuxLaneParams::kMaxLanePlugins; ++s)
         {
             auto& slot = auxLaneStrips[(size_t) a].getPluginSlot (s);
-            lane.pluginDescriptionXml[(size_t) s] = slot.getDescriptionXmlForSave();
-            lane.pluginStateBase64[(size_t) s]    = slot.getStateBase64ForSave();
+            lane.pluginDescriptionXml[(size_t) s] = slot.getDescriptionXmlForSave (parkSleepMs);
+            lane.pluginStateBase64[(size_t) s]    = slot.getStateBase64ForSave   (parkSleepMs);
         }
     }
 
@@ -536,6 +586,19 @@ void AudioEngine::publishPluginStateForSave()
         session.master().tapeStateBase64 = mb.toBase64Encoding();
     }
 #endif
+}
+
+void AudioEngine::releaseAllPluginResources()
+{
+    // Walk every plugin slot and call releaseResources on its loaded
+    // instance. PluginSlot::releaseResources also clears currentInstance,
+    // so any audio callback that does happen to fire after this (despite
+    // the caller's contract) will see null and bypass.
+    for (auto& strip : strips)
+        strip.getPluginSlot().releaseResources();
+    for (auto& laneStrip : auxLaneStrips)
+        for (int s = 0; s < AuxLaneParams::kMaxLanePlugins; ++s)
+            laneStrip.getPluginSlot (s).releaseResources();
 }
 
 void AudioEngine::publishTransportStateForSave()
@@ -1372,6 +1435,19 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             }
         }
 
+        // Recording capture has to happen BEFORE the strip's instrument
+        // plugin sees the buffer. AudioPluginInstance::processBlock is
+        // allowed (and most VST3 instruments do) to consume / replace the
+        // MIDI buffer in place, so by the time processAndAccumulate
+        // returns, perTrackMidiScratch is typically empty. Writing here
+        // captures the events the user actually played.
+        if (isRecording && armed && midiTrack && ! perTrackMidiScratch.isEmpty())
+        {
+            const auto recStart = activeRecordStart.load (std::memory_order_relaxed);
+            const auto blockOffsetFromRecord = blockStartSamples - recStart;
+            recordManager.writeMidiBlock (t, perTrackMidiScratch, blockOffsetFromRecord);
+        }
+
         // External MIDI output. When this MIDI track has a hardware port
         // selected, mirror the just-built per-track buffer to that port
         // so an external synth/drum machine receives the same notes the
@@ -1545,21 +1621,6 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             }
         }
 
-        // MIDI capture: when the track is in MIDI mode AND armed AND the
-        // transport is recording, push this block's already-filtered MIDI
-        // events into the per-track FIFO. Audio recording (above) gates on
-        // deviceInput presence; MIDI tracks have no audio input so we gate
-        // on isRecording + armed + the MIDI mode flag instead. The same
-        // count-in / punch window math we apply to audio also applies here:
-        // events with negative samplePos (relative to recordStart) are
-        // dropped at drain time, so passing the raw blockStart - recordStart
-        // offset is sufficient.
-        if (isRecording && armed && midiTrack && ! perTrackMidiScratch.isEmpty())
-        {
-            const auto recStart = activeRecordStart.load (std::memory_order_relaxed);
-            const auto blockOffsetFromRecord = blockStartSamples - recStart;
-            recordManager.writeMidiBlock (t, perTrackMidiScratch, blockOffsetFromRecord);
-        }
     }
 
     for (int a = 0; a < Session::kNumBuses; ++a)

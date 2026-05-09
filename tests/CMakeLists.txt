@@ -11,6 +11,8 @@ add_executable(focal-tests
     smoke_brickwall_limiter.cpp
     session_tick_conversion.cpp
     atomic_park.cpp
+    embedded_modal_close_safety.cpp
+    x11_anti_pattern_guard.cpp
     ${CMAKE_SOURCE_DIR}/src/dsp/BrickwallLimiter.cpp)
 
 target_include_directories(focal-tests PRIVATE
@@ -20,7 +22,8 @@ target_include_directories(focal-tests PRIVATE
 target_compile_definitions(focal-tests PRIVATE
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
-    JUCE_STANDALONE_APPLICATION=1)
+    JUCE_STANDALONE_APPLICATION=1
+    FOCAL_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 target_link_libraries(focal-tests PRIVATE
     Catch2::Catch2WithMain

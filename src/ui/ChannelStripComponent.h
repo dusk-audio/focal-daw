@@ -67,9 +67,6 @@ private:
     // even if its index in the list changed).
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
     void rebuildMidiInputDropdown();
-    // Same shape as rebuildMidiInputDropdown, but for the external-MIDI-
-    // output port. Repopulated whenever AudioEngine signals a refresh.
-    void rebuildMidiOutputDropdown();
 
     int trackIndex;
     Track& track;
@@ -204,7 +201,6 @@ private:
     juce::ComboBox   inputSelector;         // mono / stereo-L / (hidden in MIDI)
     juce::ComboBox   inputSelectorR;        // stereo-R (visible only in stereo mode)
     juce::ComboBox   midiInputSelector;     // MIDI input port (visible only in MIDI mode)
-    juce::ComboBox   midiOutputSelector;    // External MIDI output port (MIDI mode only)
     juce::ComboBox   midiChannelSelector;   // Omni / Ch 1..16 filter (MIDI mode only)
     // Small painted dot, repainted by the strip's existing 30 Hz timer when
     // the engine sets track.midiActivity (clear-on-read). Sits next to the

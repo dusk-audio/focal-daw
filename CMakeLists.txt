@@ -104,7 +104,22 @@ target_sources(Focal PRIVATE
     src/ui/SystemStatusBar.cpp
     src/ui/TapeStrip.cpp
     src/ui/TransportBar.cpp
+    src/ui/VirtualKeyboardComponent.cpp
     src/ui/WindowState.cpp)
+
+# Cross-platform window-management primitives. One implementation per
+# platform; callsites #include only PlatformWindowing.h and stay
+# platform-agnostic. Mac and Windows impls are stubs today (see
+# PlatformWindowing.h for the eventual per-platform mechanisms) but
+# the files exist so the fix slot is obvious when the equivalent bugs
+# surface there.
+if(APPLE)
+    target_sources(Focal PRIVATE src/ui/PlatformWindowing_Mac.mm)
+elseif(WIN32)
+    target_sources(Focal PRIVATE src/ui/PlatformWindowing_Windows.cpp)
+else()
+    target_sources(Focal PRIVATE src/ui/PlatformWindowing_Linux.cpp)
+endif()
 
 # Focal-owned ALSA backend - a juce::AudioIODevice + AudioIODeviceType pair
 # written from scratch using Ardour's libs/backends/alsa/ as a reference for

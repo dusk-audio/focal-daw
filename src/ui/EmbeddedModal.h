@@ -122,6 +122,16 @@ public:
     // Tear-down. Idempotent. Safe to call when nothing is open.
     // For owning show(), destructs the body. For showBorrowed(), just
     // removes the body from the parent without destructing it.
+    //
+    // Safe to call from inside a callback owned by the body (e.g. a
+    // button's onClick). The synchronous path detaches the body /
+    // backdrop / dim from the parent (so the user sees the modal
+    // disappear immediately), then defers ~Body to the next message-
+    // loop tick via callAsync. Without that defer, body_.reset() would
+    // run ~Button → ~std::function while the button's onClick lambda is
+    // still on the stack — a use-after-free that has been observed to
+    // corrupt JUCE's message-thread state and trigger compositor
+    // crashes on the next X11 round-trip.
     void close()
     {
         if (host == nullptr) return;
@@ -133,7 +143,21 @@ public:
         }
         if (backdrop_ != nullptr) host->removeChildComponent (backdrop_.get());
         if (dim_      != nullptr) host->removeChildComponent (dim_.get());
-        body_.reset();
+
+        if (body_ != nullptr)
+        {
+            // Hand ownership to a callAsync lambda - the body destructs
+            // when that lambda is invoked (and then destroyed) on the
+            // next message-loop tick, AFTER the current button-callback
+            // stack has fully unwound. The lambda holds the body by
+            // value (move-captured unique_ptr); we don't capture `this`
+            // because the EmbeddedModal itself may have been destructed
+            // by the time the message-loop processes the call (e.g. on
+            // app shutdown). Self-contained ownership = safe across
+            // every teardown order.
+            juce::MessageManager::callAsync (
+                [trash = std::move (body_)]() mutable { (void) trash; });
+        }
         borrowedBody_ = nullptr;
         backdrop_.reset();
         dim_.reset();

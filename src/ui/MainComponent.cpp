@@ -5,6 +5,7 @@
 #include "DimOverlay.h"
 #include "PianoRollComponent.h"
 #include "TunerOverlay.h"
+#include "VirtualKeyboardComponent.h"
 #include "../session/SessionTemplates.h"
 #include "MasteringView.h"
 #include "StartupDialog.h"
@@ -15,6 +16,7 @@
 #include "../session/RecentSessions.h"
 #include "../session/SessionSerializer.h"
 #include "ConsoleView.h"  // (already included transitively, kept explicit)
+#include "PlatformWindowing.h"
 
 namespace focal
 {
@@ -194,6 +196,7 @@ MainComponent::MainComponent()
 
     transportBar = std::make_unique<TransportBar> (engine);
     transportBar->onTunerToggle = [this] { toggleTuner(); };
+    transportBar->onVirtualKeyboardToggle = [this] { toggleVirtualKeyboard(); };
     transportBar->onTapeStripToggle = [this] (bool expanded)
     {
         tapeStripExpanded = expanded;
@@ -428,19 +431,14 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
         return true;
     }
 
-    // ── Mode toggles: L (loop), P (punch). Same vibe as REC/Loop in
-    // Pro Tools - single-letter, no modifier. Skipped when modifiers are
-    // held so they don't shadow a future Cmd+L / Cmd+P.
-    if (code == 'L' && noMods)
+    // ── Virtual MIDI Keyboard: K toggles the embedded VKB modal so the
+    // user's typing keyboard becomes a MIDI input source. The modal pushes
+    // events into the synthetic "Virtual Keyboard (Focal)" device — to
+    // hear notes, a track must select that device on its MIDI input
+    // dropdown and have an instrument plugin loaded.
+    if (code == 'K' && noMods)
     {
-        auto& t = engine.getTransport();
-        t.setLoopEnabled (! t.isLoopEnabled());
-        return true;
-    }
-    if (code == 'P' && noMods)
-    {
-        auto& t = engine.getTransport();
-        t.setPunchEnabled (! t.isPunchEnabled());
+        toggleVirtualKeyboard();
         return true;
     }
 
@@ -893,15 +891,42 @@ bool MainComponent::saveSessionTo (const juce::File& dir)
     // to call even when the user picked an existing session folder.
     session.setSessionDirectory (dir);
 
-    // Snapshot live plugin slot state into the session model immediately
-    // before serialising - the serializer only reads from Session, so
-    // anything live in the engine that isn't atomically mirrored has to
-    // be published first.
-    engine.publishPluginStateForSave();
+    // Plugin state I/O races the renderer on plugins that don't honour
+    // JUCE's "must not overlap" contract (u-he Diva is the smoking-gun
+    // example), corrupting the plugin's internal state and leading to
+    // an abort inside ~VST3PluginInstance later. To capture fresh
+    // plugin state safely we briefly remove the audio callback for the
+    // duration of the save, then re-attach. The user hears a short
+    // (~10-50 ms × N loaded plugins) dropout on Ctrl+S, which beats
+    // crashing.
+    //
+    // engineDetached==true means a higher layer (the quit-save path)
+    // has already detached + does NOT want re-attach. We honour that
+    // and skip the re-attach below.
+    const bool reattachAudioAfter = ! engineDetached;
+    if (! engineDetached)
+    {
+        engine.getDeviceManager().removeAudioCallback (&engine);
+        engineDetached = true;   // tell publishPluginStateForSave to skip park sleeps
+    }
+
+    engine.publishPluginStateForSave (/*audioCallbackDetached*/ true);
     engine.publishTransportStateForSave();
 
     const auto target = dir.getChildFile ("session.json");
-    if (SessionSerializer::save (session, target))
+    const bool saveOk = SessionSerializer::save (session, target);
+
+    if (reattachAudioAfter)
+    {
+        // Re-attach so audio resumes after the save returns. PluginSlot
+        // already called prepareToPlay on each plugin during state
+        // capture (resume side of the suspend bracket), so each plugin
+        // is ready for the next callback.
+        engine.getDeviceManager().addAudioCallback (&engine);
+        engineDetached = false;
+    }
+
+    if (saveOk)
     {
         RecentSessions::add (dir);
         // A successful manual save makes the autosave stale - drop it so the
@@ -944,9 +969,12 @@ void MainComponent::writeAutosave()
     // touched on disk yet.
     dir.createDirectory();
 
-    // Same publish bookend as the manual save - the serializer reads only
-    // from Session, not from the live engine.
-    engine.publishPluginStateForSave();
+    // Same publish bookend as the manual save - the serializer reads
+    // only from Session, not from the live engine. Audio is running on
+    // the autosave path (timer fires from the live message loop), so
+    // the publish keeps its atomic-park sleeps to defend against the
+    // audio-thread re-entry race.
+    engine.publishPluginStateForSave (/*audioCallbackDetached*/ false);
     engine.publishTransportStateForSave();
 
     const auto target = getAutosaveFileFor (dir);
@@ -975,8 +1003,13 @@ void MainComponent::requestQuit()
 
     if (! dirty)
     {
-        if (auto* app = juce::JUCEApplicationBase::getInstance())
-            app->systemRequestedQuit();
+        // No unsaved changes - quit through the same staged-shutdown
+        // path the dirty flow uses, so the engine is quiesced and
+        // window peers tear down in a deterministic order. Bypassing
+        // beginSafeShutdown here historically left the audio callback
+        // attached during MainWindow destruction, which raced plugin
+        // editor / native-peer teardown.
+        beginSafeShutdown();
         return;
     }
 
@@ -985,73 +1018,147 @@ void MainComponent::requestQuit()
     auto dialog = std::make_unique<QuitConfirmDialog>();
     dialog->setSize (440, 200);
 
-    dialog->onCancel = [this]
+    // Each handler defers its body via callAsync so the button-click
+    // call stack fully unwinds before we destruct the dialog. Closing
+    // an EmbeddedModal that owns the dialog from inside the dialog's
+    // own button callback was a use-after-free against the std::function
+    // backing the button's onClick, and the resulting message-thread
+    // corruption was the trigger for the GNOME compositor crash on
+    // Save / Don't Save. EmbeddedModal::close defends against this on
+    // its end too (it move-captures the body into a callAsync), but
+    // deferring at the call site is the canonical idiom.
+    //
+    // Save / Don't Save also detach the audio callback up front. This
+    // does two things on the quit path:
+    //   • the save below can call publishPluginStateForSave with the
+    //     "audio detached" fast path (no atomic-park sleeps), which is
+    //     the difference between a snappy save and several hundred
+    //     milliseconds of message-thread blocking on a session with
+    //     multiple heavy plugins;
+    //   • plugin getStateInformation runs with no concurrent
+    //     processBlock, which side-steps the data race in plugins that
+    //     don't honour JUCE's "must not overlap" contract on Linux.
+    juce::Component::SafePointer<MainComponent> safeThis (this);
+
+    dialog->onCancel = [safeThis]
     {
-        quitModal.close();
+        juce::MessageManager::callAsync ([safeThis]
+        {
+            if (auto* self = safeThis.getComponent())
+                self->quitModal.close();
+        });
     };
-    dialog->onDontSave = [this]
+    dialog->onDontSave = [safeThis]
     {
         // Quit and let the autosave linger. Next launch's session-load
         // will offer to recover from it.
-        quitModal.close();
-        beginMutterSafeShutdown();
+        juce::MessageManager::callAsync ([safeThis]
+        {
+            if (auto* self = safeThis.getComponent())
+            {
+                self->quitModal.close();
+                self->beginSafeShutdown();
+            }
+        });
     };
-    dialog->onSave = [this]
+    dialog->onSave = [safeThis]
     {
         // saveSessionAndThen handles both the sync (existing dir) and
         // async (Save As file chooser) paths. Close the modal first so
         // the chooser, if it opens, isn't fighting our overlay for
         // input. On save success, quit; on failure (chooser cancel,
         // disk error) the user is left in the app and can retry.
-        quitModal.close();
-        juce::Component::SafePointer<MainComponent> safeThis (this);
-        saveSessionAndThen ([safeThis] (bool ok)
+        juce::MessageManager::callAsync ([safeThis]
         {
-            if (! ok) return;
-            if (auto* self = safeThis.getComponent())
-                self->beginMutterSafeShutdown();
+            auto* self = safeThis.getComponent();
+            if (self == nullptr) return;
+            self->quitModal.close();
+
+            // Quiesce engine BEFORE saveSessionAndThen so the save's
+            // publishPluginStateForSave skips the atomic-park sleeps
+            // and plugins see no concurrent processBlock during state
+            // I/O. stopTimer prevents the autosave timer from re-
+            // entering a save mid-shutdown.
+            self->stopTimer();
+            self->engine.getDeviceManager().removeAudioCallback (&self->engine);
+            self->engineDetached = true;
+
+            self->saveSessionAndThen ([safeThis] (bool ok)
+            {
+                if (! ok) return;
+                if (auto* s = safeThis.getComponent())
+                    s->beginSafeShutdown();
+            });
         });
     };
 
     quitModal.show (*this, std::move (dialog));
 }
 
-void MainComponent::beginMutterSafeShutdown()
+void MainComponent::beginSafeShutdown()
 {
-    // Step 1 (synchronous): drop every plugin editor window. Each is a
-    // top-level juce::DocumentWindow with its own X11 peer; tearing
-    // them down requires Mutter to update its compositor tree.
+    // Quiesce the engine + tear down native window peers in an order
+    // the host windowing system can keep up with. Several earlier
+    // shutdown variants were observed to crash Mutter on Linux/
+    // Wayland; this one walks a deliberately conservative sequence
+    // and prints a stderr marker before each phase so a future crash
+    // gives us a precise line number ("which phase did we die in?").
+    //
+    // Idempotent on the autosave timer + audio callback removal so
+    // the quit-save path can detach those up front (to make the
+    // intervening save fast) and still call beginSafeShutdown() to
+    // finish the teardown.
+    auto markPhase = [] (const char* msg)
+    {
+        std::fprintf (stderr, "[Focal/shutdown] %s\n", msg);
+        std::fflush (stderr);
+    };
+
+    markPhase ("phase 1: stop autosave timer");
+    stopTimer();
+
+    markPhase ("phase 2: stop transport (commits in-flight recording)");
+    auto& transport = engine.getTransport();
+    if (transport.isRecording() || transport.isPlaying())
+        engine.stop();
+
+    if (! engineDetached)
+    {
+        markPhase ("phase 3: detach audio callback");
+        engine.getDeviceManager().removeAudioCallback (&engine);
+        engineDetached = true;
+    }
+    else
+    {
+        markPhase ("phase 3: audio callback already detached (skipping)");
+    }
+
+    markPhase ("phase 3b: release plugin resources (setActive(false) on each)");
+    // Quiesce every plugin BEFORE editor windows + engine destructors
+    // start running. Diva's terminate() (called inside its destructor)
+    // tries to talk back to the host's VST3 context; that's only safe
+    // when the plugin already considers itself inactive. Without this,
+    // ~VST3PluginInstance has been observed to abort with
+    // __cxa_pure_virtual on session shutdown.
+    engine.releaseAllPluginResources();
+
+    markPhase ("phase 4: drop plugin editor windows");
     if (consoleView != nullptr)
         consoleView->dropAllPluginEditors();
 
-    // Step 2 (after a delay): hide the main window. setVisible(false)
-    // sends UnmapNotify to Mutter, telling it the surface is going
-    // away in a graceful way - much friendlier than the destroy-
-    // notify storm a synchronous shutdown produces.
-    juce::Component::SafePointer<MainComponent> safeThis (this);
-    juce::Timer::callAfterDelay (120, [safeThis]
-    {
-        if (auto* self = safeThis.getComponent())
-        {
-            if (auto* tlw = self->getTopLevelComponent())
-                tlw->setVisible (false);
-        }
-    });
+    markPhase ("phase 5: flush window operations");
+    focal::platform::flushWindowOperations();
 
-    // Step 3 (after a longer delay): trigger the actual quit. By the
-    // time this fires, Mutter has had a quarter-second to process the
-    // unmap and editor-window destructions; the subsequent main-window
-    // teardown happens against a settled compositor state instead of
-    // colliding with in-flight events. Empirically the prior "drop
-    // editors then immediately systemRequestedQuit" cascade reliably
-    // crashed Mutter on this user's machine - hard enough to need a
-    // reboot. The 240 ms total budget is invisible to the user but
-    // generous enough for Mutter to process every prior event.
-    juce::Timer::callAfterDelay (240, []
-    {
-        if (auto* app = juce::JUCEApplicationBase::getInstance())
-            app->systemRequestedQuit();
-    });
+    markPhase ("phase 6: hide main window");
+    if (auto* tlw = getTopLevelComponent())
+        tlw->setVisible (false);
+    focal::platform::flushWindowOperations();
+
+    markPhase ("phase 7: post quit message");
+    if (auto* app = juce::JUCEApplicationBase::getInstance())
+        app->systemRequestedQuit();
+
+    markPhase ("phase 8: beginSafeShutdown returning to message loop");
 }
 
 void MainComponent::saveSessionAndThen (std::function<void(bool)> onComplete)
@@ -1620,5 +1727,14 @@ void MainComponent::closeTuner()
     tuner.reset();
     tunerDim.reset();
     session.tuneTrackIndex.store (-1, std::memory_order_relaxed);
+}
+
+void MainComponent::toggleVirtualKeyboard()
+{
+    if (virtualKeyboardModal.isOpen()) { virtualKeyboardModal.close(); return; }
+
+    auto body = std::make_unique<VirtualKeyboardComponent> (engine);
+    body->setSize (720, 220);
+    virtualKeyboardModal.show (*this, std::move (body));
 }
 } // namespace focal

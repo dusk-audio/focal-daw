@@ -280,15 +280,18 @@ void PluginSlot::unload()
     ownedInstance.reset();
 }
 
-juce::String PluginSlot::getDescriptionXmlForSave()
+juce::String PluginSlot::getDescriptionXmlForSave (int parkSleepMs)
 {
     juce::PluginDescription desc;
     bool ok = false;
+    // fillInPluginDescription is metadata-only (uid + format + path + name)
+    // and does NOT race the renderer. No releaseResources/prepareToPlay
+    // needed — atomic-park alone is sufficient.
     withParkedAtomicPointer (currentInstance, [&] (juce::AudioPluginInstance& p)
     {
         p.fillInPluginDescription (desc);
         ok = true;
-    });
+    }, parkSleepMs);
     if (! ok) return {};
     // JUCE's Linux VST3 wrapper fills the description with the inner-.so
     // path. Normalize back to the bundle path so the saved session loads
@@ -308,11 +311,39 @@ bool PluginSlot::isLoadedPluginInstrument() const
     return desc.isInstrument;
 }
 
-juce::String PluginSlot::getStateBase64ForSave()
+juce::String PluginSlot::getStateBase64ForSave (int parkSleepMs)
 {
     juce::MemoryBlock mb;
+    // Atomic-park alone is NOT sufficient for state capture: it tells the
+    // AUDIO thread to skip the plugin, but doesn't tell the PLUGIN that
+    // it's now inactive. Plugins like u-he Diva keep their own
+    // setActive(true) flag and check it inside getStateInformation - if
+    // the flag is still on, Diva logs "ALERT getStateInfo INTERRUPTS
+    // RENDER" and corrupts its internal state, which then blows up
+    // later inside ~VST3PluginInstance with __cxa_pure_virtual.
+    //
+    // Bracket getStateInformation with releaseResources / prepareToPlay
+    // so the plugin sees IComponent::setActive(false) before state I/O
+    // and IComponent::setActive(true) after. The audio thread is parked
+    // throughout, so the brief deactivation is invisible from its side.
+    // If the slot has not been prepareToPlay'd yet (e.g. session load
+    // mid-way), preparedSampleRate is 0 and we skip the resume - the
+    // engine's next prepareToPlay will reconfigure it.
     auto* p = withParkedAtomicPointer (currentInstance,
-        [&] (juce::AudioPluginInstance& inst) { inst.getStateInformation (mb); });
+        [&] (juce::AudioPluginInstance& inst)
+        {
+            inst.releaseResources();
+            inst.getStateInformation (mb);
+            if (preparedSampleRate > 0.0)
+            {
+                inst.setPlayConfigDetails (
+                    inst.getTotalNumInputChannels(),
+                    inst.getTotalNumOutputChannels(),
+                    preparedSampleRate, preparedBlockSize);
+                inst.prepareToPlay (preparedSampleRate, preparedBlockSize);
+            }
+        },
+        parkSleepMs);
     if (p == nullptr) return {};
     return mb.toBase64Encoding();
 }

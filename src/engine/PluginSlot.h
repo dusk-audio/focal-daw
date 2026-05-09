@@ -168,10 +168,22 @@ public:
     // nullptr while reading from the plugin: that prevents the audio
     // thread from re-entering processBlock on the same instance during
     // state I/O. JUCE's contract is that processBlock and getStateInfo
-    // must not overlap, and several plugins (notably U-he Diva) crash
-    // hard - taking down Mutter / the GNOME session - when they do.
-    juce::String getDescriptionXmlForSave();
-    juce::String getStateBase64ForSave();
+    // must not overlap. Several plugins (notably U-he Diva) crash hard
+    // when the contract is violated - on Linux/Wayland the crash can
+    // cascade into a Mutter compositor fault, but the root cause is the
+    // same data race on every platform.
+    //
+    // parkSleepMs controls how long the message thread waits between
+    // null-store and getStateInfo to give the audio thread time to
+    // observe the parked pointer. Default = 25 ms (covers a 1024-sample
+    // block at 44.1 kHz). Pass 0 when the caller has ALREADY detached
+    // the audio callback (e.g. shutdown path) — there's no audio thread
+    // to wait for, and skipping the sleep avoids the message-thread
+    // starvation that has been observed to time-out compositor
+    // responsiveness checks on save-then-quit flows with several heavy
+    // plugins loaded.
+    juce::String getDescriptionXmlForSave (int parkSleepMs = 25);
+    juce::String getStateBase64ForSave   (int parkSleepMs = 25);
 
     // Re-create the plugin from the saved description and apply the state
     // blob. Returns true on success. Caller is responsible for ensuring

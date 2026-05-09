@@ -23,10 +23,13 @@ namespace focal
 //
 // Used by PluginSlot to bracket getStateInformation /
 // fillInPluginDescription so the audio thread isn't inside processBlock
-// on the same plugin while we're reading its state. Several plugins
-// crash hard - taking down Mutter / the GNOME session - if the host
-// violates JUCE's "processBlock and getStateInformation must not
-// overlap" contract.
+// on the same plugin while we're reading its state. JUCE's contract is
+// that processBlock and getStateInformation MUST NOT overlap; a number
+// of widely-used plugins crash hard when the host violates it. On
+// Linux/Wayland one observed manifestation is the compositor (Mutter)
+// faulting out from corrupted state in the plugin's own GUI peer,
+// which takes down the desktop session - the same root-cause race
+// produces a milder host segfault on macOS / Windows.
 //
 // Returns the parked pointer (or nullptr if it was null at entry) so
 // the caller can detect the no-op case.

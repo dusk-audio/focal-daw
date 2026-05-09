@@ -74,11 +74,11 @@ private:
         //
         // Uses a unique_ptr to a custom DocumentWindow subclass instead
         // of juce::DialogWindow::launchAsync's auto-deleting raw pointer:
-        // the auto-delete + manual delete race was crashing Mutter on
-        // close (XDestroyWindow landing before XUnmapWindow had been
-        // processed). The custom subclass calls back to AuxLaneComponent
-        // when the user closes the X button so close paths converge on
-        // a single deferred destruction.
+        // the auto-delete + manual delete race was racing the windowing
+        // system's destroy/unmap ordering and on Linux/Wayland (Mutter)
+        // could take down the desktop session. The custom subclass calls
+        // back to AuxLaneComponent when the user clicks the X button so
+        // every close path converges on a single deferred destruction.
         class AuxPopoutWindow;
         std::unique_ptr<AuxPopoutWindow> popoutWindow;
     };

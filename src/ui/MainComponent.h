@@ -46,16 +46,20 @@ public:
     // dirty-only prompt - matches Logic / Pro Tools / Bitwig.
     void requestQuit();
 
-    // Stage shutdown across explicit time delays so Mutter / GNOME
-    // don't crash from a tight cascade of native-window destruction
-    // events. Drops plugin editor windows first, hides the main
-    // window after a delay (so Mutter sees UnmapNotify), then quits
-    // after another delay (so Mutter has fully settled before we
-    // start destroying our peer). A previous "drop editors then
-    // immediately systemRequestedQuit" approach was still racing
-    // the compositor and taking the whole GNOME session down hard
-    // enough to require a reboot.
-    void beginMutterSafeShutdown();
+    // Staged shutdown that quiesces the engine and tears down native
+    // window peers in an order the host windowing system can keep up
+    // with. Without this sequencing the destroy-notify storm of a
+    // hard quit can race the compositor / window manager and on
+    // Linux/Wayland (Mutter) has been observed to take down the
+    // whole desktop session.
+    //
+    // Order: stop autosave timer, stop transport (drains in-flight
+    // record buffers + commits regions), detach the audio callback
+    // (audio thread stops calling processBlock on plugins about to
+    // be torn down), drop every plugin editor window, sync the
+    // windowing system, hide the main window, sync again, then
+    // post the quit message.
+    void beginSafeShutdown();
 
 private:
     void openAudioSettings();
@@ -134,6 +138,16 @@ private:
     EmbeddedModal mixdownModal;
     EmbeddedModal bounceModal;
     EmbeddedModal quitModal;
+    EmbeddedModal virtualKeyboardModal;
+    void toggleVirtualKeyboard();
+
+    // True once the audio callback has been removed in preparation for
+    // shutdown. Used by saveSessionTo / beginSafeShutdown to make the
+    // detach call idempotent and to signal publishPluginStateForSave
+    // that the atomic-park sleeps can be skipped (no audio thread to
+    // race). Reset is unnecessary - the only path that sets this also
+    // ends in systemRequestedQuit.
+    bool engineDetached = false;
     juce::Label statusLabel;
     std::unique_ptr<ConsoleView> consoleView;
     std::unique_ptr<class TransportBar>     transportBar;

@@ -7,10 +7,7 @@
 #include "../engine/AudioEngine.h"
 #include "../engine/PluginSlot.h"
 #include "../engine/PluginManager.h"
-#if JUCE_LINUX
- #include <X11/Xlib.h>
- #include <X11/Xatom.h>
-#endif
+#include "PlatformWindowing.h"
 #include "../session/RegionEditActions.h"
 
 namespace focal
@@ -814,40 +811,6 @@ ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
     styleCombo (midiInputSelector);
     addChildComponent (midiInputSelector);
 
-    // ── External MIDI output ──
-    // Same item-id scheme as the input selector (1 = none, 2+i = device i).
-    // When this is set on a Midi-mode track, the per-track MIDI buffer is
-    // mirrored to the chosen hardware port every block - the loaded
-    // instrument plugin (if any) still sees the events too. Audio from
-    // an external synth comes back on a separate audio track.
-    rebuildMidiOutputDropdown();
-    midiOutputSelector.onChange = [this]
-    {
-        const int id = midiOutputSelector.getSelectedId();
-        const int idx = id <= 1 ? -1 : (id - 2);
-        // Open the OS port (and start its delivery thread) lazily on the
-        // first route to it. The audio thread reads midiOutputs[idx] after
-        // loading midiOutputIndex, so we open the port BEFORE storing the
-        // new index - reversing the order would let the audio thread see
-        // the new index while midiOutputs[idx] is still null.
-        if (idx >= 0)
-            engine.ensureMidiOutputOpen (idx);
-        track.midiOutputIndex.store (idx, std::memory_order_relaxed);
-        if (idx >= 0)
-        {
-            const auto& outs = engine.getMidiOutputDevices();
-            track.midiOutputIdentifier = (idx < outs.size())
-                                          ? outs[idx].identifier
-                                          : juce::String();
-        }
-        else
-        {
-            track.midiOutputIdentifier = juce::String();
-        }
-    };
-    styleCombo (midiOutputSelector);
-    addChildComponent (midiOutputSelector);
-
     // ── MIDI channel filter (Omni / 1..16) ──
     // ID 1 = Omni (atom = 0), IDs 2..17 = channels 1..16 (atom = 1..16).
     midiChannelSelector.addItem ("Omni", 1);
@@ -1017,7 +980,6 @@ void ChannelStripComponent::changeListenerCallback (juce::ChangeBroadcaster*)
     // device order may have changed; re-resolve our track's index from
     // its saved identifier and rebuild both dropdowns.
     rebuildMidiInputDropdown();
-    rebuildMidiOutputDropdown();
 }
 
 void ChannelStripComponent::rebuildMidiInputDropdown()
@@ -1050,35 +1012,6 @@ void ChannelStripComponent::rebuildMidiInputDropdown()
     track.midiInputIndex.store (idx, std::memory_order_relaxed);
     midiInputSelector.setSelectedId (idx >= 0 ? (2 + idx) : 1,
                                       juce::dontSendNotification);
-}
-
-void ChannelStripComponent::rebuildMidiOutputDropdown()
-{
-    midiOutputSelector.clear (juce::dontSendNotification);
-    midiOutputSelector.addItem ("(none)", 1);
-    const auto& outs = engine.getMidiOutputDevices();
-    for (int i = 0; i < outs.size(); ++i)
-        midiOutputSelector.addItem (outs[i].name, 2 + i);
-
-    int idx = -1;
-    if (track.midiOutputIdentifier.isNotEmpty())
-    {
-        for (int i = 0; i < outs.size(); ++i)
-        {
-            if (outs[i].identifier == track.midiOutputIdentifier)
-            {
-                idx = i; break;
-            }
-        }
-    }
-    else
-    {
-        idx = track.midiOutputIndex.load (std::memory_order_relaxed);
-        if (idx >= outs.size()) idx = -1;
-    }
-    track.midiOutputIndex.store (idx, std::memory_order_relaxed);
-    midiOutputSelector.setSelectedId (idx >= 0 ? (2 + idx) : 1,
-                                       juce::dontSendNotification);
 }
 
 void ChannelStripComponent::setEqSectionVisible (bool visible)
@@ -1383,49 +1316,16 @@ public:
             self->setContentNonOwned (ed, /*resizeToFitContent*/ true);
         });
 
-       #if JUCE_LINUX
-        // Same Mutter focus-stealing-prevention fix as FocalApp's
-        // MainWindow: without an explicit _NET_WM_USER_TIME the WM may
-        // open this window iconified, leaving the user to Alt+Tab to
-        // find the editor. Also send WM_CHANGE_STATE NormalState +
-        // _NET_ACTIVE_WINDOW so the new window comes to front.
+        // Same foreground-promotion as FocalApp's MainWindow: without
+        // it Mutter on Linux/XWayland may open this editor iconified,
+        // leaving the user to Alt+Tab to find it. No-op on Mac/Win.
         juce::Component::SafePointer<PluginEditorWindow> safeThis (this);
         juce::MessageManager::callAsync ([safeThis]
         {
-            if (safeThis == nullptr) return;
-            auto* peer = safeThis->getPeer();
-            if (peer == nullptr) return;
-            auto* x = ::XOpenDisplay (nullptr);
-            if (x == nullptr) return;
-            const auto win = (::Window) (uintptr_t) peer->getNativeHandle();
-            const auto userTimeAtom = ::XInternAtom (x, "_NET_WM_USER_TIME",   False);
-            const auto changeStateAtom = ::XInternAtom (x, "WM_CHANGE_STATE",  False);
-            const auto activeWinAtom = ::XInternAtom (x, "_NET_ACTIVE_WINDOW", False);
-            unsigned long t = 0x7FFFFFFFUL;
-            ::XChangeProperty (x, win, userTimeAtom, XA_CARDINAL, 32,
-                                PropModeReplace,
-                                reinterpret_cast<unsigned char*> (&t), 1);
-            ::XEvent demin{};
-            demin.xclient.type         = ClientMessage;
-            demin.xclient.window       = win;
-            demin.xclient.message_type = changeStateAtom;
-            demin.xclient.format       = 32;
-            demin.xclient.data.l[0]    = 1;
-            ::XSendEvent (x, DefaultRootWindow (x), False,
-                           SubstructureRedirectMask | SubstructureNotifyMask, &demin);
-            ::XEvent act{};
-            act.xclient.type         = ClientMessage;
-            act.xclient.window       = win;
-            act.xclient.message_type = activeWinAtom;
-            act.xclient.format       = 32;
-            act.xclient.data.l[0]    = 2;
-            act.xclient.data.l[1]    = (long) t;
-            ::XSendEvent (x, DefaultRootWindow (x), False,
-                           SubstructureRedirectMask | SubstructureNotifyMask, &act);
-            ::XFlush (x);
-            ::XCloseDisplay (x);
+            if (auto* self = safeThis.getComponent())
+                if (auto* peer = self->getPeer())
+                    focal::platform::bringWindowToFront (*peer);
         });
-       #endif
     }
 
     void closeButtonPressed() override
@@ -2235,7 +2135,6 @@ void ChannelStripComponent::refreshInputSelectorVisibility()
     inputSelector      .setVisible (isMono || isStereo);
     inputSelectorR     .setVisible (isStereo);
     midiInputSelector  .setVisible (isMidi);
-    midiOutputSelector .setVisible (isMidi);
     midiChannelSelector.setVisible (isMidi);
     midiActivityLed    .setVisible (isMidi);
 }
@@ -2497,18 +2396,16 @@ void ChannelStripComponent::resized()
         }
         else  // MIDI
         {
-            // Row 1: [ MIDI input ][ ch ][LED]
-            // Row 2: [ MIDI output (full width) ]
+            // Row 1: [ MIDI input (wide) ][LED]
+            // Row 2: [ MIDI channel (full width) ]
             constexpr int kLedW = 14;
             auto led = inputRow.removeFromRight (kLedW);
             midiActivityLed.setBounds (led.reduced (1));
-            const int chW = juce::jmax (40, inputRow.getWidth() / 3);
-            midiChannelSelector.setBounds (inputRow.removeFromRight (chW).withTrimmedLeft (1));
-            midiInputSelector  .setBounds (inputRow.withTrimmedRight (1));
+            midiInputSelector.setBounds (inputRow.withTrimmedRight (1));
 
             area.removeFromTop (2);
-            auto outRow = area.removeFromTop (18);
-            midiOutputSelector.setBounds (outRow);
+            auto chRow = area.removeFromTop (18);
+            midiChannelSelector.setBounds (chRow);
         }
 
         area.removeFromTop (3);

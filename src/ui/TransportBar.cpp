@@ -97,6 +97,66 @@ void TransportIconButton::paintButton (juce::Graphics& g, bool isMouseOver,
             g.fillPath (g2);
             break;
         }
+        case Icon::Loop:
+        {
+            // Open circular arrow - 290° arc with a small triangular
+            // arrowhead at the gap. Reads as "looped playback".
+            auto box = iconBox.expanded (iconBox.getWidth() * 0.06f);
+            const float cx = box.getCentreX();
+            const float cy = box.getCentreY();
+            const float r  = box.getWidth() * 0.5f;
+            const float startAngle = juce::MathConstants<float>::pi * 0.15f;
+            const float endAngle   = juce::MathConstants<float>::twoPi
+                                    - juce::MathConstants<float>::pi * 0.15f;
+
+            juce::Path arc;
+            arc.addCentredArc (cx, cy, r, r, 0.0f, startAngle, endAngle, true);
+            g.strokePath (arc, juce::PathStrokeType (1.8f,
+                                                      juce::PathStrokeType::curved,
+                                                      juce::PathStrokeType::rounded));
+
+            // Arrowhead at the start of the arc, pointing tangentially.
+            const float ax = cx + r * std::sin (startAngle);
+            const float ay = cy - r * std::cos (startAngle);
+            const float ah = r * 0.55f;
+            juce::Path tip;
+            tip.addTriangle (ax,        ay - ah * 0.55f,
+                              ax,        ay + ah * 0.55f,
+                              ax - ah,   ay);
+            g.fillPath (tip);
+            break;
+        }
+        case Icon::Punch:
+        {
+            // Concentric ring + filled inner disc — "bullseye". Reads as
+            // a punch-in target.
+            const float ringW = iconBox.getWidth() * 0.15f;
+            g.drawEllipse (iconBox, ringW);
+            const float innerScale = 0.40f;
+            auto inner = juce::Rectangle<float> (iconBox.getWidth() * innerScale,
+                                                  iconBox.getHeight() * innerScale)
+                              .withCentre (iconBox.getCentre());
+            g.fillEllipse (inner);
+            break;
+        }
+        case Icon::Keyboard:
+        {
+            // Simplified piano-keyboard glyph: outer rounded rectangle with
+            // three black-key marks across the top half. White-key
+            // separators are implied by the gaps between the black keys.
+            const float corner = iconBox.getWidth() * 0.12f;
+            g.drawRoundedRectangle (iconBox.reduced (0.5f), corner, 1.4f);
+
+            const float keyW   = iconBox.getWidth() * 0.16f;
+            const float keyH   = iconBox.getHeight() * 0.55f;
+            const float keyTop = iconBox.getY() + iconBox.getHeight() * 0.10f;
+            const float baseX  = iconBox.getX() + iconBox.getWidth() * 0.18f;
+            const float stride = iconBox.getWidth() * 0.27f;
+            for (int i = 0; i < 3; ++i)
+                g.fillRect (juce::Rectangle<float> (baseX + i * stride, keyTop,
+                                                     keyW, keyH));
+            break;
+        }
     }
 }
 
@@ -268,39 +328,45 @@ TransportBar::TransportBar (AudioEngine& engineRef) : engine (engineRef)
         b.setColour (juce::TextButton::textColourOnId,   juce::Colours::white);
     };
 
-    styleModeToggle (loopToggle,  juce::Colour (0xff3aa860));   // green when on (matches loop markers)
-    styleModeToggle (punchToggle, juce::Colour (0xffd05a5a));   // record-red when on
     styleModeToggle (snapToggle,  juce::Colour (0xffd0a040));   // amber when on
     styleModeToggle (clickToggle,   juce::Colour (0xff60c060));   // green when on
     styleModeToggle (countInToggle, juce::Colour (0xff60c060));   // green: same family as CLICK
 
-    loopToggle.setTooltip ("Loop the timeline between IN and OUT during playback (L). "
-                           "Right-click the ruler in the SUMMARY view to set the points.");
-    punchToggle.setTooltip ("Only commit recorded audio between PUNCH IN and PUNCH OUT (P). "
-                            "Right-click the ruler in the SUMMARY view to set the points.");
     snapToggle.setTooltip ("Snap region drags to 1-second boundaries.");
-
-    loopToggle.setToggleState (engine.getTransport().isLoopEnabled(),  juce::dontSendNotification);
-    punchToggle.setToggleState (engine.getTransport().isPunchEnabled(), juce::dontSendNotification);
-    snapToggle.setToggleState (engine.getSession().snapToGrid,          juce::dontSendNotification);
-
-    loopToggle.onClick = [this]
-    {
-        engine.getTransport().setLoopEnabled (loopToggle.getToggleState());
-    };
-    punchToggle.onClick = [this]
-    {
-        engine.getTransport().setPunchEnabled (punchToggle.getToggleState());
-    };
+    snapToggle.setToggleState (engine.getSession().snapToGrid, juce::dontSendNotification);
     snapToggle.onClick = [this]
     {
         engine.getSession().snapToGrid = snapToggle.getToggleState();
     };
-
-    addAndMakeVisible (loopToggle);
-    punchToggle.addMouseListener (this, false);
-    addAndMakeVisible (punchToggle);
     addAndMakeVisible (snapToggle);
+
+    // Loop / Punch / Keyboard icon buttons in the transport cluster. Loop +
+    // Punch are toggle buttons (state mirrors transport flags); Keyboard
+    // toggles the embedded VKB modal owned by MainComponent.
+    loopButton.setClickingTogglesState (true);
+    loopButton.setTooltip ("Loop the timeline between IN and OUT during playback (L). "
+                            "Right-click the ruler in the SUMMARY view to set the points.");
+    loopButton.setToggleState (engine.getTransport().isLoopEnabled(), juce::dontSendNotification);
+    loopButton.onClick = [this]
+    {
+        engine.getTransport().setLoopEnabled (loopButton.getToggleState());
+    };
+    addAndMakeVisible (loopButton);
+
+    punchButton.setClickingTogglesState (true);
+    punchButton.setTooltip ("Only commit recorded audio between PUNCH IN and PUNCH OUT (P). "
+                             "Right-click for pre/post-roll settings.");
+    punchButton.setToggleState (engine.getTransport().isPunchEnabled(), juce::dontSendNotification);
+    punchButton.onClick = [this]
+    {
+        engine.getTransport().setPunchEnabled (punchButton.getToggleState());
+    };
+    punchButton.addMouseListener (this, false);  // right-click → settings menu
+    addAndMakeVisible (punchButton);
+
+    keyboardButton.setTooltip ("Virtual MIDI Keyboard (K) - type on your keyboard to play notes.");
+    keyboardButton.onClick = [this] { if (onVirtualKeyboardToggle) onVirtualKeyboardToggle(); };
+    addAndMakeVisible (keyboardButton);
 
     // CLICK toggle + BPM editable display.
     clickToggle.setTooltip ("Toggle the metronome click. The click is mixed into the "
@@ -560,10 +626,10 @@ void TransportBar::refreshButtonStates()
 
     // Sync mode-toggle visuals with the engine - they may have been
     // changed externally (session load, or a hotkey).
-    loopToggle.setToggleState  (engine.getTransport().isLoopEnabled(),
-                                juce::dontSendNotification);
-    punchToggle.setToggleState (engine.getTransport().isPunchEnabled(),
-                                juce::dontSendNotification);
+    loopButton.setToggleState  (engine.getTransport().isLoopEnabled(),
+                                 juce::dontSendNotification);
+    punchButton.setToggleState (engine.getTransport().isPunchEnabled(),
+                                 juce::dontSendNotification);
     snapToggle.setToggleState  (engine.getSession().snapToGrid,
                                 juce::dontSendNotification);
     clickToggle.setToggleState (engine.getSession().metronomeEnabled.load(),
@@ -617,10 +683,12 @@ void TransportBar::resized()
 
     // Circular transport buttons. Square bounds so the disc renders true.
     // 36 px diameter with 4 px spacing; centred vertically in the row.
-    // Five buttons (stop / rew / play / ffwd / record) -> 4 gaps.
+    // Eight buttons (stop / rew / play / ffwd / record / loop / punch /
+    // keyboard) -> 7 gaps. Loop+Punch live next to record (Reaper-style)
+    // instead of as separate text toggles on the right edge.
     constexpr int kBtnDia = 36;
     constexpr int kBtnGap = 4;
-    auto buttons = area.removeFromLeft (kBtnDia * 5 + kBtnGap * 4);
+    auto buttons = area.removeFromLeft (kBtnDia * 8 + kBtnGap * 7);
     const int yPad = juce::jmax (0, (buttons.getHeight() - kBtnDia) / 2);
     auto buttonRow = buttons.reduced (0, yPad);
 
@@ -635,6 +703,9 @@ void TransportBar::resized()
     place (playButton);
     place (ffwdButton);
     place (recordButton);
+    place (loopButton);
+    place (punchButton);
+    place (keyboardButton);
 
     area.removeFromLeft (12);
     clockLabel.setBounds (area.removeFromLeft (130));
@@ -667,10 +738,6 @@ void TransportBar::resized()
     area.removeFromRight (12);
 
     snapToggle.setBounds  (area.removeFromRight (compact ? 30 : 54).reduced (1, 4));
-    area.removeFromRight (4);
-    punchToggle.setBounds (area.removeFromRight (compact ? 30 : 60).reduced (1, 4));
-    area.removeFromRight (4);
-    loopToggle.setBounds  (area.removeFromRight (compact ? 30 : 54).reduced (1, 4));
     area.removeFromRight (12);
 
     area.removeFromLeft (12);
@@ -686,7 +753,7 @@ void TransportBar::mouseDown (const juce::MouseEvent& e)
 {
     // Right-click on PUNCH opens the auto-punch settings (pre-roll /
     // post-roll). Plain click still toggles punch on/off.
-    if (e.eventComponent == &punchToggle && e.mods.isPopupMenu())
+    if (e.eventComponent == &punchButton && e.mods.isPopupMenu())
     {
         showPunchSettingsMenu();
         return;
@@ -721,8 +788,6 @@ void TransportBar::syncCompactLabels (bool compact)
     const bool tapeExpanded = tapeToggle.getToggleState();
     if (compact)
     {
-        loopToggle .setButtonText ("L");
-        punchToggle.setButtonText ("P");
         snapToggle .setButtonText ("S");
         tapeToggle .setButtonText (tapeExpanded
             ? juce::CharPointer_UTF8 ("\xe2\x96\xbe")    // "▾"
@@ -730,8 +795,6 @@ void TransportBar::syncCompactLabels (bool compact)
     }
     else
     {
-        loopToggle .setButtonText ("LOOP");
-        punchToggle.setButtonText ("PUNCH");
         snapToggle .setButtonText ("SNAP");
         tapeToggle .setButtonText (tapeExpanded
             ? juce::CharPointer_UTF8 ("\xe2\x96\xbe SUMMARY")    // "▾ SUMMARY"
@@ -772,7 +835,7 @@ void TransportBar::showPunchSettingsMenu()
     m.addSubMenu ("Pre-roll: "  + formatSecs (pre),  preMenu);
     m.addItem ("Stop after punch-out (auto-stop)",     false, false, []{});
     m.addSubMenu ("Post-roll: " + formatSecs (post), postMenu);
-    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&punchToggle));
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&punchButton));
 }
 
 void TransportBar::onTap()

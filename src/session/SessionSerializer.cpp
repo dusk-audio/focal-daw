@@ -1,11 +1,34 @@
 #include "SessionSerializer.h"
 #include <juce_audio_devices/juce_audio_devices.h>
 
+#if JUCE_LINUX || JUCE_MAC
+ #include <fcntl.h>
+ #include <unistd.h>
+#endif
+
 namespace focal
 {
 namespace
 {
 constexpr int kFormatVersion = 1;
+
+// Force the kernel page cache for `path` out to physical storage. Without
+// this, a system crash between the temp-file write and the rename below
+// can leave a renamed-but-empty file: the rename metadata reaches disk
+// before the data does. fsync is a no-op on Windows in this build (the
+// SessionSerializer is Linux-first; FlushFileBuffers wiring can land
+// alongside the rest of the Windows port).
+void fsyncFile (const juce::File& path)
+{
+   #if JUCE_LINUX || JUCE_MAC
+    const int fd = ::open (path.getFullPathName().toRawUTF8(), O_RDONLY);
+    if (fd < 0) return;
+    (void) ::fsync (fd);
+    ::close (fd);
+   #else
+    (void) path;
+   #endif
+}
 
 // Resolve a MIDI device identifier (saved with a prior session) to its
 // current index in juce::MidiInput::getAvailableDevices(). Returns -1 if
@@ -808,6 +831,12 @@ bool SessionSerializer::save (const Session& s, const juce::File& target)
         out.flush();
         if (out.getStatus().failed())                  return false;
     }
+    // Push the temp-file contents to physical storage BEFORE the
+    // rename. Without this, a power loss / kernel oops between the
+    // rename and the next page-cache flush can leave the canonical
+    // session.json renamed but with empty / partial content - data
+    // loss bigger than just the in-progress save.
+    fsyncFile (tmp);
     return tmp.moveFileTo (target);
 }
 

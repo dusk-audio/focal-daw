@@ -232,12 +232,12 @@ void AuxLaneComponent::attachEditorInline (int slotIdx)
 
 // Custom popout window. Owned by AuxLaneComponent::SlotUI as a
 // unique_ptr (NOT juce::DialogWindow::launchAsync, which auto-deletes
-// itself on user X-close and races our manual delete - that's the
-// pattern that crashed Mutter via XDestroyWindow landing before
-// XUnmapWindow was processed). When the user clicks the OS X button,
-// closeButtonPressed forwards back to the host so it can detach the
-// editor and drop the unique_ptr on the next message-loop tick (never
-// destruct from inside a button-press callback).
+// itself on user X-close and races our manual delete - that ordering
+// race against the windowing system was a reliable trigger for
+// compositor faults on Linux/Wayland). When the user clicks the OS
+// X button, closeButtonPressed forwards back to the host so it can
+// detach the editor and drop the unique_ptr on the next message-loop
+// tick (never destruct from inside a button-press callback).
 class AuxLaneComponent::SlotUI::AuxPopoutWindow final : public juce::DocumentWindow
 {
 public:
