@@ -499,7 +499,7 @@ void PianoRollComponent::beginGroupDrag (int anchorIdx)
     {
         if (idx < 0 || idx >= (int) r->notes.size()) continue;
         const auto& n = r->notes[(size_t) idx];
-        dragSnapshots.push_back ({ n.startTick, n.noteNumber, n.lengthInTicks });
+        dragSnapshots.push_back ({ n.startTick, n.noteNumber, n.lengthInTicks, n.velocity });
     }
 }
 
@@ -1144,7 +1144,15 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
         dragOriginNoteNum = n.noteNumber;
         dragNoteStartTick = n.startTick;
         dragNoteLenTicks  = n.lengthInTicks;
-        dragMode = onEdge ? DragMode::ResizeNote : DragMode::MoveNote;
+        // Alt-modified click on a note body promotes Move ->
+        // EditNoteVelocity. Drag-vertical adjusts velocity instead
+        // of moving the note. Mirrors the tape-strip Alt-on-region
+        // gain-drag for muscle-memory consistency. Resize (right-
+        // edge hit) ignores the modifier - we still want trim there.
+        if (e.mods.isAltDown() && ! onEdge)
+            dragMode = DragMode::EditNoteVelocity;
+        else
+            dragMode = onEdge ? DragMode::ResizeNote : DragMode::MoveNote;
         beginGroupDrag (hit);
         repaint();
         return;
@@ -1261,6 +1269,48 @@ void PianoRollComponent::mouseDrag (const juce::MouseEvent& e)
         anchor.lengthInTicks = endTick - anchor.startTick;
         repaint();
     }
+    else if (dragMode == DragMode::EditNoteVelocity)
+    {
+        // Vertical drag on a note body adjusts its velocity. Up =
+        // louder, down = quieter. ~0.5 velocity-units per pixel
+        // gives a 254-unit range across a 250 px drag, so the user
+        // never has to fight the cursor edge to reach the extremes.
+        // Apply the same delta to every selected note via the
+        // dragSnapshots' velocity baselines (preserves relative
+        // velocities within the selection).
+        const float deltaPx = (float) (e.getMouseDownY() - e.y);
+        const int   delta   = (int) std::round (deltaPx * 0.5f);
+        for (size_t i = 0; i < selectedNotes.size(); ++i)
+        {
+            const int idx = selectedNotes[i];
+            if (idx < 0 || idx >= (int) r->notes.size()) continue;
+            if (i >= dragSnapshots.size()) continue;
+            r->notes[(size_t) idx].velocity =
+                juce::jlimit (1, 127, dragSnapshots[i].velocity + delta);
+        }
+        repaint();
+    }
+}
+
+void PianoRollComponent::mouseMove (const juce::MouseEvent& e)
+{
+    // Cursor feedback so the user can tell when Alt-on-note will do
+    // something different. Without this, the only signal is the
+    // resulting drag - too late.
+    bool onEdge = false;
+    const int hit = hitTestNote (e.x, e.y, onEdge);
+    if (hit < 0)
+    {
+        setMouseCursor (juce::MouseCursor::NormalCursor);
+        return;
+    }
+    if (e.mods.isAltDown() && ! onEdge)
+    {
+        setMouseCursor (juce::MouseCursor::UpDownResizeCursor);
+        return;
+    }
+    setMouseCursor (onEdge ? juce::MouseCursor::LeftRightResizeCursor
+                            : juce::MouseCursor::DraggingHandCursor);
 }
 
 void PianoRollComponent::mouseUp (const juce::MouseEvent&)

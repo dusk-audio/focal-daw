@@ -55,6 +55,7 @@ public:
     void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseUp   (const juce::MouseEvent&) override;
+    void mouseMove (const juce::MouseEvent&) override;
     bool keyPressed (const juce::KeyPress&) override;
     void mouseWheelMove (const juce::MouseEvent&,
                           const juce::MouseWheelDetails&) override;
@@ -115,6 +116,7 @@ private:
         juce::int64 startTick     = 0;
         int         noteNumber    = 0;
         juce::int64 lengthInTicks = 0;
+        int         velocity      = 100;   // baseline for EditNoteVelocity drag
     };
     std::vector<DragSnapshot> dragSnapshots;
 
@@ -122,7 +124,7 @@ private:
     // Empty rect = no box-select in flight (paint skips the overlay).
     juce::Rectangle<int> rubberBand;
 
-    enum class DragMode { None, MoveNote, ResizeNote, CreateNote, EditVelocity, BoxSelect, EditCcValue };
+    enum class DragMode { None, MoveNote, ResizeNote, CreateNote, EditVelocity, BoxSelect, EditCcValue, EditNoteVelocity };
     DragMode dragMode = DragMode::None;
 
     // Active CC controller shown in the CC lane. Starts on CC 1 (mod
