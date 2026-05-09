@@ -38,6 +38,19 @@ public:
     // which lives in std::array<ChannelStrip, 16> requiring default ctors).
     void setManager (PluginManager& mgr) noexcept { manager = &mgr; }
 
+    // Cache the host's AudioPlayHead so every loaded plugin sees it via
+    // setPlayHead. Called from AudioEngine::prepareForSelfTest after the
+    // engine's playhead is constructed. Pass nullptr to clear. Safe to
+    // call before / after a plugin is loaded - we apply on every load
+    // path. Tempo-synced plugin features (arps, LFOs, delays) need this;
+    // otherwise JUCE-hosted plugins fall back to a default 120 BPM.
+    void setHostPlayHead (juce::AudioPlayHead* ph) noexcept
+    {
+        hostPlayHead = ph;
+        if (auto* p = currentInstance.load (std::memory_order_acquire))
+            p->setPlayHead (ph);
+    }
+
     // UI-side access to the bound manager - used by the ChannelStripComponent
     // plugin picker to walk KnownPluginList and trigger scans. Returns the
     // bound manager; binding must have happened first (asserts otherwise).
@@ -119,26 +132,46 @@ public:
         return currentInstance.load (std::memory_order_acquire);
     }
 
+    // True when the loaded plugin self-reports as an instrument
+    // (synth / sampler / drum machine). False for effect plugins and
+    // when no plugin is loaded. Message-thread only - fillInPluginDescription
+    // can take internal locks inside the plugin, so it's not safe to call
+    // from the audio callback.
+    bool isLoadedPluginInstrument() const;
+
     // Reported latency of the loaded plugin in samples. 0 when no plugin
-    // is loaded or the plugin reports no latency. Audio-thread-safe -
-    // reads the instance via the same atomic pointer the process path
-    // uses, then queries getLatencySamples on the instance (no allocation,
-    // no lock). Used by AudioEngine's MIDI scheduler to push instrument
-    // events forward in time so the plugin's delayed audio output lands
-    // on the correct timeline sample.
+    // is loaded or the plugin reports no latency. Used by AudioEngine's
+    // MIDI scheduler to push instrument events forward in time so the
+    // plugin's delayed audio output lands on the correct timeline
+    // sample.
+    //
+    // Reads a cached atomic - the underlying juce::AudioPluginInstance::
+    // getLatencySamples() call is NOT documented as RT-safe (a plugin is
+    // technically allowed to recompute latency inside processBlock and
+    // some take internal locks), so we cache it on the message thread at
+    // load / prepareToPlay time. The cache stays consistent because the
+    // load path (loadFromFile / loadFromDescription / restoreFromSavedState
+    // / unload) refreshes it before the new instance becomes
+    // currentInstance, and prepareToPlay refreshes it when the engine
+    // re-preps the slot after a sample-rate change.
     int getLatencySamples() const noexcept
     {
-        if (auto* p = currentInstance.load (std::memory_order_acquire))
-            return p->getLatencySamples();
-        return 0;
+        return cachedLatencySamples.load (std::memory_order_relaxed);
     }
 
     // Session save/restore. The XML form encodes a juce::PluginDescription
     // (uid + format + path + display name); the state blob is whatever
     // opaque bytes the plugin wants persisted (its getStateInformation
     // output). Both are empty strings when no plugin is loaded.
-    juce::String getDescriptionXmlForSave() const;
-    juce::String getStateBase64ForSave() const;
+    //
+    // NON-CONST because both internally atomic-park currentInstance to
+    // nullptr while reading from the plugin: that prevents the audio
+    // thread from re-entering processBlock on the same instance during
+    // state I/O. JUCE's contract is that processBlock and getStateInfo
+    // must not overlap, and several plugins (notably U-he Diva) crash
+    // hard - taking down Mutter / the GNOME session - when they do.
+    juce::String getDescriptionXmlForSave();
+    juce::String getStateBase64ForSave();
 
     // Re-create the plugin from the saved description and apply the state
     // blob. Returns true on success. Caller is responsible for ensuring
@@ -155,6 +188,18 @@ private:
     // thread reads via the `currentInstance` atomic below.
     std::unique_ptr<juce::AudioPluginInstance> ownedInstance;
 
+    // Holds the previous plugin instance across exactly one swap, so a
+    // plugin that the audio thread might still be holding a stale
+    // pointer to from the in-flight callback isn't destructed until the
+    // NEXT swap (by which point at least one full audio block has
+    // elapsed since we stored nullptr into currentInstance, and the
+    // audio thread is guaranteed to have re-acquired). Mirrors
+    // MasteringPlayer's previousReader pattern. Without this, calling
+    // Replace plugin... while the audio device is running races the
+    // ~AudioPluginInstance destructor against the audio callback's
+    // processBlock and crashes inside the plugin's own teardown.
+    std::unique_ptr<juce::AudioPluginInstance> previousInstance;
+
     // Atomic view of `ownedInstance.get()` so the audio thread can
     // swap-load without a lock. Set after prepareToPlay completes.
     std::atomic<juce::AudioPluginInstance*> currentInstance { nullptr };
@@ -163,6 +208,24 @@ private:
 
     double preparedSampleRate = 0.0;
     int    preparedBlockSize  = 0;
+    // Cached at prepareToPlay so the watchdog multiplies by a constant
+    // instead of calling juce::Time::highResolutionTicksToSeconds (which
+    // does an internal divide per call). Mirrors AudioEngine's
+    // secondsPerTick.
+    double secondsPerTick = 0.0;
+
+    // Non-owning pointer to the host's AudioPlayHead; applied to every
+    // loaded plugin via setHostPlayHead -> instance->setPlayHead. The
+    // engine outlives every PluginSlot so this pointer stays valid for
+    // the slot's lifetime.
+    juce::AudioPlayHead* hostPlayHead = nullptr;
+
+    // Cached plugin latency. Refreshed on the message thread whenever
+    // the instance changes (load / unload / prepareToPlay). The audio
+    // thread reads this atom from getLatencySamples() instead of
+    // calling juce::AudioPluginInstance::getLatencySamples() directly,
+    // which isn't documented as RT-safe.
+    std::atomic<int> cachedLatencySamples { 0 };
 
     // Watchdog state. Audio-thread-only; no other thread reads these.
     //   • blocksSinceLoad: skips the budget check while a freshly-loaded

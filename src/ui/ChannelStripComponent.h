@@ -1,5 +1,6 @@
 #pragma once
 
+#include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <array>
 #include <functional>
@@ -12,7 +13,9 @@ namespace focal
 {
 class AudioEngine;
 
-class ChannelStripComponent final : public juce::Component, private juce::Timer
+class ChannelStripComponent final : public juce::Component,
+                                       private juce::Timer,
+                                       private juce::ChangeListener
 {
 public:
     ChannelStripComponent (int trackIndex, Track& trackRef, Session& sessionRef,
@@ -57,6 +60,16 @@ public:
 
 private:
     void timerCallback() override;
+    // Fired by AudioEngine after refreshMidiInputs() rebuilds the device
+    // bank. Repopulates this strip's MIDI input dropdown so the new
+    // device list is visible and re-resolves the selection via the
+    // saved identifier (so a device that's still present stays selected
+    // even if its index in the list changed).
+    void changeListenerCallback (juce::ChangeBroadcaster*) override;
+    void rebuildMidiInputDropdown();
+    // Same shape as rebuildMidiInputDropdown, but for the external-MIDI-
+    // output port. Repopulated whenever AudioEngine signals a refresh.
+    void rebuildMidiOutputDropdown();
 
     int trackIndex;
     Track& track;
@@ -191,6 +204,7 @@ private:
     juce::ComboBox   inputSelector;         // mono / stereo-L / (hidden in MIDI)
     juce::ComboBox   inputSelectorR;        // stereo-R (visible only in stereo mode)
     juce::ComboBox   midiInputSelector;     // MIDI input port (visible only in MIDI mode)
+    juce::ComboBox   midiOutputSelector;    // External MIDI output port (MIDI mode only)
     juce::ComboBox   midiChannelSelector;   // Omni / Ch 1..16 filter (MIDI mode only)
     // Small painted dot, repainted by the strip's existing 30 Hz timer when
     // the engine sets track.midiActivity (clear-on-read). Sits next to the
@@ -222,13 +236,11 @@ private:
     void setCompMode (int modeIndex);
     void refreshCompModeButtons();
 
-    // Plugin slot UX. openPluginPicker is the main entry point - shows a
-    // PopupMenu of installed plugins (from the scanned KnownPluginList) +
-    // "Scan plugins" + "Browse for file...". The file-chooser path is the
-    // fallback for unscanned formats / .vst3 bundles outside default paths.
+    // Plugin slot UX. Delegates to pluginpicker::openPickerMenu, passing
+    // PluginKind based on track mode (Instruments for Midi, Effects for
+    // Mono/Stereo). The shared helper handles the menu, the scan dialog,
+    // and the browse-for-file fallback.
     void openPluginPicker();
-    void runPluginScanModal();
-    void openPluginFileChooser();
     void unloadPluginSlot();
     void refreshPluginSlotButton();
     // Right-click context menu for the plugin slot button. Mirrors the
@@ -244,7 +256,37 @@ private:
     // the parent, Esc / click-outside dismiss) instead of a native top-level
     // DialogWindow. Lifetime is tied to this strip - the modal closes when
     // the strip is destroyed, before the underlying PluginSlot tears down.
-    EmbeddedModal pluginEditorModal;
+    // Plugin editors need a NATIVE window peer to render correctly -
+    // many plugins (e.g. MininnDrum, anything VSTGUI-based, anything
+    // using its own GL context) draw a white / blank surface when
+    // hosted as a child of another JUCE Component because the
+    // Component shares its parent's peer. So plugin editors are the
+    // explicit exception to the embedded-modal rule (memory:
+    // feedback_modal_preference) and get a real top-level window with
+    // its own peer.
+    //
+    // The window is rebuilt on every open (cheap) but the inner
+    // AudioProcessorEditor is cached in `pluginEditor` so the plugin's
+    // own GL / Cairo / native resources aren't torn down per close.
+    // That's what stops Diva and similar plugins from crashing the
+    // compositor on rapid open/close cycles.
+    class PluginEditorWindow;
+    std::unique_ptr<PluginEditorWindow> pluginEditorWindow;
+    std::unique_ptr<juce::AudioProcessorEditor> pluginEditor;
+    juce::AudioProcessor* pluginEditorOwner = nullptr;
+
+    bool isPluginEditorOpen() const noexcept;
+
+public:
+    // Public so the host (MainComponent / ConsoleView) can force-close
+    // all plugin editor windows on app shutdown BEFORE the channel-strip
+    // chain destructs. Tearing down a plugin editor's native X11 window
+    // during Mutter's own cascade-shutdown of our main window race-
+    // crashes the compositor on Linux/Wayland; closing them first, with
+    // the audio engine still alive, side-steps the race.
+    void dropPluginEditor();
+
+private:
 
     // Compact-mode plumbing.
     bool compactMode = false;

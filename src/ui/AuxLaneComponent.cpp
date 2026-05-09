@@ -182,6 +182,7 @@ void AuxLaneComponent::openPickerForSlot (int slotIdx)
                                         refreshSlotControls (slotIdx);
                                         rebuildSlots();
                                     },
+                                    pluginpicker::PluginKind::Effects,
                                     cursor);
 }
 
@@ -229,6 +230,45 @@ void AuxLaneComponent::attachEditorInline (int slotIdx)
     ui.editor->setTransform ({});
 }
 
+// Custom popout window. Owned by AuxLaneComponent::SlotUI as a
+// unique_ptr (NOT juce::DialogWindow::launchAsync, which auto-deletes
+// itself on user X-close and races our manual delete - that's the
+// pattern that crashed Mutter via XDestroyWindow landing before
+// XUnmapWindow was processed). When the user clicks the OS X button,
+// closeButtonPressed forwards back to the host so it can detach the
+// editor and drop the unique_ptr on the next message-loop tick (never
+// destruct from inside a button-press callback).
+class AuxLaneComponent::SlotUI::AuxPopoutWindow final : public juce::DocumentWindow
+{
+public:
+    AuxPopoutWindow (const juce::String& title,
+                     juce::AudioProcessorEditor& editor,
+                     std::function<void()> onCloseButton)
+        : juce::DocumentWindow (title,
+                                  juce::Colour (0xff202024),
+                                  juce::DocumentWindow::closeButton,
+                                  /*addToDesktop*/ true),
+          onClose (std::move (onCloseButton))
+    {
+        setUsingNativeTitleBar (true);
+        setContentNonOwned (&editor, /*resizeToFit*/ true);
+        setResizable (true, true);
+        centreAroundComponent (nullptr, getWidth(), getHeight());
+        setVisible (true);
+    }
+
+    void closeButtonPressed() override
+    {
+        // Detach content so this window's destructor doesn't touch the
+        // shared editor; ask the host to drop us deferred.
+        setContentNonOwned (nullptr, false);
+        if (onClose) onClose();
+    }
+
+private:
+    std::function<void()> onClose;
+};
+
 void AuxLaneComponent::togglePopoutForSlot (int slotIdx)
 {
     auto& ui = slots[(size_t) slotIdx];
@@ -241,24 +281,29 @@ void AuxLaneComponent::togglePopoutForSlot (int slotIdx)
         return;
     }
 
-    // Move the editor out of the lane and into a fresh DialogWindow at
-    // native size. The window is non-owning of the content so we keep
+    // Move the editor out of the lane and into a fresh top-level window
+    // at native size. The window is non-owning of the content so we keep
     // managing the editor's lifetime via the unique_ptr; closing the
     // window detaches the editor and re-inlines it.
     ui.editor->setTransform ({});
     ui.editor->setSize (juce::jmax (1, ui.editorNativeW),
                           juce::jmax (1, ui.editorNativeH));
 
-    juce::DialogWindow::LaunchOptions opts;
-    opts.dialogTitle = lane.name + " - " + ui.editor->getName();
-    opts.content.setNonOwned (ui.editor.get());
-    opts.dialogBackgroundColour = juce::Colour (0xff202024);
-    opts.escapeKeyTriggersCloseButton = false;
-    opts.useNativeTitleBar = true;
-    opts.resizable = true;
-
-    ui.popoutWindow = opts.launchAsync();
-    if (ui.popoutWindow != nullptr) ui.popoutWindow->toFront (true);
+    juce::Component::SafePointer<AuxLaneComponent> safeThis (this);
+    ui.popoutWindow = std::make_unique<SlotUI::AuxPopoutWindow> (
+        lane.name + " - " + ui.editor->getName(),
+        *ui.editor,
+        [safeThis, slotIdx]
+        {
+            // User clicked the OS X button. Defer the actual close /
+            // re-inline by one message-loop tick so we don't destruct
+            // the window from inside its own closeButtonPressed.
+            juce::MessageManager::callAsync ([safeThis, slotIdx]
+            {
+                if (auto* self = safeThis.getComponent())
+                    self->closePopoutForSlot (slotIdx);
+            });
+        });
     refreshSlotControls (slotIdx);
 }
 
@@ -267,20 +312,18 @@ void AuxLaneComponent::closePopoutForSlot (int slotIdx)
     auto& ui = slots[(size_t) slotIdx];
     if (ui.popoutWindow == nullptr) return;
 
-    // Detach the editor before the dialog tears itself down so the
-    // dialog doesn't try to delete it (we manage the editor's lifetime
-    // through ui.editor).
-    if (ui.editor != nullptr)
-        ui.editor->getParentComponent() != nullptr
-            ? ui.editor->getParentComponent()->removeChildComponent (ui.editor.get())
-            : (void) 0;
-
-    if (auto* w = ui.popoutWindow.getComponent())
+    // Detach the editor first so the window's destructor doesn't touch
+    // it, then drop the window. unique_ptr.reset() runs ~DocumentWindow
+    // synchronously, but with content already detached the destructor
+    // only tears down the window's own peer - no race with the editor
+    // and no double-delete.
+    if (ui.editor != nullptr
+        && ui.editor->getParentComponent() != nullptr)
     {
-        w->setVisible (false);
-        delete w;
+        ui.editor->getParentComponent()->removeChildComponent (ui.editor.get());
     }
-    ui.popoutWindow = nullptr;
+
+    ui.popoutWindow.reset();
 
     if (ui.editor != nullptr)
         attachEditorInline (slotIdx);

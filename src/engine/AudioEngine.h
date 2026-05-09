@@ -25,7 +25,8 @@ namespace focal
 // Phase 2 engine: input -> channel strip (live or playback source) -> aux/master.
 // Adds Transport state, recording (RecordManager), and playback (PlaybackEngine).
 class AudioEngine final : public juce::AudioIODeviceCallback,
-                            public juce::MidiInputCallback
+                            public juce::MidiInputCallback,
+                            public juce::ChangeBroadcaster
 {
 public:
     // Workflow stages - drives which signal flow the audio callback runs
@@ -54,6 +55,53 @@ public:
 
     Stage getStage() const noexcept { return stage.load (std::memory_order_relaxed); }
     void  setStage (Stage s) noexcept;
+
+    // Re-enumerate MIDI input devices (USB MIDI hot-plug, USB unplug,
+    // virtual port appear/disappear). Detaches the audio + MIDI
+    // callbacks, rebuilds the per-input collector list, then re-attaches
+    // - so the audio thread is briefly silent during the swap rather than
+    // racing the mutation. Sends a ChangeBroadcaster notification on
+    // completion so listeners (per-strip MIDI dropdowns) can rebuild
+    // their device lists. Message-thread only.
+    void refreshMidiInputs();
+
+    // Snapshot of the current MIDI input devices. Used by UI components
+    // (channel-strip MIDI dropdowns) to populate themselves. Returns the
+    // same list the engine handed to the audio device manager - indices
+    // align with Track::midiInputIndex semantics. Message-thread only;
+    // mutated only inside refreshMidiInputs() / rebuildMidiInputBank().
+    const juce::Array<juce::MidiDeviceInfo>& getMidiInputDevices() const noexcept
+    {
+        return midiInputDevices;
+    }
+
+    // Mirror of getMidiInputDevices for the output side. UI components
+    // (channel-strip MIDI-output dropdown, when a track is in Midi mode)
+    // populate themselves from this list. Indices align with
+    // Track::midiOutputIndex semantics. Message-thread only.
+    const juce::Array<juce::MidiDeviceInfo>& getMidiOutputDevices() const noexcept
+    {
+        return midiOutputDevices;
+    }
+
+    // Lazy-open a MIDI output port and start its background-delivery
+    // thread. Called by the message thread when a track is routed to an
+    // output (channel-strip dropdown onChange, post-session-load). Cheap
+    // no-op when the index is already open. Returns false on out-of-range
+    // index or if openDevice fails (a warning is printed in that case).
+    // Message-thread only - opens an OS handle and spawns a thread.
+    //
+    // Lazy because opening every available output at startup blocks the
+    // main thread (each ALSA snd_seq_connect_to is synchronous) and
+    // spawns N threads regardless of whether any track uses them. Most
+    // sessions touch zero or one output port.
+    bool ensureMidiOutputOpen (int index);
+
+    // Walk every track and open the MIDI output port each one is routed
+    // to. Called once after SessionSerializer::load has resolved the
+    // saved identifiers. Skips tracks with midiOutputIndex == -1.
+    // Message-thread only.
+    void openConfiguredMidiOutputs();
 
     // Single per-app UndoManager. Owns the stack of UndoableActions for
     // region edits and any other undoable mutation we add later. Touched
@@ -97,7 +145,6 @@ public:
     void jumpToNextMarker();
     void jumpToZero();
     void jumpToLastRecordPoint();
-    void jumpbackBySeconds();   // current playhead - jumpbackSeconds, clamped at 0
 
     void audioDeviceIOCallbackWithContext (const float* const* inputChannelData,
                                            int numInputChannels,
@@ -125,6 +172,15 @@ public:
     // be called again with the live device's params (or audioDeviceAboutToStart
     // will be invoked when the engine is re-attached).
     void prepareForSelfTest (double sampleRate, int blockSize);
+
+    // Test-only hook: stage a MidiBuffer that the next
+    // `audioDeviceIOCallbackWithContext` call will merge into
+    // `perInputMidi[inputIdx]` AFTER the collector drain, so the
+    // injected events flow through the same per-track filter and
+    // strip path that real MIDI takes. Cleared after one block. Used
+    // by the headless instrument-pipeline test in FocalApp.cpp; does
+    // nothing at runtime under normal device operation.
+    void stageTestMidiInjection (int inputIdx, juce::MidiBuffer events);
 
     // Plugin-slot persistence - message-thread bookends around
     // SessionSerializer::save / ::load. publish copies each PluginSlot's
@@ -178,7 +234,12 @@ private:
     juce::AudioDeviceManager deviceManager;
 
     Transport       transport;
-    FocalPlayHead   playHead        { transport };
+    // Playhead initialized in the constructor body once tempoBpm /
+    // currentSampleRate addresses are known - field declarations
+    // run before constructor body so we can't pass &session.tempoBpm
+    // here without manual ordering. Pointer to keep the field a
+    // simple owned object initialized later.
+    std::unique_ptr<FocalPlayHead> playHead;
     RecordManager   recordManager   { session };
     PlaybackEngine  playbackEngine  { session };
     PluginManager   pluginManager;  // shared across all per-channel PluginSlots
@@ -215,12 +276,51 @@ private:
     std::vector<juce::MidiBuffer> perInputMidi;
     juce::MidiBuffer perTrackMidiScratch;  // reused per-block per-track filter target
 
-    // Construct-time-only wiring of MIDI input collectors. Mutates the
-    // three vectors above which the audio and MIDI threads then read
-    // lock-free, so a second call would race both. The body short-circuits
-    // on re-entry (release-build guard) and asserts (debug-build guard);
-    // together those keep the once-only contract enforceable.
-    void bindMidiInputCollectorsOnce();
+    // Backing store for stageTestMidiInjection. SPSC handoff: the message
+    // thread writes the buffer + index, then publishes via testInjectReady
+    // (release); the audio callback reads testInjectReady (acquire), consumes
+    // the buffer into perInputMidi[testInjectInputIdx], and clears the flag.
+    // Producer must not touch testInjectMidi while testInjectReady==true.
+    // Empty in production (no test hook calls staged); the relaxed flag load
+    // makes the production cost a single load + branch per block.
+    juce::MidiBuffer  testInjectMidi;
+    std::atomic<int>  testInjectInputIdx { -1 };
+    std::atomic<bool> testInjectReady    { false };
+
+    // External MIDI output bank (parallel to the input bank). For tracks
+    // that route to a hardware synth instead of (or in addition to) a
+    // loaded instrument plugin. Built/torn-down inside refreshMidiInputs's
+    // detach-rebuild-reattach fence so audio-thread reads are safe under
+    // the same protocol as the input side. JUCE's MidiOutput owns its own
+    // background thread for actual delivery, so audio-thread sends from
+    // sendBlockOfMessages don't block on the OS port.
+    juce::Array<juce::MidiDeviceInfo> midiOutputDevices;
+    std::vector<std::unique_ptr<juce::MidiOutput>> midiOutputs;
+
+    // Per-track snapshot of the previous block's midiInputIndex so we can
+    // detect when the user swaps a track's MIDI input mid-play and emit
+    // an All-Notes-Off + Sustain-Off flush on the new input's first block.
+    // Without this, held notes from the previous device would keep
+    // ringing on the synth (the synth never sees a Note Off because the
+    // events stop arriving from the now-unrouted source).
+    std::array<int, Session::kNumTracks> lastMidiInputIndex {};
+
+    // Initial wiring of MIDI input collectors. Called once from the
+    // constructor BEFORE the audio + MIDI callbacks are registered, and
+    // again from refreshMidiInputs() WHILE those callbacks are detached.
+    // The detach-rebuild-reattach fence in refreshMidiInputs() is what
+    // makes vector mutation safe; this function itself is unguarded and
+    // assumes the caller has handled the callback-detachment.
+    void rebuildMidiInputBank();
+
+    // Mirror of rebuildMidiInputBank for the output side. Snapshots the
+    // current MIDI output device list and resets midiOutputs to a parallel
+    // vector of nullptrs - actual port-open is lazy via
+    // ensureMidiOutputOpen() so startup never blocks on snd_seq_connect_to
+    // and the per-port delivery threads aren't spawned for ports nobody
+    // uses. Called from the same detached window as the input rebuild so
+    // the audio thread doesn't observe a half-built outputs vector.
+    void rebuildMidiOutputBank();
 
     std::atomic<double> currentSampleRate { 0.0 };
     std::atomic<int>    currentBlockSize  { 0 };

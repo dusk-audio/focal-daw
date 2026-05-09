@@ -44,7 +44,7 @@ void showLearnMenu (juce::Component& target,
     // Find an existing binding for this (kind, index) pair so the menu
     // can show its source and offer "Forget".
     const MidiBinding* existing = nullptr;
-    for (const auto& b : session.midiBindings)
+    for (const auto& b : session.midiBindings.current())
     {
         if (b.target == kind && b.targetIndex == index) { existing = &b; break; }
     }
@@ -65,12 +65,14 @@ void showLearnMenu (juce::Component& target,
         m.addItem ("Forget binding", true, false,
             [&session, kind, index]
             {
-                auto& binds = session.midiBindings;
-                binds.erase (std::remove_if (binds.begin(), binds.end(),
-                    [kind, index] (const MidiBinding& x)
-                    {
-                        return x.target == kind && x.targetIndex == index;
-                    }), binds.end());
+                session.midiBindings.mutate ([kind, index] (std::vector<MidiBinding>& binds)
+                {
+                    binds.erase (std::remove_if (binds.begin(), binds.end(),
+                        [kind, index] (const MidiBinding& x)
+                        {
+                            return x.target == kind && x.targetIndex == index;
+                        }), binds.end());
+                });
             });
     }
     m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&target));

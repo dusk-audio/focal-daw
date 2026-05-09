@@ -18,6 +18,95 @@
 
 namespace focal
 {
+namespace
+{
+// Focal-styled "save changes before quitting?" panel hosted by
+// MainComponent::quitModal via EmbeddedModal. Three actions: Save (writes
+// session.json or pops the Save As chooser, then quits on success),
+// Don't Save (quits immediately, autosave keeps the changes for next
+// launch's recovery prompt), Cancel (just dismisses).
+class QuitConfirmDialog final : public juce::Component
+{
+public:
+    QuitConfirmDialog()
+    {
+        titleLabel.setText ("Save changes before quitting?", juce::dontSendNotification);
+        titleLabel.setFont (juce::Font (juce::FontOptions (18.0f, juce::Font::bold)));
+        titleLabel.setColour (juce::Label::textColourId, juce::Colour (0xffe8e8e8));
+        addAndMakeVisible (titleLabel);
+
+        bodyLabel.setText (
+            "Your session has unsaved changes since the last manual save. "
+            "If you don't save, the autosave will still be available "
+            "the next time you open this session.",
+            juce::dontSendNotification);
+        bodyLabel.setFont (juce::Font (juce::FontOptions (13.0f)));
+        bodyLabel.setColour (juce::Label::textColourId, juce::Colour (0xffc0c0c8));
+        bodyLabel.setJustificationType (juce::Justification::topLeft);
+        bodyLabel.setMinimumHorizontalScale (1.0f);
+        addAndMakeVisible (bodyLabel);
+
+        styleAccent (saveButton);
+        styleNeutral (dontSaveButton);
+        styleNeutral (cancelButton);
+
+        saveButton    .onClick = [this] { if (onSave)     onSave(); };
+        dontSaveButton.onClick = [this] { if (onDontSave) onDontSave(); };
+        cancelButton  .onClick = [this] { if (onCancel)   onCancel(); };
+
+        addAndMakeVisible (saveButton);
+        addAndMakeVisible (dontSaveButton);
+        addAndMakeVisible (cancelButton);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.fillAll (juce::Colour (0xff1a1a20));
+        g.setColour (juce::Colour (0xff2a2a32));
+        g.drawRoundedRectangle (getLocalBounds().toFloat().reduced (0.5f), 6.0f, 1.0f);
+    }
+
+    void resized() override
+    {
+        auto area = getLocalBounds().reduced (24);
+        titleLabel.setBounds (area.removeFromTop (28));
+        area.removeFromTop (10);
+        bodyLabel.setBounds (area.removeFromTop (60));
+
+        // Right-aligned button row, primary action on the right (Save).
+        auto buttonRow = area.removeFromBottom (36);
+        const int btnW = 110;
+        saveButton    .setBounds (buttonRow.removeFromRight (btnW));
+        buttonRow.removeFromRight (8);
+        dontSaveButton.setBounds (buttonRow.removeFromRight (btnW));
+        buttonRow.removeFromRight (8);
+        cancelButton  .setBounds (buttonRow.removeFromRight (90));
+    }
+
+    std::function<void()> onSave;
+    std::function<void()> onDontSave;
+    std::function<void()> onCancel;
+
+private:
+    static void styleAccent (juce::TextButton& b)
+    {
+        b.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff4a7c9e));
+        b.setColour (juce::TextButton::textColourOffId, juce::Colours::white);
+    }
+    static void styleNeutral (juce::TextButton& b)
+    {
+        b.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff2a2a30));
+        b.setColour (juce::TextButton::textColourOffId, juce::Colour (0xffe0e0e0));
+    }
+
+    juce::Label      titleLabel;
+    juce::Label      bodyLabel;
+    juce::TextButton saveButton    { "Save" };
+    juce::TextButton dontSaveButton { "Don't Save" };
+    juce::TextButton cancelButton  { "Cancel" };
+};
+} // namespace
+
 MainComponent::MainComponent()
 {
     juce::LookAndFeel::setDefaultLookAndFeel (&lookAndFeel);
@@ -190,7 +279,23 @@ MainComponent::MainComponent()
     // before the message loop catches up to the queued lambda.
     // FOCAL_SKIP_STARTUP_DIALOG=1 bypasses the picker for screenshot /
     // xdotool flows.
-    if (std::getenv ("FOCAL_SKIP_STARTUP_DIALOG") == nullptr)
+    // FOCAL_LOAD_SESSION=/path/to/session.json bypasses the startup
+    // dialog and loads the named session immediately. Useful for
+    // benchmarking the load path (the [Focal/Load] timing line ends
+    // up in the parent terminal) and for scripted reproductions of
+    // user-reported regressions.
+    if (const char* loadPath = std::getenv ("FOCAL_LOAD_SESSION");
+        loadPath != nullptr && *loadPath)
+    {
+        juce::Component::SafePointer<MainComponent> safeThis (this);
+        juce::String pathStr (loadPath);
+        juce::MessageManager::callAsync ([safeThis, pathStr]
+        {
+            if (safeThis != nullptr)
+                safeThis->loadSessionFromJson (juce::File (pathStr));
+        });
+    }
+    else if (std::getenv ("FOCAL_SKIP_STARTUP_DIALOG") == nullptr)
     {
         juce::Component::SafePointer<MainComponent> safeThis (this);
         juce::MessageManager::callAsync ([safeThis]
@@ -209,6 +314,17 @@ MainComponent::MainComponent()
 MainComponent::~MainComponent()
 {
     stopTimer();   // halt autosave before tearing down engine / session
+
+    // Close every plugin editor window (real top-level juce::DocumentWindows
+    // with their own native X11 peers) BEFORE the rest of the UI cascade
+    // tears down. Without this, ChannelStripComponent destructors run
+    // their dropPluginEditor() inside Mutter's own teardown of our main
+    // window, which on Linux/Wayland race-crashes the compositor. Belt-
+    // and-suspenders for any quit path that doesn't go through
+    // requestQuit's onSave / onDontSave handlers above (e.g. SIGTERM,
+    // window-manager-initiated kill).
+    if (consoleView != nullptr)
+        consoleView->dropAllPluginEditors();
 
     // Force-delete any audio settings dialog we launched. JUCE's
     // ModalComponentManager keeps modal dialogs alive on its own stack and
@@ -847,6 +963,97 @@ void MainComponent::timerCallback()
     writeAutosave();
 }
 
+void MainComponent::requestQuit()
+{
+    // Industry-standard dirty-only prompt: nothing changed since the last
+    // manual save (autosave file isn't newer than session.json) → quit
+    // immediately. Otherwise show the Focal-styled Save / Don't Save /
+    // Cancel modal.
+    const auto dir = session.getSessionDirectory();
+    const auto sessionJson = dir.getChildFile ("session.json");
+    const bool dirty = (dir != juce::File()) && autosaveIsNewerThan (sessionJson);
+
+    if (! dirty)
+    {
+        if (auto* app = juce::JUCEApplicationBase::getInstance())
+            app->systemRequestedQuit();
+        return;
+    }
+
+    if (quitModal.isOpen()) return;  // user double-clicked the X
+
+    auto dialog = std::make_unique<QuitConfirmDialog>();
+    dialog->setSize (440, 200);
+
+    dialog->onCancel = [this]
+    {
+        quitModal.close();
+    };
+    dialog->onDontSave = [this]
+    {
+        // Quit and let the autosave linger. Next launch's session-load
+        // will offer to recover from it.
+        quitModal.close();
+        beginMutterSafeShutdown();
+    };
+    dialog->onSave = [this]
+    {
+        // saveSessionAndThen handles both the sync (existing dir) and
+        // async (Save As file chooser) paths. Close the modal first so
+        // the chooser, if it opens, isn't fighting our overlay for
+        // input. On save success, quit; on failure (chooser cancel,
+        // disk error) the user is left in the app and can retry.
+        quitModal.close();
+        juce::Component::SafePointer<MainComponent> safeThis (this);
+        saveSessionAndThen ([safeThis] (bool ok)
+        {
+            if (! ok) return;
+            if (auto* self = safeThis.getComponent())
+                self->beginMutterSafeShutdown();
+        });
+    };
+
+    quitModal.show (*this, std::move (dialog));
+}
+
+void MainComponent::beginMutterSafeShutdown()
+{
+    // Step 1 (synchronous): drop every plugin editor window. Each is a
+    // top-level juce::DocumentWindow with its own X11 peer; tearing
+    // them down requires Mutter to update its compositor tree.
+    if (consoleView != nullptr)
+        consoleView->dropAllPluginEditors();
+
+    // Step 2 (after a delay): hide the main window. setVisible(false)
+    // sends UnmapNotify to Mutter, telling it the surface is going
+    // away in a graceful way - much friendlier than the destroy-
+    // notify storm a synchronous shutdown produces.
+    juce::Component::SafePointer<MainComponent> safeThis (this);
+    juce::Timer::callAfterDelay (120, [safeThis]
+    {
+        if (auto* self = safeThis.getComponent())
+        {
+            if (auto* tlw = self->getTopLevelComponent())
+                tlw->setVisible (false);
+        }
+    });
+
+    // Step 3 (after a longer delay): trigger the actual quit. By the
+    // time this fires, Mutter has had a quarter-second to process the
+    // unmap and editor-window destructions; the subsequent main-window
+    // teardown happens against a settled compositor state instead of
+    // colliding with in-flight events. Empirically the prior "drop
+    // editors then immediately systemRequestedQuit" cascade reliably
+    // crashed Mutter on this user's machine - hard enough to need a
+    // reboot. The 240 ms total budget is invisible to the user but
+    // generous enough for Mutter to process every prior event.
+    juce::Timer::callAfterDelay (240, []
+    {
+        if (auto* app = juce::JUCEApplicationBase::getInstance())
+            app->systemRequestedQuit();
+    });
+}
+
 void MainComponent::saveSessionAndThen (std::function<void(bool)> onComplete)
 {
     const auto dir = session.getSessionDirectory();
@@ -981,6 +1188,7 @@ bool MainComponent::loadSessionFromJson (const juce::File& sessionJson)
 bool MainComponent::finishLoadingSessionFrom (const juce::File& sourceJson,
                                                  const juce::File& dir)
 {
+    const auto t0 = juce::Time::getMillisecondCounterHiRes();
     session.setSessionDirectory (dir);
 
     if (! SessionSerializer::load (session, sourceJson))
@@ -989,6 +1197,7 @@ bool MainComponent::finishLoadingSessionFrom (const juce::File& sourceJson,
                              juce::dontSendNotification);
         return false;
     }
+    const auto tAfterParse = juce::Time::getMillisecondCounterHiRes();
 
     // Autosave's job is done - clean up so the next load has a clean slate.
     // (Even when the user chose "load saved session" we drop the autosave, on
@@ -999,7 +1208,14 @@ bool MainComponent::finishLoadingSessionFrom (const juce::File& sourceJson,
     // pluginStateBase64 fields are populated; ask the engine to
     // re-instantiate each track's plugin from those.
     engine.consumePluginStateAfterLoad();
+    const auto tAfterPlugins = juce::Time::getMillisecondCounterHiRes();
     engine.consumeTransportStateAfterLoad();
+
+    // Open MIDI output ports for any tracks the loaded session had
+    // routed. Done here (not in the engine constructor) so startup
+    // never blocks on snd_seq_connect_to for ports nobody uses.
+    engine.openConfiguredMidiOutputs();
+    const auto tAfterMidiOuts = juce::Time::getMillisecondCounterHiRes();
 
     // Reconstruct the console so all controls reflect the freshly
     // loaded values (atomic state is in `session`, but UI widgets
@@ -1014,10 +1230,20 @@ bool MainComponent::finishLoadingSessionFrom (const juce::File& sourceJson,
     if (consoleView != nullptr && transportBar != nullptr)
         consoleView->setStripsCompactMode (tapeStripExpanded);
     resized();
+    const auto tAfterConsole = juce::Time::getMillisecondCounterHiRes();
 
     RecentSessions::add (dir);
     statusLabel.setText ("Loaded: " + sourceJson.getFullPathName(),
                          juce::dontSendNotification);
+
+    std::fprintf (stderr,
+                  "[Focal/Load] %s: parse=%dms plugins=%dms midiOuts=%dms console=%dms total=%dms\n",
+                  sourceJson.getFileName().toRawUTF8(),
+                  (int) (tAfterParse    - t0),
+                  (int) (tAfterPlugins  - tAfterParse),
+                  (int) (tAfterMidiOuts - tAfterPlugins),
+                  (int) (tAfterConsole  - tAfterMidiOuts),
+                  (int) (tAfterConsole  - t0));
     return true;
 }
 

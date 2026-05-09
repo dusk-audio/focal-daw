@@ -3,11 +3,27 @@
   #include "alsa/AlsaAudioIODeviceType.h"
 #endif
 #include <cstring>
+#include <thread>
 
 namespace focal
 {
 AudioEngine::AudioEngine (Session& sessionToBindTo) : session (sessionToBindTo)
 {
+    // Build the playhead now that all the atom addresses (transport,
+    // session.tempoBpm, currentSampleRate) are stable. Hosted plugins
+    // get this via setPlayHead so tempo-synced features (LFOs, arps,
+    // delays, transport-driven UIs) read the live session BPM and
+    // playhead position.
+    playHead = std::make_unique<FocalPlayHead> (transport,
+                                                  &session.tempoBpm,
+                                                  &currentSampleRate);
+
+    // Sentinel for "no previous input" - the first audio block will compare
+    // the current midiInputIndex against this and (correctly) emit a flush
+    // if a device is already selected, which is harmless when no notes are
+    // held yet.
+    lastMidiInputIndex.fill (-1);
+
     for (int i = 0; i < Session::kNumTracks; ++i)
     {
         strips[(size_t) i].bind (session.track (i).strip);
@@ -66,40 +82,102 @@ AudioEngine::AudioEngine (Session& sessionToBindTo) : session (sessionToBindTo)
     // addMidiInputDeviceCallback with an empty deviceIdentifier means "every
     // enabled input fans out to this callback" — handleIncomingMidiMessage
     // routes by source pointer.
-    bindMidiInputCollectorsOnce();
+    rebuildMidiInputBank();
+    rebuildMidiOutputBank();
     deviceManager.addMidiInputDeviceCallback ({}, this);
 }
 
-void AudioEngine::bindMidiInputCollectorsOnce()
+void AudioEngine::refreshMidiInputs()
 {
-    // CONSTRUCT-TIME ONLY. The audio thread reads `midiInputDevices`,
-    // `midiInputCollectors`, and `perInputMidi` lock-free during the audio
-    // callback, and the MIDI thread reads `midiInputDevices` /
-    // `midiInputCollectors` from `handleIncomingMidiMessage`. Mutating any
-    // of those vectors after the callbacks have been registered races with
-    // both threads. This function is called once from the AudioEngine
-    // constructor BEFORE `addAudioCallback` and `addMidiInputDeviceCallback`,
-    // which is the only safe ordering. Hot-plug refresh would require a
-    // mutex (or an atomic-swap of the device list) - not implemented yet.
-    //
-    // Two layers protect the contract: jassert in debug catches the misuse
-    // during development, and the early-return guard below makes a release-
-    // build re-entry a no-op rather than a UB-by-race. If a future caller
-    // genuinely needs to refresh the binding, replace both guards with a
-    // proper synchronisation strategy first.
-    jassert (midiInputCollectors.empty()
-             && "bindMidiInputCollectorsOnce is construct-time only");
-    if (! midiInputCollectors.empty())
+    // Detach both callbacks so neither the audio thread nor the MIDI
+    // thread can be inside the engine while we mutate the device /
+    // collector / buffer vectors. JUCE's removeAudioCallback joins the
+    // audio thread before returning, and removeMidiInputDeviceCallback
+    // joins on the MIDI dispatch side. This is the cheapest correct
+    // synchronisation for a rare user-triggered event - mutating the
+    // vectors lock-free under callback would require a snapshot pattern
+    // throughout the audio path that costs more than it's worth for a
+    // hot-plug refresh.
+    deviceManager.removeAudioCallback (this);
+    deviceManager.removeMidiInputDeviceCallback ({}, this);
+
+    // Disable currently-enabled inputs before rebuilding so the device
+    // manager's own bookkeeping releases the OS handles. The new pass
+    // re-enables whichever devices are still present.
+    for (const auto& d : midiInputDevices)
+        deviceManager.setMidiInputDeviceEnabled (d.identifier, false);
+
+    rebuildMidiInputBank();
+    rebuildMidiOutputBank();
+
+    // The track-side index atoms may now point at moved or removed
+    // devices. Re-resolve each track's saved identifier so a refresh
+    // doesn't silently break existing routing. Tracks with no saved
+    // identifier (very old sessions) keep their raw index, clamped.
+    auto resolveByIdentifier = [] (const juce::Array<juce::MidiDeviceInfo>& devices,
+                                    const juce::String& wantedId)
     {
-        std::fprintf (stderr,
-                      "[Focal/AudioEngine] WARNING: bindMidiInputCollectorsOnce "
-                      "called twice; ignoring (would race the audio/MIDI threads).\n");
-        return;
+        for (int i = 0; i < devices.size(); ++i)
+            if (devices[i].identifier == wantedId)
+                return i;
+        return -1;
+    };
+    for (int t = 0; t < Session::kNumTracks; ++t)
+    {
+        auto& track = session.track (t);
+        if (track.midiInputIdentifier.isNotEmpty())
+        {
+            track.midiInputIndex.store (
+                resolveByIdentifier (midiInputDevices, track.midiInputIdentifier),
+                std::memory_order_relaxed);
+        }
+        else
+        {
+            const int cur = track.midiInputIndex.load (std::memory_order_relaxed);
+            if (cur >= midiInputDevices.size())
+                track.midiInputIndex.store (-1, std::memory_order_relaxed);
+        }
+        if (track.midiOutputIdentifier.isNotEmpty())
+        {
+            track.midiOutputIndex.store (
+                resolveByIdentifier (midiOutputDevices, track.midiOutputIdentifier),
+                std::memory_order_relaxed);
+        }
+        else
+        {
+            const int cur = track.midiOutputIndex.load (std::memory_order_relaxed);
+            if (cur >= midiOutputDevices.size())
+                track.midiOutputIndex.store (-1, std::memory_order_relaxed);
+        }
     }
 
+    // The output bank was rebuilt with all-null entries (lazy open). Re-
+    // open whichever ports tracks are currently routed to so playback
+    // doesn't silently drop notes after a hot-plug refresh. Must run
+    // BEFORE re-attaching the audio/MIDI callbacks - otherwise the audio
+    // thread can iterate midiOutputs while ensureMidiOutputOpen() mutates
+    // it.
+    openConfiguredMidiOutputs();
+
+    deviceManager.addMidiInputDeviceCallback ({}, this);
+    deviceManager.addAudioCallback (this);
+
+    // Wake any UI listeners (each ChannelStripComponent's MIDI dropdown)
+    // so they rebuild their item list and re-select via identifier.
+    sendChangeMessage();
+}
+
+void AudioEngine::rebuildMidiInputBank()
+{
     // Snapshot the available MIDI inputs and prepare a parallel collector
     // list. Index alignment with `midiInputDevices` is what
     // `Track::midiInputIndex` references (-1 = none, 0..N = this list).
+    //
+    // Safe to mutate the three vectors here ONLY when both the audio and
+    // MIDI callbacks are detached. The constructor's first call satisfies
+    // that (callbacks aren't registered yet); refreshMidiInputs() does the
+    // remove-then-call-then-add dance. Calling this with callbacks active
+    // races the audio + MIDI threads and is undefined behaviour.
     midiInputDevices = juce::MidiInput::getAvailableDevices();
     midiInputCollectors.clear();
     midiInputCollectors.reserve ((size_t) midiInputDevices.size());
@@ -127,6 +205,59 @@ void AudioEngine::bindMidiInputCollectorsOnce()
                           devId.toRawUTF8());
         }
         midiInputCollectors.push_back (std::move (col));
+    }
+}
+
+void AudioEngine::rebuildMidiOutputBank()
+{
+    // Tear down any existing outputs first (closes the OS handles and
+    // joins each MidiOutput's background thread). Mutating midiOutputs
+    // here is only safe when the audio callback is detached - the audio
+    // thread iterates this vector while sending events.
+    midiOutputs.clear();
+
+    // Enumerate, but do NOT open. Eagerly opening every available output
+    // at startup blocks the message thread on each ALSA snd_seq_connect_to
+    // and spawns one delivery thread per port - on a system with USB MIDI
+    // gear that can stall the MainWindow's setVisible(true) for seconds
+    // (or indefinitely if a port misbehaves). Most sessions use zero or
+    // one output; opening on demand via ensureMidiOutputOpen() pays only
+    // for what's actually routed.
+    midiOutputDevices = juce::MidiOutput::getAvailableDevices();
+    midiOutputs.resize ((size_t) midiOutputDevices.size());  // all nullptr
+}
+
+bool AudioEngine::ensureMidiOutputOpen (int index)
+{
+    if (index < 0 || index >= (int) midiOutputs.size())
+        return false;
+    if (midiOutputs[(size_t) index] != nullptr)
+        return true;  // already open
+
+    auto out = juce::MidiOutput::openDevice (midiOutputDevices[index].identifier);
+    if (out == nullptr)
+    {
+        std::fprintf (stderr,
+                      "[Focal/AudioEngine] WARNING: failed to open MIDI output \"%s\" "
+                      "(id %s). Another application may be holding it open.\n",
+                      midiOutputDevices[index].name.toRawUTF8(),
+                      midiOutputDevices[index].identifier.toRawUTF8());
+        return false;
+    }
+    // Start the background-delivery thread so audio-thread sends via
+    // sendBlockOfMessages enqueue without blocking on the OS port.
+    out->startBackgroundThread();
+    midiOutputs[(size_t) index] = std::move (out);
+    return true;
+}
+
+void AudioEngine::openConfiguredMidiOutputs()
+{
+    for (int t = 0; t < Session::kNumTracks; ++t)
+    {
+        const int idx = session.track (t).midiOutputIndex.load (std::memory_order_relaxed);
+        if (idx >= 0)
+            ensureMidiOutputOpen (idx);
     }
 }
 
@@ -240,11 +371,35 @@ void AudioEngine::stop()
 
 void AudioEngine::record()
 {
-    if (transport.isRecording()) return;
-    if (! session.anyTrackArmed()) return;
+    if (transport.isRecording())
+    {
+        std::fprintf (stderr, "[Focal/AudioEngine] record(): already recording, ignored.\n");
+        return;
+    }
+
+    // Defensive resync of the armedTrackCount fast-path counter. The
+    // counter is normally maintained by Session::setTrackArmed, but a
+    // couple of code paths (notably RegionEditActions clone/restore)
+    // wrote recordArmed directly and left the counter stale - which
+    // would then make anyTrackArmed() incorrectly return false and
+    // silently bail out of recording. Cheap to recompute - one pass
+    // over 16 tracks. Also helps surface user-visible "I armed the
+    // track but record won't engage" symptoms.
+    session.recomputeRtCounters();
+    if (! session.anyTrackArmed())
+    {
+        std::fprintf (stderr, "[Focal/AudioEngine] record(): no track is armed; "
+                              "click ARM on the strip you want to record into.\n");
+        return;
+    }
 
     const double sr = currentSampleRate.load (std::memory_order_relaxed);
-    if (sr <= 0.0) return;
+    if (sr <= 0.0)
+    {
+        std::fprintf (stderr, "[Focal/AudioEngine] record(): no audio device open "
+                              "(sample rate is 0); recording cannot start.\n");
+        return;
+    }
 
     // With punch enabled, the captured WAV's first audible sample is at
     // punchIn - so the recorded region's timelineStart must be punchIn,
@@ -299,7 +454,7 @@ void AudioEngine::record()
         if (pre > 0.0f)
         {
             const auto preSamples = (juce::int64) ((double) pre * sr);
-            const auto candidate = juce::jmax<juce::int64> (0, startSample - preSamples);
+            const auto candidate = juce::jmax ((juce::int64) 0, startSample - preSamples);
             if (candidate < transport.getPlayhead())
                 transport.setPlayhead (candidate);
         }
@@ -346,16 +501,6 @@ void AudioEngine::jumpToZero()
 void AudioEngine::jumpToLastRecordPoint()
 {
     transport.setPlayhead (session.lastRecordPointSamples.load (std::memory_order_relaxed));
-}
-
-void AudioEngine::jumpbackBySeconds()
-{
-    const auto sr = currentSampleRate.load (std::memory_order_relaxed);
-    if (sr <= 0.0) return;
-    const float secs = session.jumpbackSeconds.load (std::memory_order_relaxed);
-    const auto delta = (juce::int64) ((double) secs * sr);
-    const auto cur = transport.getPlayhead();
-    transport.setPlayhead (juce::jmax<juce::int64> (0, cur - delta));
 }
 
 void AudioEngine::publishPluginStateForSave()
@@ -506,6 +651,20 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
                          device->getCurrentBufferSizeSamples());
 }
 
+void AudioEngine::stageTestMidiInjection (int inputIdx, juce::MidiBuffer events)
+{
+    // SPSC: wait for any previously staged buffer to be consumed before we
+    // touch testInjectMidi. The synchronous self-test caller drives the
+    // audio callback after every stage, so this normally observes false on
+    // the first load - the spin is just defensive against future callers.
+    while (testInjectReady.load (std::memory_order_acquire))
+        std::this_thread::yield();
+
+    testInjectMidi.swapWith (events);
+    testInjectInputIdx.store (inputIdx, std::memory_order_relaxed);
+    testInjectReady.store (true, std::memory_order_release);
+}
+
 void AudioEngine::prepareForSelfTest (double sr, int bs)
 {
     currentSampleRate.store (sr, std::memory_order_relaxed);
@@ -533,8 +692,18 @@ void AudioEngine::prepareForSelfTest (double sr, int bs)
     // TapeMachine animates its reels + level-integration timing from
     // getPlayHead()->getPosition(). Without a playhead the donor reads
     // null and the reels stay still even while audio passes through.
-    master.getTapeProcessor().setPlayHead (&playHead);
+    master.getTapeProcessor().setPlayHead (playHead.get());
 #endif
+
+    // Push the playhead onto every per-channel plugin slot so hosted
+    // synths/effects see the session's BPM, transport state, and sample
+    // position. Without this, tempo-synced LFOs / arps / delays in
+    // plugins like Diva default to 120 BPM regardless of session tempo.
+    for (auto& s : strips)
+        s.getPluginSlot().setHostPlayHead (playHead.get());
+    for (auto& a : auxLaneStrips)
+        for (int p = 0; p < AuxLaneParams::kMaxLanePlugins; ++p)
+            a.getPluginSlot (p).setHostPlayHead (playHead.get());
     masteringChain.prepare (sr, bs, oxFactor);
     masteringPlayer.prepare (bs);
     metronome.prepare (sr);
@@ -582,6 +751,20 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             midiInputCollectors[i]->removeNextBlockOfMessages (perInputMidi[i], numSamples);
     }
 
+    // Test-hook: if the message thread staged a buffer via
+    // stageTestMidiInjection, merge it into the requested input's
+    // per-block buffer, clear the staging slot, and release the SPSC
+    // ready flag so the next stage call may proceed. Empty in production -
+    // the relaxed-equivalent acquire load costs a single load + branch.
+    if (testInjectReady.load (std::memory_order_acquire))
+    {
+        const int idx = testInjectInputIdx.load (std::memory_order_relaxed);
+        if (idx >= 0 && (size_t) idx < perInputMidi.size())
+            perInputMidi[(size_t) idx].addEvents (testInjectMidi, 0, numSamples, 0);
+        testInjectMidi.clear();
+        testInjectReady.store (false, std::memory_order_release);
+    }
+
     // Held-MIDI-notes tracking for the chord display. Walk every drained
     // MIDI buffer and flip the per-note atomic on Note On / Note Off.
     // Treat NoteOn vel=0 as NoteOff (running-status convention). Cheap -
@@ -612,13 +795,14 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 
     // MIDI controller bindings - apply BEFORE the per-track filter so a
     // bound CC drives its target regardless of which track the message
-    // happens to be addressed to. Lock-free read of session.midiBindings
-    // (mutated only on the message thread, race tolerated). Continuous
-    // targets write atoms directly; transport actions queue into
-    // pendingTransportAction (engine.play/stop/record aren't RT-safe).
-    // Note triggers fire on press only (NoteOn vel > 0); NoteOff and
-    // CC release are ignored per the v1 spec.
-    if (! session.midiBindings.empty())
+    // happens to be addressed to. Lock-free acquire-load of the binding
+    // snapshot (mutated only on the message thread via AtomicSnapshot's
+    // copy-and-swap). Continuous targets write atoms directly; transport
+    // actions queue into pendingTransportAction (engine.play/stop/record
+    // aren't RT-safe). Note triggers fire on press only (NoteOn vel > 0);
+    // NoteOff and CC release are ignored per the v1 spec.
+    const auto* bindings = session.midiBindings.read();
+    if (bindings != nullptr && ! bindings->empty())
     {
         for (const auto& buf : perInputMidi)
         {
@@ -646,7 +830,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                         packLearnCapture (tg, ch, dn), std::memory_order_relaxed);
                 }
 
-                for (const auto& b : session.midiBindings)
+                for (const auto& b : *bindings)
                 {
                     if (! b.sourceMatches (ch, dn, tg)) continue;
                     if (! b.isValid()) continue;
@@ -1031,8 +1215,20 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         // the redundant channels in the same processBlock pass.
         // Skipped on non-MIDI tracks; perTrackMidiScratch on those tracks
         // stays an empty buffer for effect inserts.
+        //
+        // Three triggers warrant a flush, all OR'd together:
+        //   • engine-wide flushHangingMidi (transport stop / playhead jump)
+        //   • this track's midiInputIndex changed since last block (the
+        //     user swapped MIDI controllers - held notes from the old
+        //     device would otherwise hang on the synth forever).
+        const int currentMidiIdx = session.track (t).midiInputIndex.load (
+                                       std::memory_order_relaxed);
+        const bool midiInputSwapped = (currentMidiIdx != lastMidiInputIndex[(size_t) t]);
+        lastMidiInputIndex[(size_t) t] = currentMidiIdx;
+        const bool perTrackFlush = flushHangingMidi || midiInputSwapped;
+
         perTrackMidiScratch.clear();
-        if (midiTrack && flushHangingMidi)
+        if (midiTrack && perTrackFlush)
         {
             for (int ch = 1; ch <= 16; ++ch)
             {
@@ -1071,6 +1267,14 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             const auto schedStart = blockStartSamples + pluginLatency;
             const auto blockEnd   = schedStart + numSamples;
 
+            // Acquire-load the track's MIDI region snapshot once for the
+            // block. Mutated on the message thread by RecordManager (when
+            // a take finishes) and SessionSerializer (load); the snapshot
+            // pointer is stable for the rest of this callback.
+            // AtomicSnapshot's default ctor publishes an empty vector at
+            // construction time so this pointer is non-null.
+            const auto& midiRegionsForBlock = *session.track (t).midiRegions.read();
+
             // Chase pass: when the playhead jumps INTO the middle of a
             // sustained note (transport start after seek, loop wrap, etc.)
             // the synth would otherwise sit silent until the Note Off fires
@@ -1081,7 +1285,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             // and off-time is after blockStart.
             if (flushHangingMidi)
             {
-                for (const auto& region : session.track (t).midiRegions)
+                for (const auto& region : midiRegionsForBlock)
                 {
                     const auto regStart = region.timelineStart;
                     for (const auto& n : region.notes)
@@ -1099,7 +1303,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 }
             }
 
-            for (const auto& region : session.track (t).midiRegions)
+            for (const auto& region : midiRegionsForBlock)
             {
                 const auto regStart = region.timelineStart;
                 const auto regEnd   = regStart + region.lengthInSamples;
@@ -1144,8 +1348,13 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             if (! perTrackMidiScratch.isEmpty())
                 session.track (t).midiActivity.store (true, std::memory_order_relaxed);
         }
-        else
+        else if (midiTrack)
         {
+            // Live monitoring path - only meaningful on MIDI tracks; effect
+            // inserts on Mono / Stereo strips don't consume per-track MIDI
+            // (their pluginMidiScratch is built fresh inside the strip).
+            // Gating here skips a per-block allocation+copy on every audio
+            // track that has a midiInputIndex set.
             const int midiIdx = session.track (t).midiInputIndex.load (std::memory_order_relaxed);
             if (midiIdx >= 0 && midiIdx < (int) perInputMidi.size()
                 && ! perInputMidi[(size_t) midiIdx].isEmpty())
@@ -1160,6 +1369,36 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 }
                 if (! perTrackMidiScratch.isEmpty())
                     session.track (t).midiActivity.store (true, std::memory_order_relaxed);
+            }
+        }
+
+        // External MIDI output. When this MIDI track has a hardware port
+        // selected, mirror the just-built per-track buffer to that port
+        // so an external synth/drum machine receives the same notes the
+        // loaded instrument plugin (if any) does. JUCE's MidiOutput
+        // delivers via its own background thread (started in
+        // rebuildMidiOutputBank), so the audio thread just enqueues.
+        // Empty buffer skipped to avoid pointless wakeups on the
+        // delivery thread.
+        if (midiTrack && ! perTrackMidiScratch.isEmpty())
+        {
+            const int outIdx = session.track (t).midiOutputIndex.load (
+                                  std::memory_order_relaxed);
+            if (outIdx >= 0 && outIdx < (int) midiOutputs.size())
+            {
+                if (auto* out = midiOutputs[(size_t) outIdx].get())
+                {
+                    // sendBlockOfMessages takes an absolute "ms-since-epoch"
+                    // start time; pass juce::Time::getMillisecondCounterHiRes()
+                    // so events fire as close to "now + sampleOffset" as
+                    // the OS scheduler allows. The samples-per-second
+                    // arg lets the delivery thread map sample offsets to
+                    // wall-clock deltas.
+                    const double sendRate = currentSampleRate.load (std::memory_order_relaxed);
+                    out->sendBlockOfMessages (perTrackMidiScratch,
+                                                juce::Time::getMillisecondCounterHiRes(),
+                                                sendRate > 0.0 ? sendRate : 48000.0);
+                }
             }
         }
 
@@ -1203,6 +1442,37 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                                                  stripPasses);
         session.track (t).meterGrDb.store (strips[(size_t) t].getCurrentGrDb(),
                                             std::memory_order_relaxed);
+
+        // Output peak for MIDI tracks: the strip's "input" meter only
+        // measures the audio source feeding the strip, which is null on
+        // a MIDI track since the audio is generated INSIDE the strip by
+        // the instrument plugin. Without this branch the strip meter
+        // stays flat even while the synth is audible at master. Write
+        // the post-DSP peak (same buffer the recorder uses for printed-
+        // FX captures) into the input-meter atom so the UI's existing
+        // poll renders a real level for MIDI tracks.
+        if (midiTrack)
+        {
+            const int n = strips[(size_t) t].getLastProcessedSamples();
+            if (auto* lp = strips[(size_t) t].getLastProcessedMono(); lp != nullptr && n > 0)
+            {
+                const auto rng = juce::FloatVectorOperations::findMinAndMax (lp, n);
+                const float pk = juce::jmax (std::abs (rng.getStart()),
+                                              std::abs (rng.getEnd()));
+                session.track (t).meterInputDb.store (
+                    pk > 1e-5f ? juce::Decibels::gainToDecibels (pk, -100.0f) : -100.0f,
+                    std::memory_order_relaxed);
+            }
+            if (auto* rp = strips[(size_t) t].getLastProcessedR(); rp != nullptr && n > 0)
+            {
+                const auto rng = juce::FloatVectorOperations::findMinAndMax (rp, n);
+                const float pk = juce::jmax (std::abs (rng.getStart()),
+                                              std::abs (rng.getEnd()));
+                session.track (t).meterInputRDb.store (
+                    pk > 1e-5f ? juce::Decibels::gainToDecibels (pk, -100.0f) : -100.0f,
+                    std::memory_order_relaxed);
+            }
+        }
 
         // Recording capture - armed tracks always commit their input to
         // disk while recording. By default the raw deviceInput is written;

@@ -193,6 +193,14 @@ void AudioSettingsPanel::applyRescan()
     // newSetup == currentSetup (JUCE early-returns without notifying), so
     // poke the broadcaster directly.
     deviceManager.sendChangeMessage();
+
+    // Same rescan also re-enumerates MIDI inputs so freshly plugged-in
+    // controllers appear in the per-strip MIDI dropdowns. The engine
+    // detaches its callbacks for the duration so audio briefly drops
+    // out, which is acceptable for a user-triggered rescan; tracks
+    // re-resolve their saved device identifiers to current indices on
+    // completion.
+    engine.refreshMidiInputs();
 }
 
 #if defined(__linux__)

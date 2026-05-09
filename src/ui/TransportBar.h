@@ -94,10 +94,15 @@ private:
     juce::Label      bpmCaption;
     juce::Label      bpmValue;
     juce::TextButton tapButton      { "TAP" };
-    juce::TextButton jumpbackButton { juce::CharPointer_UTF8 ("\xc2\xab 5s") };  // "« 5s"
     juce::TextButton tuneButton     { "TUNE" };
-    void refreshJumpbackLabel();
-    void showJumpbackMenu();
+
+    // Below this transport-bar width, LOOP/PUNCH/SNAP/SUMMARY collapse
+    // to single-letter / chevron-only labels so the row stops clipping.
+    // Empirically ~1600 px is the threshold where the full labels start
+    // to overflow once the rest of the bar (clock, BPM, CLICK, C/I, TAP,
+    // TUNE) is laid out.
+    static constexpr int kCompactTransportWidth = 1600;
+    void syncCompactLabels (bool compact);
     // Right-click on the PUNCH toggle opens a popup with pre-roll /
     // post-roll value pickers + an explanation banner.
     void showPunchSettingsMenu();

@@ -7,6 +7,7 @@
 #include <cmath>
 #include <memory>
 #include <vector>
+#include "AtomicSnapshot.h"
 #include "MidiBindings.h"
 
 namespace focal
@@ -405,6 +406,26 @@ struct Track
                                             // -2 = inputSource + 1, paired adjacent)
     std::atomic<int>  midiInputIndex { -1 }; // -1 = none; 0..N = AudioDeviceManager
                                               // MIDI input index. Only used in Midi mode.
+    // Stable device identifier (juce::MidiDeviceInfo::identifier) for the
+    // selected MIDI input. Persisted alongside midiInputIndex; on load
+    // we look this up in the current `juce::MidiInput::getAvailableDevices()`
+    // to recompute the right index, so a session saved with one device
+    // ordering still resolves correctly when the user reloads after
+    // unplugging/replugging USB MIDI gear. Empty when no input is
+    // selected. Message-thread only - the audio thread reads the int
+    // atom above, never this string.
+    juce::String      midiInputIdentifier;
+
+    // External MIDI output. When set on a Midi-mode track, the per-track
+    // MIDI buffer (recorded notes + live input + automation) is also
+    // sent to this hardware MIDI port every block - so the user can
+    // drive an external synth/drum machine. The synth's audio comes
+    // back on a separate audio track via the user's audio interface.
+    // -1 = no external output (default; only the loaded instrument
+    // plugin sees the MIDI). 0..N = AudioEngine MIDI output index.
+    // Identifier-based persistence mirrors midiInputIdentifier above.
+    std::atomic<int>  midiOutputIndex { -1 };
+    juce::String      midiOutputIdentifier;
     std::atomic<int>  midiChannel    { 0 };  // 0 = omni (all channels accepted),
                                               // 1..16 = filter to that MIDI channel only.
     // Audio thread sets to true when a MIDI message routes to this track in
@@ -412,14 +433,24 @@ struct Track
     // continuous stream still flashes (clear-then-rise per timer tick).
     mutable std::atomic<bool> midiActivity { false };
 
-    // Recorded regions for this track (mutated only on the message thread).
-    // Audio tracks (Mode::Mono / Mode::Stereo) write to `regions`; MIDI
-    // tracks (Mode::Midi) write to `midiRegions`. The other vector stays
-    // empty for the wrong mode - we don't switch storage on a mode flip,
-    // so a Mono->Midi conversion preserves the audio takes underneath
-    // (a future "convert to MIDI" UX would explicitly clear them).
-    std::vector<AudioRegion> regions;
-    std::vector<MidiRegion>  midiRegions;
+    // Recorded regions for this track. Audio tracks (Mode::Mono /
+    // Mode::Stereo) write to `regions`; MIDI tracks (Mode::Midi) write to
+    // `midiRegions`. The other vector stays empty for the wrong mode - we
+    // don't switch storage on a mode flip, so a Mono->Midi conversion
+    // preserves the audio takes underneath (a future "convert to MIDI" UX
+    // would explicitly clear them).
+    //
+    // `regions` is mutated only at session-load and is read by the audio
+    // thread indirectly through PlaybackEngine's pre-built region-streams
+    // snapshot, not directly - so a plain vector is fine.
+    //
+    // `midiRegions` is mutated at session-load AND at recording-stop
+    // (RecordManager::stopRecording push_backs the freshly-captured take).
+    // The audio thread reads it directly during MIDI playback (AudioEngine
+    // hanging-note flush + scheduling). It's wrapped in AtomicSnapshot so
+    // the recording-stop swap is lock-free for the audio thread.
+    std::vector<AudioRegion>                regions;
+    AtomicSnapshot<std::vector<MidiRegion>> midiRegions;
 
     // Per-channel plugin slot persistence. Populated from the live PluginSlot
     // immediately before SessionSerializer::save (via AudioEngine::publishPluginStateForSave)
@@ -443,11 +474,23 @@ struct Track
     // 3c-i wires Off + Read; Write/Touch reserved for 3c-ii (UI greys them).
     std::atomic<int> automationMode { 0 };  // AutomationMode cast to int
 
-    // Per-parameter automation lanes. Indexed by AutomationParam. The points
-    // vector is mutated only on the message thread, and only while transport
-    // is stopped (3c-i: only via session load). The audio thread reads it
-    // through a const ref. When 3c-ii adds Write, this becomes a swap-load
-    // pattern with an atomic shared_ptr<const AutomationLane> like PluginSlot.
+    // Per-parameter automation lanes. Indexed by AutomationParam.
+    //
+    // Concurrency: reader and writer are partitioned by mode + per-control
+    // touched flags, NOT by container atomicity. The audio thread reads
+    // lane.points only when readsLane = (mode == Read) || (mode == Touch
+    // && !touched). The message thread (Write/Touch capture in
+    // ChannelStripComponent::captureWritePoint) appends only when
+    // capturing = playing && (mode == Write || (mode == Touch && touched)).
+    // The two predicates are mutually exclusive on (mode, touched) - one
+    // side or the other touches the vector at any given time, never both.
+    //
+    // Synchronization is via release/acquire on automationMode (stored
+    // release on mode-cycle clicks, acquired in AudioEngine before reading
+    // the lane) and on each per-control *Touched flag (stored release on
+    // drag start/end, acquired in AudioEngine when deciding readsLane).
+    // Every message-thread append therefore happens-before the audio
+    // thread's next read of the same lane.
     std::array<AutomationLane, kNumAutomationParams> automationLanes {};
 };
 
@@ -761,15 +804,11 @@ public:
     // playhead position at Record-press, not the negative pre-roll start.
     std::atomic<bool>  countInEnabled    { false };
 
-    // Transport cluster state (Tascam-style REW/FFWD/jumpback). Per-session
-    // so workflow preferences travel with the project rather than living in
-    // an app-wide preferences file (Focal.md #6 - no preferences sprawl).
-    //   jumpbackSeconds      - amount the « button rewinds during playback
+    // Transport cluster state (Tascam-style REW/FFWD).
     //   lastRecordPointSamples - timeline position the most-recent record
-    //     pass STARTED at; STOP+FFWD jumps to it. Default 0 = haven't
-    //     recorded yet, so the first STOP+FFWD just stays at zero (which
-    //     reads as "do nothing", correct).
-    std::atomic<float>       jumpbackSeconds        { 5.0f };
+    //     pass STARTED at; the FFWD-while-stopped tap (= TO LAST REC on
+    //     the DP-24SD) jumps to it. Default 0 = haven't recorded yet, so
+    //     the first such tap just stays at zero (reads as "do nothing").
     std::atomic<juce::int64> lastRecordPointSamples { 0 };
 
     // Auto-punch pre-roll / post-roll. Active only when transport.punch
@@ -808,9 +847,9 @@ public:
 
     // MIDI controller bindings. Mutated only on the message thread (UI
     // learn-capture and explicit forget); audio thread reads it lock-free
-    // when applying inbound MIDI events. Matches the existing region
-    // edit-vs-read race-tolerance pattern - mutations are user gestures,
-    // audio reads are short-loop iterations.
+    // via the AtomicSnapshot's acquire-load. Mutations build a fresh
+    // vector copy and atomically swap it in (see TransportBar's Learn
+    // capture timer and MidiBindings::showLearnMenu's Forget action).
     //
     // pendingTransportAction - audio thread sets this when a binding hits
     //   a transport target; TransportBar's 20 Hz timer drains it on the
@@ -818,7 +857,7 @@ public:
     // midiLearnPending - UI sets a packed (target, index); audio thread
     //   captures the next matching MIDI source into midiLearnCapture;
     //   message-thread timer drains the capture and appends a binding.
-    std::vector<MidiBinding> midiBindings;
+    AtomicSnapshot<std::vector<MidiBinding>> midiBindings;
     std::atomic<int>         pendingTransportAction { (int) PendingTransportAction::None };
     std::atomic<int>         midiLearnPending       { -1 };
     std::atomic<juce::int64> midiLearnCapture       { 0 };

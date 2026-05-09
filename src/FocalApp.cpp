@@ -5,6 +5,12 @@
 #include "ui/WindowState.h"
 #include "engine/AudioEngine.h"
 #include "engine/AudioPipelineSelfTest.h"
+#include "engine/PluginManager.h"
+#include "engine/PluginSlot.h"
+#include "session/SessionSerializer.h"
+#if JUCE_LINUX
+ #include "engine/ipc/IpcSelfTest.h"
+#endif
 #if defined(__linux__)
  #include "engine/alsa/AlsaAudioIODeviceType.h"
  #include "engine/alsa/AlsaPerformanceTest.h"
@@ -17,6 +23,8 @@
 #if JUCE_LINUX
  #include <sys/mman.h>
  #include <sys/resource.h>
+ #include <X11/Xlib.h>
+ #include <X11/Xatom.h>
 #endif
 
 namespace focal
@@ -68,68 +76,88 @@ public:
         }
 
         setVisible (true);
+
+       #if JUCE_LINUX
+        // GNOME/Mutter (and other ICCCM-strict WMs) iconify a freshly-
+        // mapped window whose `_NET_WM_USER_TIME` is unset/0 - their
+        // focus-stealing prevention policy. JUCE doesn't set
+        // `_NET_WM_USER_TIME`, and `XWindowSystem::setMinimised(false)`
+        // is a no-op on Linux, so without this fixup the dock shows a
+        // black thumbnail and the user has no way to restore it.
+        //
+        // Defer the deminimise to the next message-loop tick so Mutter
+        // has finished its synchronous iconify-on-map. Then send the
+        // ICCCM-defined WM_CHANGE_STATE → NormalState ClientMessage,
+        // followed by _NET_ACTIVE_WINDOW with a fresh user time (set
+        // first on the window) so Mutter trusts the activate request.
+        juce::Component::SafePointer<MainWindow> safeThis (this);
+        juce::MessageManager::callAsync ([safeThis]
+        {
+            if (safeThis == nullptr) return;
+            auto* peer = safeThis->getPeer();
+            if (peer == nullptr) return;
+
+            auto* x = ::XOpenDisplay (nullptr);
+            if (x == nullptr) return;
+
+            const auto win = (::Window) (uintptr_t) peer->getNativeHandle();
+            const auto userTimeAtom = ::XInternAtom (x, "_NET_WM_USER_TIME",   False);
+            const auto changeStateAtom = ::XInternAtom (x, "WM_CHANGE_STATE",  False);
+            const auto activeWinAtom = ::XInternAtom (x, "_NET_ACTIVE_WINDOW", False);
+
+            // Use a max-int timestamp so user_time >= any prior user-input
+            // time the WM has on file, satisfying the focus-stealing-
+            // prevention check unconditionally.
+            unsigned long t = 0x7FFFFFFFUL;
+            ::XChangeProperty (x, win, userTimeAtom, XA_CARDINAL, 32,
+                                PropModeReplace,
+                                reinterpret_cast<unsigned char*> (&t), 1);
+
+            // 1) WM_CHANGE_STATE NormalState - ICCCM "deminimise" request.
+            ::XEvent demin{};
+            demin.xclient.type         = ClientMessage;
+            demin.xclient.window       = win;
+            demin.xclient.message_type = changeStateAtom;
+            demin.xclient.format       = 32;
+            demin.xclient.data.l[0]    = 1;  // NormalState
+            ::XSendEvent (x, DefaultRootWindow (x), False,
+                           SubstructureRedirectMask | SubstructureNotifyMask,
+                           &demin);
+
+            // 2) _NET_ACTIVE_WINDOW - EWMH activate. data.l[0] = 2 means
+            //    "source: pager/taskbar" which has higher trust under
+            //    Mutter than a regular client request.
+            ::XEvent act{};
+            act.xclient.type         = ClientMessage;
+            act.xclient.window       = win;
+            act.xclient.message_type = activeWinAtom;
+            act.xclient.format       = 32;
+            act.xclient.data.l[0]    = 2;
+            act.xclient.data.l[1]    = (long) t;
+            ::XSendEvent (x, DefaultRootWindow (x), False,
+                           SubstructureRedirectMask | SubstructureNotifyMask,
+                           &act);
+
+            ::XFlush (x);
+            ::XCloseDisplay (x);
+        });
+       #endif
     }
 
     void closeButtonPressed() override
     {
-        // Always confirm on close, Ardour-style. Three options: cancel,
-        // discard, save+quit. We don't try to track a dirty flag - every
-        // close goes through the prompt so the user can never silently lose
-        // unsaved work.
-        auto* main = dynamic_cast<MainComponent*> (getContentComponent());
-
-        juce::MessageBoxOptions opts;
-        opts = opts.withIconType (juce::MessageBoxIconType::QuestionIcon)
-                   .withTitle ("Quit Focal?")
-                   .withMessage ("Any unsaved changes will be lost.\n\n"
-                                  "What do you want to do?")
-                   .withButton ("Don't quit")
-                   .withButton ("Just quit")
-                   .withButton ("Save and quit");
-
-        juce::AlertWindow::showAsync (opts,
-            [main] (int picked)
-            {
-                // showAsync's callback receives JUCE's button result code,
-                // NOT a 0-based index. For three buttons added in order
-                // [Don't quit, Just quit, Save and quit] the codes are:
-                //   button[0] (Don't quit)    → 1
-                //   button[1] (Just quit)     → 2
-                //   button[2] (Save and quit) → 0
-                // (See juce::AlertWindow::showAsync docs.)
-                // Anything else (Esc, window close on the alert): cancel.
-                if (picked == 1)
-                {
-                    // Don't quit - do nothing, leave the window open.
-                    return;
-                }
-                if (picked == 2)
-                {
-                    // Just quit - close immediately, discarding unsaved work.
-                    JUCEApplication::getInstance()->systemRequestedQuit();
-                    return;
-                }
-                if (picked == 0)
-                {
-                    // Save and quit. saveSessionAndThen handles both the
-                    // sync (existing session) and async (Save As file
-                    // chooser) paths.
-                    if (main == nullptr)
-                    {
-                        JUCEApplication::getInstance()->systemRequestedQuit();
-                        return;
-                    }
-                    main->saveSessionAndThen ([] (bool savedOk)
-                    {
-                        if (savedOk)
-                            JUCEApplication::getInstance()->systemRequestedQuit();
-                        // If save failed (chooser cancelled, write error), the
-                        // window stays open - user can retry or pick "Just quit".
-                    });
-                    return;
-                }
-                // Unknown / dismissed: treat as cancel.
-            });
+        // Delegate to MainComponent's requestQuit, which checks dirty
+        // state (autosave-newer-than-saved) and shows the Focal-styled
+        // Save / Don't Save / Cancel modal only when there are actual
+        // unsaved changes. No dirty changes → quit immediately.
+        if (auto* main = dynamic_cast<MainComponent*> (getContentComponent()))
+        {
+            main->requestQuit();
+            return;
+        }
+        // No MainComponent (shouldn't happen in normal use) - fall back
+        // to immediate quit so the X still works.
+        JUCEApplication::getInstance()->systemRequestedQuit();
     }
 };
 
@@ -263,6 +291,383 @@ static void runHeadlessToneTest()
     std::fflush (stdout);
 }
 
+// Headless instrument-plugin test: load a single VST3 / LV2 / AU
+// instrument, send a synthetic MIDI chord, and report whether the
+// plugin produced audio. Exercises the same in-process PluginSlot path
+// the GUI uses (loadFromFile + processStereoBlock) - distinct from
+// FOCAL_IPC_HOST_TEST which exercises the OOP focal-plugin-host path.
+//
+// Usage:
+//   FOCAL_INSTRUMENT_TEST=/home/marc/.vst3/u-he/Diva.vst3 ./Focal
+static void runHeadlessInstrumentTest (const juce::String& pluginPath)
+{
+    constexpr double sampleRate = 48000.0;
+    constexpr int    blockSize  = 256;
+    constexpr int    numBlocks  = 200;          // ~1.07 s of audio
+    constexpr int    chordHoldBlocks = 150;     // release before measurement ends
+
+    std::fprintf (stdout, "=== Focal Headless Instrument Test ===\n");
+    std::fprintf (stdout, "Plugin: %s\nSR=%.0f BS=%d Blocks=%d\n\n",
+                  pluginPath.toRawUTF8(), sampleRate, blockSize, numBlocks);
+
+    PluginManager manager;
+    manager.scanInstalledPlugins();   // populates the cache; cheap if already cached
+
+    PluginSlot slot;
+    slot.setManager (manager);
+    slot.prepareToPlay (sampleRate, blockSize);
+
+    juce::String err;
+    if (! slot.loadFromFile (juce::File (pluginPath), err))
+    {
+        std::fprintf (stderr, "FAIL: loadFromFile: %s\n", err.toRawUTF8());
+        return;
+    }
+
+    // C-major triad on channel 1, MIDI velocity 100. Note On at sample 0
+    // of the first block, Note Off at sample 0 of block kChordHoldBlocks.
+    constexpr int kChordNotes[] = { 60, 64, 67 };
+
+    std::vector<float> L ((size_t) blockSize), R ((size_t) blockSize);
+    float peak = 0.0f;
+    double rms  = 0.0;
+    long long counted = 0;
+
+    for (int b = 0; b < numBlocks; ++b)
+    {
+        std::fill (L.begin(), L.end(), 0.0f);
+        std::fill (R.begin(), R.end(), 0.0f);
+
+        juce::MidiBuffer midi;
+        if (b == 0)
+            for (int n : kChordNotes)
+                midi.addEvent (juce::MidiMessage::noteOn (1, n, (juce::uint8) 100), 0);
+        if (b == chordHoldBlocks)
+            for (int n : kChordNotes)
+                midi.addEvent (juce::MidiMessage::noteOff (1, n), 0);
+
+        slot.processStereoBlock (L.data(), R.data(), blockSize, midi);
+
+        for (int s = 0; s < blockSize; ++s)
+        {
+            const float l = L[(size_t) s];
+            const float r = R[(size_t) s];
+            const float mag = juce::jmax (std::abs (l), std::abs (r));
+            if (mag > peak) peak = mag;
+            rms += (double) l * (double) l + (double) r * (double) r;
+            counted += 2;
+        }
+    }
+
+    const double rmsVal = counted > 0 ? std::sqrt (rms / (double) counted) : 0.0;
+    std::fprintf (stdout, "Result: peak=%.6f rms=%.6f bypassed=%d auto-bypassed=%d\n",
+                  peak, rmsVal,
+                  (int) slot.isBypassed(),
+                  (int) slot.wasAutoBypassed());
+    if (peak < 1.0e-6f)
+        std::fprintf (stdout, "VERDICT: SILENCE - plugin produced no output.\n");
+    else
+        std::fprintf (stdout, "VERDICT: AUDIO PRESENT - plugin produced output.\n");
+    std::fprintf (stdout, "=== End of Instrument Test ===\n");
+    std::fflush (stdout);
+}
+
+// Headless pipeline test: drive the full Engine + Session pipeline with
+// an instrument plugin loaded on track 0, inject a MIDI chord through
+// the same `perInputMidi` path live MIDI takes, and report stage-by-
+// stage where signal exists in the chain. Used to bisect "GUI has Diva
+// loaded but no audio" between PluginSlot (validated by the instrument-
+// test path) and engine routing (this).
+//
+// Optionally loads a session file via FOCAL_PIPELINE_TEST_SESSION so we
+// exercise the user's actual saved fader / mute / bus / aux state.
+//
+// Usage:
+//   FOCAL_PIPELINE_TEST=/home/marc/.vst3/u-he/Diva.vst3 ./Focal
+//   FOCAL_PIPELINE_TEST=/home/marc/.vst3/u-he/Diva.vst3 \
+//     FOCAL_PIPELINE_TEST_SESSION=/home/marc/Music/Focal/Untitled/session.json.autosave \
+//     ./Focal
+static void runHeadlessPipelineTest (const juce::String& pluginPath)
+{
+    constexpr double sampleRate = 48000.0;
+    constexpr int    blockSize  = 256;
+    constexpr int    numInChannels  = 2;
+    constexpr int    numOutChannels = 2;
+    constexpr int    numBlocks       = 200;
+    constexpr int    chordHoldBlocks = 150;
+
+    std::fprintf (stdout, "=== Focal Headless Pipeline Test ===\n");
+    std::fprintf (stdout, "Plugin: %s\nSR=%.0f BS=%d Blocks=%d\n\n",
+                  pluginPath.toRawUTF8(), sampleRate, blockSize, numBlocks);
+
+    auto session = std::make_unique<Session>();
+    auto engine  = std::make_unique<AudioEngine> (*session);
+
+    // Don't depend on a real device coming up - prepare directly.
+    engine->prepareForSelfTest (sampleRate, blockSize);
+
+    const char* sessionPath = std::getenv ("FOCAL_PIPELINE_TEST_SESSION");
+    const bool useSession = (sessionPath != nullptr && *sessionPath != '\0');
+
+    if (useSession)
+    {
+        std::fprintf (stdout, "Loading session: %s\n", sessionPath);
+        if (! SessionSerializer::load (*session, juce::File (sessionPath)))
+        {
+            std::fprintf (stderr, "FAIL: SessionSerializer::load returned false\n");
+            return;
+        }
+        // Verify the description was deserialised before we ask the
+        // engine to consume it. Empty here = the JSON didn't contain
+        // plugin_desc_xml, which is a session-file regression.
+        const auto& descXml = session->track (0).pluginDescriptionXml;
+        const auto& stateB64 = session->track (0).pluginStateBase64;
+        std::fprintf (stdout,
+                      "After SessionSerializer::load: track[0] descXml.len=%d  state.len=%d  "
+                      "descXml head=\"%.60s\"\n",
+                      descXml.length(), stateB64.length(),
+                      descXml.toRawUTF8());
+
+        // Call restoreFromSavedState DIRECTLY here (instead of going via
+        // engine->consumePluginStateAfterLoad) so we can see the error.
+        // The engine wraps the same call but routes failures into DBG,
+        // which is a no-op in release builds.
+        juce::String restoreErr;
+        const bool restored = engine->getStrip (0).getPluginSlot()
+            .restoreFromSavedState (descXml, stateB64, restoreErr);
+        if (! restored)
+        {
+            std::fprintf (stderr, "FAIL: restoreFromSavedState: %s\n",
+                          restoreErr.toRawUTF8());
+        }
+        else
+        {
+            std::fprintf (stdout,
+                          "restoreFromSavedState: ok (loaded=%d)\n",
+                          (int) engine->getStrip (0).getPluginSlot().isLoaded());
+        }
+
+        // Run the rest of the engine's after-load housekeeping (other
+        // tracks, aux-lane plugins, master tape state) - just call the
+        // public consume method; track 0 will be re-restored as a no-op
+        // since restoreFromSavedState is idempotent.
+        engine->consumePluginStateAfterLoad();
+        engine->consumeTransportStateAfterLoad();
+        // Re-prepare so the just-loaded plugin sees the right SR/BS.
+        engine->prepareForSelfTest (sampleRate, blockSize);
+    }
+    else
+    {
+        // Default-state path: track 0 in MIDI mode + load the plugin.
+        session->track (0).mode.store ((int) Track::Mode::Midi, std::memory_order_relaxed);
+        juce::String err;
+        if (! engine->getStrip (0).getPluginSlot().loadFromFile (juce::File (pluginPath), err))
+        {
+            std::fprintf (stderr, "FAIL: loadFromFile: %s\n", err.toRawUTF8());
+            return;
+        }
+    }
+
+    // Snapshot the relevant Track[0] + Master state so the user can see
+    // exactly what we're testing against. This is what would be silencing
+    // the strip if anything is misconfigured in the loaded session.
+    {
+        auto& t0 = session->track (0);
+        std::fprintf (stdout, "\n--- Track 0 (UI: track 1) state ---\n");
+        std::fprintf (stdout, "  mode=%d (0=Mono 1=Stereo 2=MIDI)\n",
+                      t0.mode.load());
+        std::fprintf (stdout, "  faderDb=%.2f  pan=%.2f  mute=%d  solo=%d  printEffects=%d\n",
+                      t0.strip.faderDb.load(), t0.strip.pan.load(),
+                      (int) t0.strip.mute.load(), (int) t0.strip.solo.load(),
+                      (int) t0.printEffects.load());
+        std::fprintf (stdout, "  liveFaderDb=%.2f  liveMute=%d  liveSolo=%d\n",
+                      t0.strip.liveFaderDb.load(),
+                      (int) t0.strip.liveMute.load(),
+                      (int) t0.strip.liveSolo.load());
+        std::fprintf (stdout, "  busAssign: A=%d B=%d C=%d D=%d\n",
+                      (int) t0.strip.busAssign[0].load(), (int) t0.strip.busAssign[1].load(),
+                      (int) t0.strip.busAssign[2].load(), (int) t0.strip.busAssign[3].load());
+        std::fprintf (stdout, "  auxSendDb: 1=%.2f 2=%.2f 3=%.2f 4=%.2f\n",
+                      t0.strip.auxSendDb[0].load(), t0.strip.auxSendDb[1].load(),
+                      t0.strip.auxSendDb[2].load(), t0.strip.auxSendDb[3].load());
+        std::fprintf (stdout, "  midiInputIndex=%d  midiInputId=\"%s\"  midiChannel=%d\n",
+                      t0.midiInputIndex.load(),
+                      t0.midiInputIdentifier.toRawUTF8(),
+                      t0.midiChannel.load());
+        std::fprintf (stdout, "  pluginLoaded=%d  pluginAutoBypassed=%d\n",
+                      (int) engine->getStrip (0).getPluginSlot().isLoaded(),
+                      (int) engine->getStrip (0).getPluginSlot().wasAutoBypassed());
+
+        std::fprintf (stdout, "--- Master state ---\n");
+        std::fprintf (stdout, "  faderDb=%.2f  tapeEnabled=%d  eqEnabled=%d  compEnabled=%d\n",
+                      session->master().faderDb.load(),
+                      (int) session->master().tapeEnabled.load(),
+                      (int) session->master().eqEnabled.load(),
+                      (int) session->master().compEnabled.load());
+        std::fprintf (stdout, "  anyTrackSoloed=%d  anyBusSoloed=%d\n",
+                      (int) session->anyTrackSoloed(),
+                      (int) session->anyBusSoloed());
+        std::fprintf (stdout, "\n");
+    }
+
+    if (! engine->getStrip (0).getPluginSlot().isLoaded())
+    {
+        std::fprintf (stderr, "FAIL: track 0 has no plugin loaded after setup; aborting.\n");
+        return;
+    }
+
+    // Decide which input index to inject MIDI on. Both the test driver
+    // (this code) and the per-track filter (engine) must agree on the
+    // same index so the staged events flow through to the strip.
+    //
+    // - If the session was loaded and its saved midiInputIndex points at
+    //   a real device in the engine's current bank, use that. We're then
+    //   testing the session's exact wiring.
+    // - Otherwise pick index 0 if any MIDI input exists, and force track
+    //   0's midiInputIndex to match so the test can inject end-to-end.
+    int midiInputIdx = -1;
+    const int numMidiInputs = engine->getMidiInputDevices().size();
+    if (numMidiInputs == 0)
+    {
+        std::fprintf (stderr, "WARN: no MIDI inputs available; injection will be a no-op.\n");
+    }
+    else if (useSession)
+    {
+        const int saved = session->track (0).midiInputIndex.load (std::memory_order_relaxed);
+        if (saved >= 0 && saved < numMidiInputs)
+        {
+            midiInputIdx = saved;
+            std::fprintf (stdout, "Using session's saved midiInputIndex=%d for injection.\n",
+                          midiInputIdx);
+        }
+        else
+        {
+            midiInputIdx = 0;
+            session->track (0).midiInputIndex.store (midiInputIdx, std::memory_order_relaxed);
+            std::fprintf (stdout, "Session midiInputIndex=%d invalid (numInputs=%d); "
+                                  "overriding to %d for injection.\n",
+                          saved, numMidiInputs, midiInputIdx);
+        }
+    }
+    else
+    {
+        midiInputIdx = 0;
+        session->track (0).midiInputIndex.store (midiInputIdx, std::memory_order_relaxed);
+        session->track (0).midiChannel.store   (0,            std::memory_order_relaxed);  // Omni
+    }
+
+    constexpr int kChordNotes[] = { 60, 64, 67 };
+
+    // I/O buffers for the engine callback.
+    std::vector<std::vector<float>> inputs ((size_t) numInChannels,
+                                              std::vector<float> ((size_t) blockSize, 0.0f));
+    std::vector<const float*> inputPtrs ((size_t) numInChannels, nullptr);
+    for (int c = 0; c < numInChannels; ++c)
+        inputPtrs[(size_t) c] = inputs[(size_t) c].data();
+
+    std::vector<std::vector<float>> outputs ((size_t) numOutChannels,
+                                               std::vector<float> ((size_t) blockSize, 0.0f));
+    std::vector<float*> outputPtrs ((size_t) numOutChannels, nullptr);
+    for (int c = 0; c < numOutChannels; ++c)
+        outputPtrs[(size_t) c] = outputs[(size_t) c].data();
+
+    juce::AudioIODeviceCallbackContext ctx {};
+
+    // Two probes:
+    //   • Master output peak/RMS - what the device would hear.
+    //   • Strip-level peak via Track::peakDb meter, polled every block.
+    //     The strip writes meterPeakDbL/R from inside processAndAccumulate
+    //     (see ChannelStrip), so it reflects post-pan / post-fader state.
+    float  masterPeak = 0.0f;
+    double masterRms  = 0.0;
+    long long counted = 0;
+
+    // Strip output peak: scan the strip's post-DSP buffer directly via
+    // getLastProcessedMono() / getLastProcessedR(). Those pointers are
+    // valid for the duration of the block we just processed.
+    float stripPeak = 0.0f;
+
+    for (int b = 0; b < numBlocks; ++b)
+    {
+        // Stage MIDI for this block: chord on at b==0, off at chordHoldBlocks.
+        if (midiInputIdx >= 0)
+        {
+            juce::MidiBuffer midi;
+            if (b == 0)
+                for (int n : kChordNotes)
+                    midi.addEvent (juce::MidiMessage::noteOn (1, n, (juce::uint8) 100), 0);
+            if (b == chordHoldBlocks)
+                for (int n : kChordNotes)
+                    midi.addEvent (juce::MidiMessage::noteOff (1, n), 0);
+            if (! midi.isEmpty())
+                engine->stageTestMidiInjection (midiInputIdx, std::move (midi));
+        }
+
+        for (auto& o : outputs) std::fill (o.begin(), o.end(), 0.0f);
+        engine->audioDeviceIOCallbackWithContext (
+            inputPtrs.data(), numInChannels,
+            outputPtrs.data(), numOutChannels,
+            blockSize, ctx);
+
+        for (int s = 0; s < blockSize; ++s)
+        {
+            const float l = outputs[0][(size_t) s];
+            const float r = outputs[1][(size_t) s];
+            const float mag = juce::jmax (std::abs (l), std::abs (r));
+            if (mag > masterPeak) masterPeak = mag;
+            masterRms += (double) l * (double) l + (double) r * (double) r;
+            counted += 2;
+        }
+
+        // Read the strip's post-DSP buffer pointers and scan for peak.
+        // lastProcessedMono is the L (or mono) channel; lastProcessedR is
+        // the R channel (set on stereo / MIDI tracks, null on mono). For
+        // a MIDI track Diva fills both L and R via processStereoBlock so
+        // both pointers are non-null.
+        if (auto* lp = engine->getStrip (0).getLastProcessedMono())
+        {
+            const int n = engine->getStrip (0).getLastProcessedSamples();
+            if (n > 0)
+            {
+                const auto rng = juce::FloatVectorOperations::findMinAndMax (lp, n);
+                const float p = juce::jmax (std::abs (rng.getStart()), std::abs (rng.getEnd()));
+                if (p > stripPeak) stripPeak = p;
+            }
+        }
+        if (auto* rp = engine->getStrip (0).getLastProcessedR())
+        {
+            const int n = engine->getStrip (0).getLastProcessedSamples();
+            if (n > 0)
+            {
+                const auto rng = juce::FloatVectorOperations::findMinAndMax (rp, n);
+                const float p = juce::jmax (std::abs (rng.getStart()), std::abs (rng.getEnd()));
+                if (p > stripPeak) stripPeak = p;
+            }
+        }
+    }
+
+    const double masterRmsVal = counted > 0 ? std::sqrt (masterRms / (double) counted) : 0.0;
+    std::fprintf (stdout,
+                  "Track 1 strip:  peak (linear, post-DSP) = %.6f  (~%.1f dBFS)\n",
+                  stripPeak,
+                  stripPeak > 0.0f ? juce::Decibels::gainToDecibels (stripPeak) : -120.0f);
+    std::fprintf (stdout,
+                  "Master output:  peak = %.6f  rms = %.6f  (~%.1f dBFS peak)\n",
+                  masterPeak, masterRmsVal,
+                  masterPeak > 0.0f ? juce::Decibels::gainToDecibels (masterPeak) : -120.0f);
+
+    if (stripPeak > 1.0e-4f && masterPeak > 1.0e-4f)
+        std::fprintf (stdout, "VERDICT: PASS - audio reaches both the strip and the master.\n");
+    else if (stripPeak > 1.0e-4f && masterPeak <= 1.0e-4f)
+        std::fprintf (stdout, "VERDICT: FAIL - strip has audio but master is silent. "
+                              "Check master fader / mute / bus routing.\n");
+    else if (stripPeak <= 1.0e-4f)
+        std::fprintf (stdout, "VERDICT: FAIL - strip is silent. "
+                              "MIDI not reaching plugin OR strip fader/mute is silencing it.\n");
+    std::fprintf (stdout, "=== End of Pipeline Test ===\n");
+    std::fflush (stdout);
+}
+
 static void runHeadlessSelfTest()
 {
     // Heap-allocated so destruction order matches the GUI path: AudioEngine
@@ -316,6 +721,155 @@ void FocalApp::initialise (const juce::String&)
         quit();
         return;
     }
+
+    if (const char* path = std::getenv ("FOCAL_INSTRUMENT_TEST"); path != nullptr && *path)
+    {
+        runHeadlessInstrumentTest (juce::String (path));
+        quit();
+        return;
+    }
+
+    if (const char* path = std::getenv ("FOCAL_PIPELINE_TEST"); path != nullptr && *path)
+    {
+        runHeadlessPipelineTest (juce::String (path));
+        quit();
+        return;
+    }
+
+    // FOCAL_REPLACE_TEST=A.vst3:B.vst3 — exercises the Replace plugin...
+    // swap pattern under live processing. Loads A, runs audio, swaps to
+    // B mid-stream via loadFromDescription, runs more audio. Mirrors the
+    // user's GUI flow: right-click slot button -> Replace plugin -> pick
+    // a different plugin. The colon-separated form lets us test ACROSS
+    // distinct plugins, which is the actual crashing case (a single
+    // plugin reload doesn't reproduce the same destructor-race surface).
+    if (const char* path = std::getenv ("FOCAL_REPLACE_TEST"); path != nullptr && *path)
+    {
+        constexpr double sampleRate = 48000.0;
+        constexpr int    blockSize  = 256;
+
+        auto session = std::make_unique<Session>();
+        auto engine  = std::make_unique<AudioEngine> (*session);
+        engine->prepareForSelfTest (sampleRate, blockSize);
+        session->track (0).mode.store ((int) Track::Mode::Midi, std::memory_order_relaxed);
+
+        const juce::String pathStr (path);
+        const auto colon = pathStr.indexOfChar (':');
+        const juce::String pathA = colon > 0 ? pathStr.substring (0, colon)  : pathStr;
+        const juce::String pathB = colon > 0 ? pathStr.substring (colon + 1) : pathStr;
+
+        auto& slot = engine->getStrip (0).getPluginSlot();
+        juce::String err;
+        std::fprintf (stdout, "[Replace] Loading A: %s\n", pathA.toRawUTF8());
+        if (! slot.loadFromFile (juce::File (pathA), err))
+        {
+            std::fprintf (stderr, "FAIL: initial load: %s\n", err.toRawUTF8());
+            quit();
+            return;
+        }
+
+        // Build a description for plugin B by scanning its file via the
+        // PluginManager so it's resolved through the same path the GUI
+        // picker uses (cached KnownPluginList descriptions).
+        juce::PluginDescription descB;
+        {
+            auto& mgr = engine->getPluginManager();
+            juce::String scanErr;
+            auto probe = mgr.createPluginInstance (juce::File (pathB), sampleRate,
+                                                     blockSize, scanErr);
+            if (probe != nullptr) probe->fillInPluginDescription (descB);
+            else
+            {
+                std::fprintf (stderr, "FAIL: scan B: %s\n", scanErr.toRawUTF8());
+                quit();
+                return;
+            }
+            // probe goes out of scope - releases its instance immediately.
+        }
+        std::fprintf (stdout, "[Replace] B = \"%s\"\n", descB.name.toRawUTF8());
+
+        // I/O buffers
+        std::vector<std::vector<float>> inputs (2, std::vector<float> (blockSize, 0.0f));
+        std::vector<const float*> inputPtrs { inputs[0].data(), inputs[1].data() };
+        std::vector<std::vector<float>> outputs (2, std::vector<float> (blockSize, 0.0f));
+        std::vector<float*> outputPtrs { outputs[0].data(), outputs[1].data() };
+        juce::AudioIODeviceCallbackContext ctx {};
+
+        // Drive audio callbacks, then loadFromDescription with plugin B
+        // mid-stream to swap. The previousInstance keep-alive in
+        // PluginSlot defers A's destructor until the NEXT swap; an
+        // immediate Diva->MininnDrum->ThirdPlugin sequence would
+        // therefore destroy Diva from the message thread DURING the
+        // third swap. Run extra blocks after each swap so the audio
+        // thread has many chances to dereference a stale pointer.
+        for (int b = 0; b < 200; ++b)
+        {
+            engine->audioDeviceIOCallbackWithContext (
+                inputPtrs.data(), 2, outputPtrs.data(), 2, blockSize, ctx);
+            if (b == 50)
+            {
+                std::fprintf (stdout, "[Replace] swap A -> B...\n");
+                if (! slot.loadFromDescription (descB, err))
+                    std::fprintf (stderr, "FAIL: swap A->B: %s\n", err.toRawUTF8());
+            }
+            if (b == 120)
+            {
+                std::fprintf (stdout, "[Replace] swap B -> A (forces A's prev destructor in PluginSlot)...\n");
+                juce::PluginDescription descA;
+                if (auto* p = slot.getInstance())
+                    p->fillInPluginDescription (descA);
+                // Re-resolve A via the manager so we have a clean desc.
+                auto& mgr = engine->getPluginManager();
+                juce::String scanErr;
+                auto probe = mgr.createPluginInstance (juce::File (pathA),
+                                                          sampleRate, blockSize, scanErr);
+                if (probe != nullptr)
+                {
+                    probe->fillInPluginDescription (descA);
+                    probe.reset();
+                }
+                if (! slot.loadFromDescription (descA, err))
+                    std::fprintf (stderr, "FAIL: swap B->A: %s\n", err.toRawUTF8());
+            }
+        }
+        std::fprintf (stdout, "[Replace] survived 200 blocks across two swaps.\n");
+        quit();
+        return;
+    }
+
+   #if JUCE_LINUX
+    if (envFlagSet ("FOCAL_RUN_IPC_SELFTEST"))
+    {
+        // Out-of-process plugin hosting Phase 1 acceptance gate.
+        // Validates the shm + futex round-trip against the
+        // focal-plugin-host stub binary (which lives next to Focal in
+        // the build output).
+        const auto exe = juce::File::getSpecialLocation (juce::File::currentExecutableFile);
+        const auto host = exe.getSiblingFile ("focal-plugin-host");
+        const auto rc = focal::ipc::runIpcSelfTest (host.getFullPathName().toStdString());
+        std::fflush (stdout);
+        setApplicationReturnValue (rc);
+        quit();
+        return;
+    }
+
+    // Phase 2 acceptance gate. Pass FOCAL_IPC_HOST_TEST=/path/to/plugin.vst3
+    // (or .lv2) and Focal launches focal-plugin-host in --ipc-host mode,
+    // loads the plugin, runs 1000 stereo blocks, asserts the signal was
+    // modified. Use a real-world plugin like Multi-Q.vst3 to validate the
+    // entire JUCE plugin loading + processBlock path through the IPC.
+    if (const char* path = std::getenv ("FOCAL_IPC_HOST_TEST"); path != nullptr && *path)
+    {
+        const auto exe = juce::File::getSpecialLocation (juce::File::currentExecutableFile);
+        const auto host = exe.getSiblingFile ("focal-plugin-host");
+        const auto rc = focal::ipc::runIpcHostTest (
+            host.getFullPathName().toStdString(), std::string (path));
+        std::fflush (stdout);
+        setApplicationReturnValue (rc);
+        quit();
+        return;
+    }
+   #endif
 
     if (envFlagSet ("FOCAL_RUN_TONE_TEST"))
     {

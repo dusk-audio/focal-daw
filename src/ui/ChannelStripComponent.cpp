@@ -3,9 +3,14 @@
 #include "ChannelEqEditor.h"
 #include "ChannelCompEditor.h"
 #include "DimOverlay.h"
+#include "PluginPickerHelpers.h"
 #include "../engine/AudioEngine.h"
 #include "../engine/PluginSlot.h"
 #include "../engine/PluginManager.h"
+#if JUCE_LINUX
+ #include <X11/Xlib.h>
+ #include <X11/Xatom.h>
+#endif
 #include "../session/RegionEditActions.h"
 
 namespace focal
@@ -113,6 +118,10 @@ ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
                                                 PluginSlot& slot, AudioEngine& eng)
     : trackIndex (idx), track (t), session (s), pluginSlot (slot), engine (eng)
 {
+    // Listen for engine-side MIDI device-list rebuilds (USB hot-plug
+    // refresh) so the dropdown stays in sync with the live device list.
+    engine.addChangeListener (this);
+
     nameLabel.setText (track.name, juce::dontSendNotification);
     nameLabel.setJustificationType (juce::Justification::centred);
     nameLabel.setColour (juce::Label::textColourId, juce::Colours::white);
@@ -774,27 +783,70 @@ ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
     };
     addChildComponent (inputSelectorR);   // visibility toggled by refreshInputSelectorVisibility
 
-    // ── MIDI input selector — populated from JUCE's MIDI input list ──
-    // Item ID 1 = "(none)" (maps to track.midiInputIndex = -1). Subsequent
-    // IDs are 2 + deviceIndex (so ID 2 → input 0, ID 3 → input 1, ...).
-    midiInputSelector.addItem ("(none)", 1);
-    {
-        const auto inputs = juce::MidiInput::getAvailableDevices();
-        for (int i = 0; i < inputs.size(); ++i)
-            midiInputSelector.addItem (inputs[i].name, 2 + i);
-    }
-    {
-        const int idx = track.midiInputIndex.load (std::memory_order_relaxed);
-        midiInputSelector.setSelectedId (idx >= 0 ? (2 + idx) : 1,
-                                          juce::dontSendNotification);
-    }
+    // ── MIDI input selector — populated from the engine's current MIDI
+    // input bank. Re-populated whenever AudioEngine signals a refresh
+    // (USB hot-plug etc.) via the ChangeListener wiring in the dtor /
+    // changeListenerCallback below. Item ID 1 = "(none)" (maps to
+    // track.midiInputIndex = -1). Subsequent IDs are 2 + deviceIndex.
+    rebuildMidiInputDropdown();
     midiInputSelector.onChange = [this]
     {
         const int id = midiInputSelector.getSelectedId();
-        track.midiInputIndex.store (id <= 1 ? -1 : (id - 2), std::memory_order_relaxed);
+        const int idx = id <= 1 ? -1 : (id - 2);
+        track.midiInputIndex.store (idx, std::memory_order_relaxed);
+        // Capture the stable identifier alongside the index so a later
+        // session save records WHICH device this was, not just where it
+        // happened to sit in the list. Re-querying inside the change
+        // handler is fine - it's a message-thread-only operation that
+        // runs at most once per user click.
+        if (idx >= 0)
+        {
+            const auto& inputs = engine.getMidiInputDevices();
+            track.midiInputIdentifier = (idx < inputs.size())
+                                          ? inputs[idx].identifier
+                                          : juce::String();
+        }
+        else
+        {
+            track.midiInputIdentifier = juce::String();
+        }
     };
     styleCombo (midiInputSelector);
     addChildComponent (midiInputSelector);
+
+    // ── External MIDI output ──
+    // Same item-id scheme as the input selector (1 = none, 2+i = device i).
+    // When this is set on a Midi-mode track, the per-track MIDI buffer is
+    // mirrored to the chosen hardware port every block - the loaded
+    // instrument plugin (if any) still sees the events too. Audio from
+    // an external synth comes back on a separate audio track.
+    rebuildMidiOutputDropdown();
+    midiOutputSelector.onChange = [this]
+    {
+        const int id = midiOutputSelector.getSelectedId();
+        const int idx = id <= 1 ? -1 : (id - 2);
+        // Open the OS port (and start its delivery thread) lazily on the
+        // first route to it. The audio thread reads midiOutputs[idx] after
+        // loading midiOutputIndex, so we open the port BEFORE storing the
+        // new index - reversing the order would let the audio thread see
+        // the new index while midiOutputs[idx] is still null.
+        if (idx >= 0)
+            engine.ensureMidiOutputOpen (idx);
+        track.midiOutputIndex.store (idx, std::memory_order_relaxed);
+        if (idx >= 0)
+        {
+            const auto& outs = engine.getMidiOutputDevices();
+            track.midiOutputIdentifier = (idx < outs.size())
+                                          ? outs[idx].identifier
+                                          : juce::String();
+        }
+        else
+        {
+            track.midiOutputIdentifier = juce::String();
+        }
+    };
+    styleCombo (midiOutputSelector);
+    addChildComponent (midiOutputSelector);
 
     // ── MIDI channel filter (Omni / 1..16) ──
     // ID 1 = Omni (atom = 0), IDs 2..17 = channels 1..16 (atom = 1..16).
@@ -942,6 +994,8 @@ ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
 
 ChannelStripComponent::~ChannelStripComponent()
 {
+    engine.removeChangeListener (this);
+
     // If a popup editor is still on screen when the strip dies (e.g. the
     // window is closing), force-delete it so its content (which references
     // `track`) doesn't outlive us. Same SafePointer pattern as the audio
@@ -951,7 +1005,80 @@ ChannelStripComponent::~ChannelStripComponent()
     // lingering through the next message-loop tick.
     if (auto* eq   = activeEqBox.getComponent())   eq->dismiss();
     if (auto* cmp  = activeCompBox.getComponent()) cmp->dismiss();
-    pluginEditorModal.close();
+    // Drop the cached editor BEFORE the strip's PluginSlot destructs,
+    // since the editor's destructor calls editorBeingDeleted on its
+    // owning AudioProcessor. dropPluginEditor() also closes the modal.
+    dropPluginEditor();
+}
+
+void ChannelStripComponent::changeListenerCallback (juce::ChangeBroadcaster*)
+{
+    // Engine signalled a MIDI device-list refresh (post-rebuild). The
+    // device order may have changed; re-resolve our track's index from
+    // its saved identifier and rebuild both dropdowns.
+    rebuildMidiInputDropdown();
+    rebuildMidiOutputDropdown();
+}
+
+void ChannelStripComponent::rebuildMidiInputDropdown()
+{
+    midiInputSelector.clear (juce::dontSendNotification);
+    midiInputSelector.addItem ("(none)", 1);
+    const auto& inputs = engine.getMidiInputDevices();
+    for (int i = 0; i < inputs.size(); ++i)
+        midiInputSelector.addItem (inputs[i].name, 2 + i);
+
+    // Prefer identifier-based selection when we have one - it survives
+    // device-list reordering. Fall back to the raw index for older
+    // sessions / never-touched tracks.
+    int idx = -1;
+    if (track.midiInputIdentifier.isNotEmpty())
+    {
+        for (int i = 0; i < inputs.size(); ++i)
+        {
+            if (inputs[i].identifier == track.midiInputIdentifier)
+            {
+                idx = i; break;
+            }
+        }
+    }
+    else
+    {
+        idx = track.midiInputIndex.load (std::memory_order_relaxed);
+        if (idx >= inputs.size()) idx = -1;
+    }
+    track.midiInputIndex.store (idx, std::memory_order_relaxed);
+    midiInputSelector.setSelectedId (idx >= 0 ? (2 + idx) : 1,
+                                      juce::dontSendNotification);
+}
+
+void ChannelStripComponent::rebuildMidiOutputDropdown()
+{
+    midiOutputSelector.clear (juce::dontSendNotification);
+    midiOutputSelector.addItem ("(none)", 1);
+    const auto& outs = engine.getMidiOutputDevices();
+    for (int i = 0; i < outs.size(); ++i)
+        midiOutputSelector.addItem (outs[i].name, 2 + i);
+
+    int idx = -1;
+    if (track.midiOutputIdentifier.isNotEmpty())
+    {
+        for (int i = 0; i < outs.size(); ++i)
+        {
+            if (outs[i].identifier == track.midiOutputIdentifier)
+            {
+                idx = i; break;
+            }
+        }
+    }
+    else
+    {
+        idx = track.midiOutputIndex.load (std::memory_order_relaxed);
+        if (idx >= outs.size()) idx = -1;
+    }
+    track.midiOutputIndex.store (idx, std::memory_order_relaxed);
+    midiOutputSelector.setSelectedId (idx >= 0 ? (2 + idx) : 1,
+                                       juce::dontSendNotification);
 }
 
 void ChannelStripComponent::setEqSectionVisible (bool visible)
@@ -1056,251 +1183,55 @@ void ChannelStripComponent::setMixingMode (bool mixing)
 // without first having to dismiss the open dialog manually.
 void ChannelStripComponent::openPluginPicker()
 {
-    // PluginManager owns the KnownPluginList, populated by an explicit
-    // user-triggered scan or by the cache loaded at startup.
-    auto& mgr   = pluginSlot.getManagerForUi();
-    auto& known = mgr.getKnownPluginList();
-
-    // MIDI tracks need an instrument plugin (synth / sampler), not an effect.
-    // Filter the known list by the donor-side `isInstrument` flag so the user
-    // doesn't have to scroll past every reverb/EQ to find their synths. Mono /
-    // Stereo tracks keep the full list.
-    const bool instrumentsOnly = (track.mode.load (std::memory_order_relaxed)
-                                    == (int) Track::Mode::Midi);
-
-    juce::PopupMenu menu;
-    if (known.getNumTypes() == 0)
-    {
-        menu.addSectionHeader ("No plugins scanned yet");
-    }
-    else if (instrumentsOnly)
-    {
-        // Manual menu for the filtered instrument list. IDs 1..N map directly
-        // to indices in `instruments` (captured by the lambda below). We
-        // can't use KnownPluginList::addToMenu here because that builds IDs
-        // off the full list and there's no built-in filter.
-        const auto instruments = mgr.getInstrumentDescriptions();
-        if (instruments.isEmpty())
-        {
-            menu.addSectionHeader ("No instruments scanned yet");
-        }
-        else
-        {
-            // Sort by manufacturer then name so similar plugins cluster
-            // (Vital, Surge, etc.). Sort a local copy so the manager's
-            // known-list order stays stable.
-            juce::Array<juce::PluginDescription> sorted (instruments);
-            std::sort (sorted.begin(), sorted.end(),
-                [] (const juce::PluginDescription& a, const juce::PluginDescription& b)
-                {
-                    if (a.manufacturerName != b.manufacturerName)
-                        return a.manufacturerName.compareIgnoreCase (b.manufacturerName) < 0;
-                    return a.name.compareIgnoreCase (b.name) < 0;
-                });
-
-            juce::String currentManufacturer;
-            juce::PopupMenu submenu;
-            for (int i = 0; i < sorted.size(); ++i)
-            {
-                const auto& d = sorted.getReference (i);
-                if (d.manufacturerName != currentManufacturer)
-                {
-                    if (currentManufacturer.isNotEmpty())
-                        menu.addSubMenu (currentManufacturer, submenu);
-                    submenu = juce::PopupMenu();
-                    currentManufacturer = d.manufacturerName;
-                }
-                submenu.addItem (i + 1, d.name);
-            }
-            if (currentManufacturer.isNotEmpty())
-                menu.addSubMenu (currentManufacturer, submenu);
-
-            // Stash the captured array so the lambda can resolve a result
-            // ID back to the matching PluginDescription. juce::PopupMenu's
-            // result lambda doesn't take captures except via copy, so we
-            // make a shared_ptr to keep the array alive through the async
-            // callback without copying it sample-by-sample.
-            auto sharedSorted = std::make_shared<juce::Array<juce::PluginDescription>> (std::move (sorted));
-            menu.addSeparator();
-            menu.addItem (9001, "Scan plugins (VST3 / LV2)...");
-            menu.addItem (9002, "Browse for file...");
-
-            juce::Component::SafePointer<ChannelStripComponent> safe (this);
-            menu.showMenuAsync (juce::PopupMenu::Options()
-                                  .withTargetComponent (&pluginSlotButton),
-                                  [safe, sharedSorted] (int result)
-            {
-                if (auto* self = safe.getComponent())
-                {
-                    if (result == 0) return;
-                    if (result == 9001) { self->runPluginScanModal(); self->openPluginPicker(); return; }
-                    if (result == 9002) { self->openPluginFileChooser(); return; }
-
-                    const int idx = result - 1;
-                    if (idx < 0 || idx >= sharedSorted->size()) return;
-                    const auto& desc = sharedSorted->getReference (idx);
-
-                    juce::String error;
-                    if (! self->pluginSlot.loadFromDescription (desc, error))
-                    {
-                        juce::AlertWindow::showAsync (
-                            juce::MessageBoxOptions()
-                                .withIconType (juce::MessageBoxIconType::WarningIcon)
-                                .withTitle ("Plugin load failed")
-                                .withMessage (error.isEmpty() ? "Unknown error" : error)
-                                .withButton ("OK"),
-                            nullptr);
-                    }
-                    self->refreshPluginSlotButton();
-                }
-            });
-            return;
-        }
-
-        menu.addSeparator();
-        menu.addItem (9001, "Scan plugins (VST3 / LV2)...");
-        menu.addItem (9002, "Browse for file...");
-
-        juce::Component::SafePointer<ChannelStripComponent> safe (this);
-        menu.showMenuAsync (juce::PopupMenu::Options()
-                              .withTargetComponent (&pluginSlotButton),
-                              [safe] (int result)
-        {
-            if (auto* self = safe.getComponent())
-            {
-                if (result == 9001) { self->runPluginScanModal(); self->openPluginPicker(); return; }
-                if (result == 9002) { self->openPluginFileChooser(); return; }
-            }
-        });
-        return;
-    }
-    else
-    {
-        // KnownPluginList builds a hierarchical menu grouped by manufacturer.
-        // IDs returned through this menu are 1-based indices into the list.
-        // We start them at 1 and reserve 9000+ for our action items.
-        known.addToMenu (menu,
-                          juce::KnownPluginList::sortByManufacturer,
-                          /*dirsToIgnore*/ {});
-    }
-    menu.addSeparator();
-    menu.addItem (9001, "Scan plugins (VST3 / LV2)...");
-    menu.addItem (9002, "Browse for file...");
+    // MIDI tracks need an instrument plugin (synth / sampler) - the strip
+    // routes per-track MIDI events into the slot. Mono / Stereo tracks
+    // route audio through the slot, which only makes sense for effect
+    // plugins; instrument plugins ignore the audio input entirely and
+    // (in the case of some VSTGUI-based instruments) fail to render
+    // their UI when loaded as an audio insert.
+    const auto kind = (track.mode.load (std::memory_order_relaxed) == (int) Track::Mode::Midi)
+                        ? pluginpicker::PluginKind::Instruments
+                        : pluginpicker::PluginKind::Effects;
 
     juce::Component::SafePointer<ChannelStripComponent> safe (this);
-    menu.showMenuAsync (juce::PopupMenu::Options()
-                          .withTargetComponent (&pluginSlotButton),
-                          [safe] (int result)
-    {
-        if (auto* self = safe.getComponent())
-        {
-            if (result == 0) return;  // cancelled
-            if (result == 9001) { self->runPluginScanModal(); self->openPluginPicker(); return; }
-            if (result == 9002) { self->openPluginFileChooser(); return; }
+    pluginpicker::openPickerMenu (pluginSlot,
+                                    pluginSlotButton,
+                                    activePluginChooser,
+                                    [safe]
+                                    {
+                                        auto* self = safe.getComponent();
+                                        if (self == nullptr) return;
 
-            // 1..N maps to KnownPluginList index (KnownPluginList::getIndexChosenByMenu
-            // is the canonical decoder).
-            auto& mgrRef = self->pluginSlot.getManagerForUi();
-            const auto& known = mgrRef.getKnownPluginList();
-            const int idx = known.getIndexChosenByMenu (result);
-            if (idx < 0 || idx >= known.getNumTypes()) return;
-
-            const auto* desc = known.getType (idx);
-            if (desc == nullptr) return;
-
-            juce::String error;
-            if (! self->pluginSlot.loadFromDescription (*desc, error))
-            {
-                juce::AlertWindow::showAsync (
-                    juce::MessageBoxOptions()
-                        .withIconType (juce::MessageBoxIconType::WarningIcon)
-                        .withTitle ("Plugin load failed")
-                        .withMessage (error.isEmpty() ? "Unknown error" : error)
-                        .withButton ("OK"),
-                    nullptr);
-            }
-            self->refreshPluginSlotButton();
-        }
-    });
-}
-
-void ChannelStripComponent::runPluginScanModal()
-{
-    // Synchronous scan with a tiny modal banner so the user sees progress.
-    // PluginDirectoryScanner is internally synchronous when allowAsync=false;
-    // for a polished UX we'd lift it onto a thread with a real progress bar
-    // - TODO once the picker is in active use.
-    auto* dialog = new juce::AlertWindow ("Scanning plugins",
-                                            "Looking through VST3 / LV2 install "
-                                            "locations… this can take a few "
-                                            "seconds the first time.",
-                                            juce::MessageBoxIconType::NoIcon);
-    dialog->setUsingNativeTitleBar (true);
-    dialog->enterModalState (false /*not blocking*/);
-
-    auto& mgr = pluginSlot.getManagerForUi();
-    const int added = mgr.scanInstalledPlugins();
-
-    delete dialog;
-
-    juce::AlertWindow::showAsync (
-        juce::MessageBoxOptions()
-            .withIconType (juce::MessageBoxIconType::InfoIcon)
-            .withTitle ("Plugin scan complete")
-            .withMessage (juce::String::formatted (
-                "Added %d plugin%s to the picker. (Total known: %d)",
-                added, added == 1 ? "" : "s",
-                mgr.getKnownPluginList().getNumTypes()))
-            .withButton ("OK"),
-        nullptr);
-}
-
-void ChannelStripComponent::openPluginFileChooser()
-{
-    // VST3 plugins are directories (.vst3 bundles). The chooser uses
-    // canSelectDirectories so the user can pick the bundle root. AsyncWork
-    // shape: the chooser owns itself in `activePluginChooser` so it survives
-    // the showAsync return, and we delete it on the callback. Default
-    // location is platform-specific.
-#if defined(__APPLE__)
-    const auto defaultDir = juce::File::getSpecialLocation (juce::File::userHomeDirectory)
-                                .getChildFile ("Library/Audio/Plug-Ins/VST3");
-#else
-    const auto defaultDir = juce::File::getSpecialLocation (juce::File::userHomeDirectory)
-                                .getChildFile (".vst3");
-#endif
-    activePluginChooser = std::make_unique<juce::FileChooser> (
-        "Select a plugin",
-        defaultDir,
-        "*.vst3;*.component;*.so;*.lv2");
-
-    juce::Component::SafePointer<ChannelStripComponent> safe (this);
-    activePluginChooser->launchAsync (
-        juce::FileBrowserComponent::openMode |
-        juce::FileBrowserComponent::canSelectFiles |
-        juce::FileBrowserComponent::canSelectDirectories,
-        [safe] (const juce::FileChooser& chooser)
-        {
-            if (auto* self = safe.getComponent())
-            {
-                const auto file = chooser.getResult();
-                if (file == juce::File()) { self->activePluginChooser.reset(); return; }
-
-                juce::String error;
-                if (! self->pluginSlot.loadFromFile (file, error))
-                {
-                    juce::AlertWindow::showAsync (
-                        juce::MessageBoxOptions()
-                            .withIconType (juce::MessageBoxIconType::WarningIcon)
-                            .withTitle ("Plugin load failed")
-                            .withMessage (error)
-                            .withButton ("OK"),
-                        nullptr);
-                }
-                self->refreshPluginSlotButton();
-                self->activePluginChooser.reset();
-            }
-        });
+                                        // Close the modal synchronously so the cached editor
+                                        // (still bound to the just-replaced processor) gets
+                                        // detached from the parent component before the next
+                                        // paint cycle. The cached editor unique_ptr is dropped
+                                        // by refreshPluginSlotButton when it sees the slot's
+                                        // processor pointer change.
+                                        //
+                                        // Defer that drop + the slot-button refresh by one
+                                        // message-loop tick so it doesn't run inside the
+                                        // picker's own dismissal stack. Plugin destructors on
+                                        // Linux frequently do X11 / OpenGL cleanup that
+                                        // confuses Mutter when fired during another widget's
+                                        // teardown - this single-tick gap is what stops the
+                                        // Replace plugin... action from crashing the DAW (or
+                                        // the entire compositor).
+                                        //
+                                        // Do NOT auto-open the new plugin's editor. The user
+                                        // can right-click -> Open editor when ready; pairing
+                                        // a destroy-old-editor with an immediate
+                                        // create-new-editor is exactly the rapid lifecycle
+                                        // churn that some plugins (Diva, MininnDrum) crash on.
+                                        self->closePluginEditor();
+                                        juce::Component::SafePointer<ChannelStripComponent> deferred (self);
+                                        juce::MessageManager::callAsync ([deferred]
+                                        {
+                                            if (auto* s = deferred.getComponent())
+                                                s->refreshPluginSlotButton();
+                                        });
+                                    },
+                                    kind);
 }
 
 void ChannelStripComponent::unloadPluginSlot()
@@ -1320,7 +1251,7 @@ void ChannelStripComponent::showPluginSlotMenu()
     {
         // Editor toggle headline so right-click ALSO becomes a way to open
         // the plugin GUI (some users find right-click more discoverable).
-        const bool editorOpen = pluginEditorModal.isOpen();
+        const bool editorOpen = isPluginEditorOpen();
         menu.addItem (2001, editorOpen ? "Close editor" : "Open editor");
         menu.addSeparator();
         menu.addItem (2002, "Replace plugin...");
@@ -1365,47 +1296,215 @@ void ChannelStripComponent::refreshPluginSlotButton()
         pluginSlotButton.setButtonText ("+ Plugin");
 
     // If the plugin was unloaded out from under an open editor (e.g. via
-    // the right-click menu's Remove), the editor's body now references a
-    // dead AudioProcessor - close it.
-    if (name.isEmpty() && pluginEditorModal.isOpen())
-        closePluginEditor();
+    // the right-click menu's Remove), the cached editor references a
+    // now-being-destructed AudioProcessor. Drop it before that processor
+    // disappears so we don't leave a dangling pointer in pluginEditor.
+    if (name.isEmpty())
+        dropPluginEditor();
+    else if (pluginEditor != nullptr
+             && pluginEditorOwner != pluginSlot.getInstance())
+    {
+        // Plugin was Replaced - the cached editor belongs to the prior
+        // instance. Drop it so the next Open Editor builds a fresh one
+        // for the new instance.
+        dropPluginEditor();
+    }
 }
 
 void ChannelStripComponent::togglePluginEditor()
 {
     // Toggle: if the editor is up, close it; otherwise open. Same shape as
     // the EQ / COMP popup buttons in compact mode.
-    if (pluginEditorModal.isOpen())
+    if (isPluginEditorOpen())
         closePluginEditor();
     else
         openPluginEditor();
 }
 
+// Top-level window that wraps a plugin's editor with its own native
+// peer (X11 Window / Wayland surface) so the plugin can render via its
+// own renderer (GL / Cairo / VSTGUI). Owned by ChannelStripComponent;
+// closeButtonPressed forwards back so the strip can drop our unique_ptr
+// when the user clicks X.
+class ChannelStripComponent::PluginEditorWindow final : public juce::DocumentWindow
+{
+public:
+    PluginEditorWindow (const juce::String& title,
+                        juce::AudioProcessorEditor& editor,
+                        std::function<void()> onCloseButton)
+        : juce::DocumentWindow (title,
+                                  juce::Colour (0xff202024),
+                                  juce::DocumentWindow::closeButton,
+                                  /*addToDesktop*/ true),
+          onClose (std::move (onCloseButton))
+    {
+        setUsingNativeTitleBar (true);
+
+        // Force a size on the editor BEFORE we touch the window so the
+        // window can be sized correctly even before content-set. Some
+        // plugin editors construct at 0×0 and only set their final size
+        // in the next resized() pass triggered by parent attachment.
+        const int ew = juce::jmax (200, editor.getWidth());
+        const int eh = juce::jmax (200, editor.getHeight());
+        editor.setSize (ew, eh);
+
+        std::fprintf (stderr,
+                      "[Focal/PluginEditor] Opening \"%s\" editor: editor=%dx%d resizable=%d\n",
+                      title.toRawUTF8(), ew, eh,
+                      (int) editor.isResizable());
+
+        // Size the WINDOW first (so its X11 peer is allocated at the
+        // right geometry), then map it. We deliberately do NOT call
+        // setContentNonOwned yet - on Linux, JUCE's VST3PluginWindow
+        // owns an XEmbedComponent whose host X11 window is parented to
+        // root at construction. The reparent into our peer happens in
+        // VST3PluginWindow::componentVisibilityChanged ->
+        // attachPluginWindow. If we attach the editor BEFORE our
+        // DocumentWindow's peer is fully realized, the reparent fires
+        // against a not-yet-mapped window and the plugin's child X11
+        // window stays at root - the visible result is a blank/white
+        // editor interior. Defer the content-set to after setVisible
+        // has propagated through one message loop tick.
+        setSize (ew, eh);
+        setResizable (false, false);
+        centreAroundComponent (nullptr, ew, eh);
+        setVisible (true);
+
+        juce::Component::SafePointer<PluginEditorWindow> attachThis (this);
+        juce::Component::SafePointer<juce::Component> attachEditor (&editor);
+        juce::MessageManager::callAsync ([attachThis, attachEditor]
+        {
+            auto* self = attachThis.getComponent();
+            auto* ed   = attachEditor.getComponent();
+            if (self == nullptr || ed == nullptr) return;
+            // editor is a juce::Component but JUCE wants AudioProcessorEditor*
+            // for setContentNonOwned. Both signatures accept a Component*
+            // since AudioProcessorEditor IS a Component.
+            self->setContentNonOwned (ed, /*resizeToFitContent*/ true);
+        });
+
+       #if JUCE_LINUX
+        // Same Mutter focus-stealing-prevention fix as FocalApp's
+        // MainWindow: without an explicit _NET_WM_USER_TIME the WM may
+        // open this window iconified, leaving the user to Alt+Tab to
+        // find the editor. Also send WM_CHANGE_STATE NormalState +
+        // _NET_ACTIVE_WINDOW so the new window comes to front.
+        juce::Component::SafePointer<PluginEditorWindow> safeThis (this);
+        juce::MessageManager::callAsync ([safeThis]
+        {
+            if (safeThis == nullptr) return;
+            auto* peer = safeThis->getPeer();
+            if (peer == nullptr) return;
+            auto* x = ::XOpenDisplay (nullptr);
+            if (x == nullptr) return;
+            const auto win = (::Window) (uintptr_t) peer->getNativeHandle();
+            const auto userTimeAtom = ::XInternAtom (x, "_NET_WM_USER_TIME",   False);
+            const auto changeStateAtom = ::XInternAtom (x, "WM_CHANGE_STATE",  False);
+            const auto activeWinAtom = ::XInternAtom (x, "_NET_ACTIVE_WINDOW", False);
+            unsigned long t = 0x7FFFFFFFUL;
+            ::XChangeProperty (x, win, userTimeAtom, XA_CARDINAL, 32,
+                                PropModeReplace,
+                                reinterpret_cast<unsigned char*> (&t), 1);
+            ::XEvent demin{};
+            demin.xclient.type         = ClientMessage;
+            demin.xclient.window       = win;
+            demin.xclient.message_type = changeStateAtom;
+            demin.xclient.format       = 32;
+            demin.xclient.data.l[0]    = 1;
+            ::XSendEvent (x, DefaultRootWindow (x), False,
+                           SubstructureRedirectMask | SubstructureNotifyMask, &demin);
+            ::XEvent act{};
+            act.xclient.type         = ClientMessage;
+            act.xclient.window       = win;
+            act.xclient.message_type = activeWinAtom;
+            act.xclient.format       = 32;
+            act.xclient.data.l[0]    = 2;
+            act.xclient.data.l[1]    = (long) t;
+            ::XSendEvent (x, DefaultRootWindow (x), False,
+                           SubstructureRedirectMask | SubstructureNotifyMask, &act);
+            ::XFlush (x);
+            ::XCloseDisplay (x);
+        });
+       #endif
+    }
+
+    void closeButtonPressed() override
+    {
+        // Detach the borrowed editor before we go away so this window's
+        // destructor doesn't touch it, then ask the host to drop us.
+        setContentNonOwned (nullptr, false);
+        if (onClose) onClose();
+    }
+
+private:
+    std::function<void()> onClose;
+};
+
+bool ChannelStripComponent::isPluginEditorOpen() const noexcept
+{
+    return pluginEditorWindow != nullptr;
+}
+
 void ChannelStripComponent::openPluginEditor()
 {
-    if (pluginEditorModal.isOpen()) return;
+    if (isPluginEditorOpen()) return;
 
     auto* instance = pluginSlot.getInstance();
     if (instance == nullptr || ! instance->hasEditor()) return;
 
-    auto* editor = instance->createEditorIfNeeded();
-    if (editor == nullptr) return;
+    // If the cached editor was created for a different processor (the
+    // user replaced the plugin), drop it now so the next call below
+    // builds a fresh one for the new processor.
+    if (pluginEditor != nullptr && pluginEditorOwner != instance)
+        dropPluginEditor();
 
-    // Embedded modal hosted on the top-level component so the plugin
-    // editor centres over the whole UI, not just this strip. The editor
-    // is owned by EmbeddedModal::body_ - on close() the unique_ptr
-    // destructs the AudioProcessorEditor, whose destructor calls
-    // editorBeingDeleted on the plugin instance (the canonical
-    // lifecycle path - same as the previous DialogWindow flow).
-    auto* topLevel = getTopLevelComponent();
-    if (topLevel == nullptr) return;
-    pluginEditorModal.show (*topLevel,
-                              std::unique_ptr<juce::Component> (editor));
+    if (pluginEditor == nullptr)
+    {
+        // createEditorIfNeeded returns a newly-created editor that the
+        // caller owns. We hold it here for the lifetime of the loaded
+        // plugin rather than destroying it on every close.
+        std::unique_ptr<juce::AudioProcessorEditor> fresh (instance->createEditorIfNeeded());
+        if (fresh == nullptr) return;
+        pluginEditor      = std::move (fresh);
+        pluginEditorOwner = instance;
+    }
+
+    juce::Component::SafePointer<ChannelStripComponent> safe (this);
+    pluginEditorWindow = std::make_unique<PluginEditorWindow> (
+        pluginSlot.getLoadedName(),
+        *pluginEditor,
+        [safe]
+        {
+            // Defer the unique_ptr reset to the next message-loop tick
+            // so we don't destruct the window from inside its own
+            // closeButtonPressed callback (which is a JUCE no-no).
+            juce::MessageManager::callAsync ([safe]
+            {
+                if (auto* self = safe.getComponent())
+                    self->pluginEditorWindow.reset();
+            });
+        });
 }
 
 void ChannelStripComponent::closePluginEditor()
 {
-    pluginEditorModal.close();
+    if (pluginEditorWindow == nullptr) return;
+    // Remove the editor from the window before destruction so the
+    // window's teardown only tears down its own peer, not the cached
+    // editor.
+    pluginEditorWindow->setContentNonOwned (nullptr, false);
+    pluginEditorWindow.reset();
+}
+
+void ChannelStripComponent::dropPluginEditor()
+{
+    closePluginEditor();
+    // Reset the unique_ptr; ~AudioProcessorEditor calls
+    // editorBeingDeleted on the plugin instance, which is the canonical
+    // lifecycle path. Must run while pluginSlot.getInstance() (or the
+    // PluginSlot's previousInstance) is still alive.
+    pluginEditor.reset();
+    pluginEditorOwner = nullptr;
 }
 
 void ChannelStripComponent::openEqEditorPopup()
@@ -2085,8 +2184,26 @@ void ChannelStripComponent::onTrackModeChanged()
     // Track so the audio thread can read it lock-free.
     const int id = modeSelector.getSelectedId();
     const int mode = juce::jlimit (0, 2, id - 1);  // 0..2 = Track::Mode
+
+    // Auto-unload a mode-mismatched plugin: the picker filter prevents
+    // loading the wrong type in the first place, but flipping a track's
+    // mode after-the-fact bypasses that gate and would leave the strip
+    // with a plugin that's silent (effect on a MIDI strip ignores MIDI
+    // and processes silence; instrument on an audio strip ignores audio
+    // input). Unloading here keeps the rule consistent and avoids the
+    // confusing-silence trap. Editor goes with the slot via
+    // unloadPluginSlot, which closes the modal first.
+    if (pluginSlot.isLoaded())
+    {
+        const bool willBeMidi   = (mode == (int) Track::Mode::Midi);
+        const bool isInstrument = pluginSlot.isLoadedPluginInstrument();
+        if (willBeMidi != isInstrument)
+            unloadPluginSlot();
+    }
+
     track.mode.store (mode, std::memory_order_relaxed);
     refreshInputSelectorVisibility();
+    refreshPluginSlotButton();
     // Resize so the layout reflects the new mode (extra dropdown for stereo,
     // hidden audio dropdown for MIDI).
     resized();
@@ -2118,6 +2235,7 @@ void ChannelStripComponent::refreshInputSelectorVisibility()
     inputSelector      .setVisible (isMono || isStereo);
     inputSelectorR     .setVisible (isStereo);
     midiInputSelector  .setVisible (isMidi);
+    midiOutputSelector .setVisible (isMidi);
     midiChannelSelector.setVisible (isMidi);
     midiActivityLed    .setVisible (isMidi);
 }
@@ -2379,13 +2497,18 @@ void ChannelStripComponent::resized()
         }
         else  // MIDI
         {
-            // [ MIDI input ][ ch ][LED]
+            // Row 1: [ MIDI input ][ ch ][LED]
+            // Row 2: [ MIDI output (full width) ]
             constexpr int kLedW = 14;
             auto led = inputRow.removeFromRight (kLedW);
             midiActivityLed.setBounds (led.reduced (1));
             const int chW = juce::jmax (40, inputRow.getWidth() / 3);
             midiChannelSelector.setBounds (inputRow.removeFromRight (chW).withTrimmedLeft (1));
             midiInputSelector  .setBounds (inputRow.withTrimmedRight (1));
+
+            area.removeFromTop (2);
+            auto outRow = area.removeFromTop (18);
+            midiOutputSelector.setBounds (outRow);
         }
 
         area.removeFromTop (3);

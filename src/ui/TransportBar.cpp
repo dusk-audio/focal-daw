@@ -243,14 +243,14 @@ TransportBar::TransportBar (AudioEngine& engineRef) : engine (engineRef)
             const double mins = minStr.isEmpty() ? 0.0 : (double) minStr.getDoubleValue();
             const double secs = (double) secStr.getDoubleValue();
             const auto target = (juce::int64) std::round ((mins * 60.0 + secs) * sr);
-            engine.getTransport().setPlayhead (juce::jmax<juce::int64> (0, target));
+            engine.getTransport().setPlayhead (juce::jmax ((juce::int64) 0, target));
             return;
         }
 
         // Bare number = seconds.
         const double secs = (double) text.getDoubleValue();
         const auto target = (juce::int64) std::round (secs * sr);
-        engine.getTransport().setPlayhead (juce::jmax<juce::int64> (0, target));
+        engine.getTransport().setPlayhead (juce::jmax ((juce::int64) 0, target));
     };
     addAndMakeVisible (clockLabel);
 
@@ -359,18 +359,6 @@ TransportBar::TransportBar (AudioEngine& engineRef) : engine (engineRef)
     tapButton.onClick = [this] { onTap(); };
     addAndMakeVisible (tapButton);
 
-    // Jumpback ("« Ns"). Click = rewind by jumpbackSeconds. Right-click =
-    // preset menu. Label re-renders whenever the value changes (preset
-    // pick) or on session load (the timer's BPM-style refresh).
-    jumpbackButton.setColour (juce::TextButton::buttonColourId,  juce::Colour (0xff202024));
-    jumpbackButton.setColour (juce::TextButton::textColourOffId, juce::Colour (0xff70b0e0));
-    jumpbackButton.setTooltip ("Jumpback - rewind by the configured number of seconds. "
-                                "Right-click to change the amount.");
-    jumpbackButton.onClick = [this] { engine.jumpbackBySeconds(); };
-    jumpbackButton.addMouseListener (this, false);
-    refreshJumpbackLabel();
-    addAndMakeVisible (jumpbackButton);
-
     // TUNE button - opens a modal pitch-tracker overlay on click.
     // Selection of which track to tune lives on MainComponent (it knows
     // the focused track from the TapeStrip selection); this button just
@@ -384,6 +372,8 @@ TransportBar::TransportBar (AudioEngine& engineRef) : engine (engineRef)
 
     tapeToggle.setClickingTogglesState (true);
     tapeToggle.setToggleState (true, juce::dontSendNotification);   // expanded by default
+    // Initial text - syncCompactLabels() in resized() rewrites this whenever
+    // the transport-bar width crosses the compact breakpoint.
     tapeToggle.setButtonText (juce::CharPointer_UTF8 ("\xe2\x96\xbe SUMMARY")); // "▾ SUMMARY"
     tapeToggle.setColour (juce::TextButton::buttonColourId,   juce::Colour (0xff202024));
     tapeToggle.setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xff2a3a48));
@@ -392,10 +382,11 @@ TransportBar::TransportBar (AudioEngine& engineRef) : engine (engineRef)
     tapeToggle.setTooltip ("Show / hide the SUMMARY arrangement view");
     tapeToggle.onClick = [this]
     {
-        const bool expanded = tapeToggle.getToggleState();
-        tapeToggle.setButtonText (expanded ? juce::CharPointer_UTF8 ("\xe2\x96\xbe SUMMARY")    // "▾ SUMMARY"
-                                            : juce::CharPointer_UTF8 ("\xe2\x96\xb8 SUMMARY")); // "▸ SUMMARY"
-        if (onTapeStripToggle) onTapeStripToggle (expanded);
+        // Re-render the label in whatever form (full / compact) the bar
+        // is currently sized to. The chevron always reflects the new
+        // toggle state.
+        syncCompactLabels (getWidth() < kCompactTransportWidth);
+        if (onTapeStripToggle) onTapeStripToggle (tapeToggle.getToggleState());
     };
     addAndMakeVisible (tapeToggle);
 
@@ -447,7 +438,7 @@ void TransportBar::timerCallback()
             lastScrubTickMs = nowMs;
             const auto delta = (juce::int64) ((double) dtMs * 0.001 * sr * kScrubMultiplier);
             const auto cur = engine.getTransport().getPlayhead();
-            engine.getTransport().setPlayhead (juce::jmax<juce::int64> (0,
+            engine.getTransport().setPlayhead (juce::jmax ((juce::int64) 0,
                 cur + (juce::int64) direction * delta));
         };
         handleScrub (rewButton,  rewPressedAtMs,  rewIsScrubbing,  -1);
@@ -545,13 +536,15 @@ void TransportBar::timerCallback()
             // Drop any existing binding from the same source before
             // appending the new one - prevents stacking duplicate
             // mappings if a user re-learns the same fader.
-            auto& binds = s.midiBindings;
-            binds.erase (std::remove_if (binds.begin(), binds.end(),
-                [&] (const MidiBinding& x)
-                {
-                    return x.sourceMatches (b.channel, b.dataNumber, b.trigger);
-                }), binds.end());
-            binds.push_back (b);
+            s.midiBindings.mutate ([&] (std::vector<MidiBinding>& binds)
+            {
+                binds.erase (std::remove_if (binds.begin(), binds.end(),
+                    [&] (const MidiBinding& x)
+                    {
+                        return x.sourceMatches (b.channel, b.dataNumber, b.trigger);
+                    }), binds.end());
+                binds.push_back (b);
+            });
             s.midiLearnCapture.store (0, std::memory_order_relaxed);
             s.midiLearnPending.store (-1, std::memory_order_relaxed);
         }
@@ -624,9 +617,10 @@ void TransportBar::resized()
 
     // Circular transport buttons. Square bounds so the disc renders true.
     // 36 px diameter with 4 px spacing; centred vertically in the row.
+    // Five buttons (stop / rew / play / ffwd / record) -> 4 gaps.
     constexpr int kBtnDia = 36;
     constexpr int kBtnGap = 4;
-    auto buttons = area.removeFromLeft (kBtnDia * 3 + kBtnGap * 2);
+    auto buttons = area.removeFromLeft (kBtnDia * 5 + kBtnGap * 4);
     const int yPad = juce::jmax (0, (buttons.getHeight() - kBtnDia) / 2);
     auto buttonRow = buttons.reduced (0, yPad);
 
@@ -645,8 +639,18 @@ void TransportBar::resized()
     area.removeFromLeft (12);
     clockLabel.setBounds (area.removeFromLeft (130));
 
-    // TAPE toggle on the right edge of the bar; SNAP/PUNCH/LOOP sit inside it.
-    tapeToggle.setBounds (area.removeFromRight (84).reduced (1));
+    // Below this transport-bar width the right-side toggles compete for
+    // space and clip; collapse the modes (LOOP/PUNCH/SNAP) and SUMMARY
+    // to single-letter / chevron-only labels with smaller bounds. The
+    // toggle behaviour and tooltips stay the same - only the button text
+    // contracts. Saves ~130 px on the right side, which closes the gap
+    // for windows in the 1100-1600 px range without touching the rest of
+    // the bar.
+    const bool compact = getWidth() < kCompactTransportWidth;
+    syncCompactLabels (compact);
+
+    // TAPE toggle on the right edge of the bar; chevron-only in compact.
+    tapeToggle.setBounds (area.removeFromRight (compact ? 32 : 84).reduced (1));
     area.removeFromRight (12);
 
     // BPM editor + CLICK + C/I toggles.
@@ -659,16 +663,14 @@ void TransportBar::resized()
     bpmValue.setBounds   (area.removeFromRight (52).reduced (1, 4));
     bpmCaption.setBounds (area.removeFromRight (32).reduced (1, 4));
     area.removeFromRight (8);
-    jumpbackButton.setBounds (area.removeFromRight (54).reduced (1, 4));
-    area.removeFromRight (4);
     tuneButton.setBounds     (area.removeFromRight (50).reduced (1, 4));
     area.removeFromRight (12);
 
-    snapToggle.setBounds  (area.removeFromRight (54).reduced (1, 4));
+    snapToggle.setBounds  (area.removeFromRight (compact ? 30 : 54).reduced (1, 4));
     area.removeFromRight (4);
-    punchToggle.setBounds (area.removeFromRight (60).reduced (1, 4));
+    punchToggle.setBounds (area.removeFromRight (compact ? 30 : 60).reduced (1, 4));
     area.removeFromRight (4);
-    loopToggle.setBounds  (area.removeFromRight (54).reduced (1, 4));
+    loopToggle.setBounds  (area.removeFromRight (compact ? 30 : 54).reduced (1, 4));
     area.removeFromRight (12);
 
     area.removeFromLeft (12);
@@ -682,15 +684,6 @@ void TransportBar::setHintVisible (bool visible)
 
 void TransportBar::mouseDown (const juce::MouseEvent& e)
 {
-    // Right-click on the jumpback button opens its preset menu. Other
-    // sources fall through to the default Component handling - we only
-    // listen on jumpbackButton so this catches both children-routed
-    // events and direct hits on the bar background near the button.
-    if (e.eventComponent == &jumpbackButton && e.mods.isPopupMenu())
-    {
-        showJumpbackMenu();
-        return;
-    }
     // Right-click on PUNCH opens the auto-punch settings (pre-roll /
     // post-roll). Plain click still toggles punch on/off.
     if (e.eventComponent == &punchToggle && e.mods.isPopupMenu())
@@ -723,37 +716,27 @@ void TransportBar::mouseDown (const juce::MouseEvent& e)
     juce::Component::mouseDown (e);
 }
 
-void TransportBar::refreshJumpbackLabel()
+void TransportBar::syncCompactLabels (bool compact)
 {
-    const float secs = engine.getSession().jumpbackSeconds.load (std::memory_order_relaxed);
-    // Whole-second values render without a decimal; fractional ones get
-    // a single decimal place. "« 5s" / "« 7.5s".
-    const auto numeric = (std::abs (secs - std::round (secs)) < 0.05f)
-                        ? juce::String ((int) std::round (secs))
-                        : juce::String (secs, 1);
-    jumpbackButton.setButtonText (juce::String (juce::CharPointer_UTF8 ("\xc2\xab ")) + numeric + "s");
-}
-
-void TransportBar::showJumpbackMenu()
-{
-    juce::PopupMenu m;
-    m.addSectionHeader ("Jumpback amount");
-    static constexpr float kPresets[] = { 1.0f, 3.0f, 5.0f, 10.0f, 15.0f, 30.0f };
-    const float current = engine.getSession().jumpbackSeconds.load (std::memory_order_relaxed);
-    for (const float v : kPresets)
+    const bool tapeExpanded = tapeToggle.getToggleState();
+    if (compact)
     {
-        const auto label = (std::abs (v - std::round (v)) < 0.05f)
-                            ? juce::String ((int) std::round (v))
-                            : juce::String (v, 1);
-        m.addItem (label + " seconds", true,
-                    std::abs (current - v) < 0.05f,
-                    [this, v]
-                    {
-                        engine.getSession().jumpbackSeconds.store (v, std::memory_order_relaxed);
-                        refreshJumpbackLabel();
-                    });
+        loopToggle .setButtonText ("L");
+        punchToggle.setButtonText ("P");
+        snapToggle .setButtonText ("S");
+        tapeToggle .setButtonText (tapeExpanded
+            ? juce::CharPointer_UTF8 ("\xe2\x96\xbe")    // "▾"
+            : juce::CharPointer_UTF8 ("\xe2\x96\xb8")); // "▸"
     }
-    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&jumpbackButton));
+    else
+    {
+        loopToggle .setButtonText ("LOOP");
+        punchToggle.setButtonText ("PUNCH");
+        snapToggle .setButtonText ("SNAP");
+        tapeToggle .setButtonText (tapeExpanded
+            ? juce::CharPointer_UTF8 ("\xe2\x96\xbe SUMMARY")    // "▾ SUMMARY"
+            : juce::CharPointer_UTF8 ("\xe2\x96\xb8 SUMMARY")); // "▸ SUMMARY"
+    }
 }
 
 void TransportBar::showPunchSettingsMenu()

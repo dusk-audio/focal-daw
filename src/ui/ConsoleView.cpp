@@ -2,6 +2,13 @@
 
 namespace focal
 {
+void ConsoleView::dropAllPluginEditors()
+{
+    for (auto& strip : strips)
+        if (strip != nullptr)
+            strip->dropPluginEditor();
+}
+
 ConsoleView::ConsoleView (Session& session, AudioEngine& engine) : sessionRef (session)
 {
     for (int i = 0; i < Session::kNumTracks; ++i)

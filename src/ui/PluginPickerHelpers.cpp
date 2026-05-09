@@ -101,24 +101,57 @@ void openPickerMenu (PluginSlot& slot,
                       juce::Component& target,
                       std::unique_ptr<juce::FileChooser>& chooserOwner,
                       std::function<void()> onChange,
+                      PluginKind kind,
                       juce::Point<int> screenPosition)
 {
     auto& manager = slot.getManagerForUi();
     auto& known   = manager.getKnownPluginList();
+
+    // Build the filtered list. We can't use KnownPluginList::addToMenu
+    // because it builds menu IDs off the full list with no filter hook;
+    // we sort and group by manufacturer manually instead. IDs 1..N map
+    // to indices in `sorted` (captured by the lambda); 9000+ are reserved
+    // for our own action items.
+    auto descriptions = (kind == PluginKind::Instruments)
+                          ? manager.getInstrumentDescriptions()
+                          : manager.getEffectDescriptions();
+    std::sort (descriptions.begin(), descriptions.end(),
+        [] (const juce::PluginDescription& a, const juce::PluginDescription& b)
+        {
+            if (a.manufacturerName != b.manufacturerName)
+                return a.manufacturerName.compareIgnoreCase (b.manufacturerName) < 0;
+            return a.name.compareIgnoreCase (b.name) < 0;
+        });
 
     juce::PopupMenu menu;
     if (known.getNumTypes() == 0)
     {
         menu.addSectionHeader ("No plugins scanned yet");
     }
+    else if (descriptions.isEmpty())
+    {
+        menu.addSectionHeader (kind == PluginKind::Instruments
+                                  ? "No instruments scanned yet"
+                                  : "No effects scanned yet");
+    }
     else
     {
-        // Manufacturer-grouped hierarchy. Menu IDs returned for plugins are
-        // 1-based KnownPluginList indices; we reserve 9000+ for our own
-        // action items (scan, browse).
-        known.addToMenu (menu,
-                          juce::KnownPluginList::sortByManufacturer,
-                          /*dirsToIgnore*/ {});
+        juce::String currentManufacturer;
+        juce::PopupMenu submenu;
+        for (int i = 0; i < descriptions.size(); ++i)
+        {
+            const auto& d = descriptions.getReference (i);
+            if (d.manufacturerName != currentManufacturer)
+            {
+                if (currentManufacturer.isNotEmpty())
+                    menu.addSubMenu (currentManufacturer, submenu);
+                submenu = juce::PopupMenu();
+                currentManufacturer = d.manufacturerName;
+            }
+            submenu.addItem (i + 1, d.name);
+        }
+        if (currentManufacturer.isNotEmpty())
+            menu.addSubMenu (currentManufacturer, submenu);
     }
     menu.addSeparator();
     menu.addItem (kIdScan,       "Scan plugins (VST3 / LV2)...");
@@ -128,6 +161,11 @@ void openPickerMenu (PluginSlot& slot,
     auto* slotPtr = &slot;
     auto* chooserOwnerPtr = &chooserOwner;
     auto onChangeCopy = onChange;
+
+    // Capture descriptions by shared_ptr so the result lambda can resolve
+    // an ID back to a description without copying the whole array per
+    // showMenuAsync.
+    auto sharedDescriptions = std::make_shared<juce::Array<juce::PluginDescription>> (std::move (descriptions));
 
     // Anchor on click position when supplied (large click-target buttons
     // would otherwise drop the menu at their top-left), otherwise on the
@@ -141,7 +179,7 @@ void openPickerMenu (PluginSlot& slot,
 
     menu.showMenuAsync (options,
         [slotPtr, safeTarget, chooserOwnerPtr, onChangeCopy = std::move (onChangeCopy),
-         screenPosition] (int result) mutable
+         kind, screenPosition, sharedDescriptions] (int result) mutable
         {
             if (safeTarget.getComponent() == nullptr) return;  // host UI gone
             if (result == 0) return;  // cancelled
@@ -154,7 +192,7 @@ void openPickerMenu (PluginSlot& slot,
                 // visual spot.
                 openPickerMenu (*slotPtr, *safeTarget.getComponent(),
                                   *chooserOwnerPtr, std::move (onChangeCopy),
-                                  screenPosition);
+                                  kind, screenPosition);
                 return;
             }
             if (result == kIdBrowseFile)
@@ -163,18 +201,13 @@ void openPickerMenu (PluginSlot& slot,
                 return;
             }
 
-            // 1..N → KnownPluginList type. Use getIndexChosenByMenu - JUCE's
-            // canonical decoder for menu IDs returned by addToMenu.
-            auto& mgr   = slotPtr->getManagerForUi();
-            auto& known = mgr.getKnownPluginList();
-            const int idx = known.getIndexChosenByMenu (result);
-            if (idx < 0 || idx >= known.getNumTypes()) return;
-
-            const auto* desc = known.getType (idx);
-            if (desc == nullptr) return;
+            // 1..N → index into the filtered, sorted descriptions array.
+            const int idx = result - 1;
+            if (idx < 0 || idx >= sharedDescriptions->size()) return;
+            const auto& desc = sharedDescriptions->getReference (idx);
 
             juce::String error;
-            if (! slotPtr->loadFromDescription (*desc, error))
+            if (! slotPtr->loadFromDescription (desc, error))
             {
                 showLoadFailureAlert (error);
                 return;

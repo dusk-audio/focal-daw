@@ -60,6 +60,21 @@ public:
         setColour (juce::Slider::backgroundColourId,          juce::Colour (0xff1a1a1c));
     }
 
+    // ComboBox + PopupMenu fonts. JUCE's defaults clamp the combo font at
+    // 15 px and the popup-menu font at 17 px - on dense console-style UIs
+    // both feel cramped, especially the long MIDI device names ("PANORAMA
+    // T6 Plugin" etc.) which truncate to "PANO..." in the closed combo.
+    // Explicit overrides make the closed combo legible and the open
+    // dropdown's items comfortable to read.
+    juce::Font getComboBoxFont (juce::ComboBox&) override
+    {
+        return juce::Font (juce::FontOptions (14.0f));
+    }
+    juce::Font getPopupMenuFont() override
+    {
+        return juce::Font (juce::FontOptions (16.5f));
+    }
+
     // Console-style fader cap for vertical linear sliders. The fader rides on
     // a thin centered track; the thumb is a wide horizontal cap with a soft
     // gradient and grip lines, modelled on a real motorized fader handle.

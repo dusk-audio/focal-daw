@@ -39,6 +39,24 @@ public:
     // chooser dismisses. The bool argument is true on success.
     void saveSessionAndThen (std::function<void(bool)> onComplete);
 
+    // App-quit gate. Called from the window's close button. If there are
+    // unsaved changes since the last manual save (autosave file is newer
+    // than session.json), shows a Focal-styled modal with Save / Don't
+    // Save / Cancel; otherwise quits immediately. Industry-standard
+    // dirty-only prompt - matches Logic / Pro Tools / Bitwig.
+    void requestQuit();
+
+    // Stage shutdown across explicit time delays so Mutter / GNOME
+    // don't crash from a tight cascade of native-window destruction
+    // events. Drops plugin editor windows first, hides the main
+    // window after a delay (so Mutter sees UnmapNotify), then quits
+    // after another delay (so Mutter has fully settled before we
+    // start destroying our peer). A previous "drop editors then
+    // immediately systemRequestedQuit" approach was still racing
+    // the compositor and taking the whole GNOME session down hard
+    // enough to require a reboot.
+    void beginMutterSafeShutdown();
+
 private:
     void openAudioSettings();
     void openBounceDialog();
@@ -115,6 +133,7 @@ private:
     EmbeddedModal audioSettingsModal;
     EmbeddedModal mixdownModal;
     EmbeddedModal bounceModal;
+    EmbeddedModal quitModal;
     juce::Label statusLabel;
     std::unique_ptr<ConsoleView> consoleView;
     std::unique_ptr<class TransportBar>     transportBar;

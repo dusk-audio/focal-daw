@@ -97,13 +97,24 @@ void Session::recomputeRtCounters() noexcept
 
 int Session::resolveInputForTrack (int trackIndex) const noexcept
 {
-    const int src = tracks[(size_t) trackIndex].inputSource.load (std::memory_order_relaxed);
+    if (trackIndex < 0 || trackIndex >= kNumTracks) return -1;
+    const auto& t = tracks[(size_t) trackIndex];
+    // MIDI-mode tracks have no audio input - their source is the MIDI
+    // device routed via midiInputIndex into the strip's instrument
+    // plugin. Returning -1 here keeps the audio-thread path that pulls
+    // device-input audio (and the input meter that reports it) silent
+    // for instrument tracks instead of pointlessly metering whatever
+    // audio channel happens to share the track index.
+    if (t.mode.load (std::memory_order_relaxed) == (int) Track::Mode::Midi)
+        return -1;
+    const int src = t.inputSource.load (std::memory_order_relaxed);
     if (src == -2) return trackIndex;  // follow track index
     return src;                         // -1 = none, 0..N = explicit input
 }
 
 int Session::resolveInputRForTrack (int trackIndex) const noexcept
 {
+    if (trackIndex < 0 || trackIndex >= kNumTracks) return -1;
     const auto& t = tracks[(size_t) trackIndex];
     // R channel only valid in stereo mode.
     if (t.mode.load (std::memory_order_relaxed) != (int) Track::Mode::Stereo)

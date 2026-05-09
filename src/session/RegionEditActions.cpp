@@ -122,6 +122,58 @@ bool PasteRegionAction::undo()
     return true;
 }
 
+// ── CreateMidiRegionAction ────────────────────────────────────────────────
+
+CreateMidiRegionAction::CreateMidiRegionAction (Session& s,
+                                                  int t,
+                                                  juce::int64 startSamples,
+                                                  juce::int64 lenSamples,
+                                                  juce::int64 lenTicks)
+    : session (s), trackIdx (t),
+      timelineStart (startSamples),
+      lengthInSamples (lenSamples),
+      lengthInTicks (lenTicks)
+{}
+
+bool CreateMidiRegionAction::perform()
+{
+    if (trackIdx < 0 || trackIdx >= Session::kNumTracks) return false;
+
+    MidiRegion region;
+    region.timelineStart   = timelineStart;
+    region.lengthInSamples = lengthInSamples;
+    region.lengthInTicks   = lengthInTicks;
+
+    int idx = -1;
+    session.track (trackIdx).midiRegions.mutate (
+        [&region, &idx] (std::vector<MidiRegion>& mregs)
+        {
+            mregs.push_back (std::move (region));
+            idx = (int) mregs.size() - 1;
+        });
+    insertedAt = idx;
+    return idx >= 0;
+}
+
+bool CreateMidiRegionAction::undo()
+{
+    if (trackIdx < 0 || trackIdx >= Session::kNumTracks) return false;
+    if (insertedAt < 0) return false;
+
+    bool removed = false;
+    const int target = insertedAt;
+    session.track (trackIdx).midiRegions.mutate (
+        [target, &removed] (std::vector<MidiRegion>& mregs)
+        {
+            if (target >= 0 && target < (int) mregs.size())
+            {
+                mregs.erase (mregs.begin() + target);
+                removed = true;
+            }
+        });
+    return removed;
+}
+
 // ── DeleteRegionAction ────────────────────────────────────────────────────
 
 DeleteRegionAction::DeleteRegionAction (Session& s, AudioEngine& e,
@@ -271,7 +323,7 @@ CloneTrackAction::Impl captureTrack (Track& t, AudioEngine& engine, int idx)
     s.pluginStateB64 = slot.getStateBase64ForSave();
 
     s.regions     = t.regions;
-    s.midiRegions = t.midiRegions;
+    s.midiRegions = t.midiRegions.current();   // snapshot of the live vector
     return s;
 }
 
@@ -334,6 +386,13 @@ void applyTrack (Track& t, AudioEngine& engine, int idx,
     t.midiInputIndex.store (s.midiInputIndex, std::memory_order_relaxed);
     t.midiChannel.store    (s.midiChannel,    std::memory_order_relaxed);
 
+    // recordArmed was written directly above (bypassing setTrackArmed),
+    // which means the armedTrackCount counter Session uses for the
+    // anyTrackArmed() fast-path is out of sync. Resync now so a
+    // subsequent engine.record() doesn't see a stale "no tracks armed"
+    // and silently bail.
+    engine.getSession().recomputeRtCounters();
+
     // Plugin: replay through the live slot. Empty descriptionXml
     // legitimately means "no plugin" - restoreFromSavedState handles
     // that as the unloaded steady state.
@@ -344,8 +403,8 @@ void applyTrack (Track& t, AudioEngine& engine, int idx,
         DBG ("CloneTrackAction: plugin restore failed on strip " << idx
               << " (" << s.pluginDescXml << "): " << err);
 
-    t.regions     = s.regions;
-    t.midiRegions = s.midiRegions;
+    t.regions = s.regions;
+    t.midiRegions.publish (std::make_unique<std::vector<MidiRegion>> (s.midiRegions));
 
     // Persist the post-restore plugin state on Session so a save right
     // after a clone (with no manual edits in between) round-trips

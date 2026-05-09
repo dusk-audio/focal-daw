@@ -1,9 +1,94 @@
 #include "PluginSlot.h"
+#include "AtomicPark.h"
 #include "PluginManager.h"
+#include <cstdio>
 #include <cstring>
 
 namespace focal
 {
+namespace
+{
+// JUCE-hosted plugins often expose more than one bus (main + sidechain on
+// effects, main + aux output on some synths). Our processBlock contract
+// assumes a 2-channel buffer that maps directly to L/R, so any plugin that
+// reports total channels > 2 ends up with its main-output channels outside
+// our buffer and we hear silence. Reduce every non-main bus to disabled
+// (0 channels) so getTotalNumInputChannels / getTotalNumOutputChannels
+// align with what the host actually feeds the plugin.
+//
+// Best-effort: if setBusesLayout rejects the layout (some plugins refuse
+// to disable certain buses), we leave the original layout untouched and
+// move on - the existing channel-count branches in processStereoBlock will
+// at least try the right thing for the most common cases.
+void disableAuxiliaryBuses (juce::AudioPluginInstance& instance)
+{
+    auto layout = instance.getBusesLayout();
+
+    auto disableTail = [] (juce::Array<juce::AudioChannelSet>& buses)
+    {
+        for (int i = 1; i < buses.size(); ++i)
+            buses.set (i, juce::AudioChannelSet::disabled());
+    };
+    disableTail (layout.inputBuses);
+    disableTail (layout.outputBuses);
+
+    instance.setBusesLayout (layout);
+}
+
+// JUCE's Linux VST3 wrapper stores `fileOrIdentifier` as the inner .so
+// path inside the bundle (e.g.
+// "/.../Plugin.vst3/Contents/x86_64-linux/Plugin.so") in the descriptions
+// it produces from fillInPluginDescription / findAllTypesForFile. But the
+// AudioPluginFormatManager's findFormatForDescription gates on
+// `format->fileMightContainThisPluginType`, which for VST3 demands the
+// path end in `.vst3`. So a session that round-trips Diva's description
+// through getDescriptionXmlForSave -> JSON -> loadFromXml fails to load
+// with "No compatible plug-in format exists for this plug-in", AND a
+// freshly-picked-from-cache description has the same problem because the
+// scanned descriptions in KnownPluginList carry the same inner-.so path.
+//
+// Walk parents until we find a `.vst3` ancestor and rewrite the path.
+// No-op when the path is already a `.vst3` (macOS / non-Linux / future
+// JUCE that fixes this).
+void normalizeVst3FileOrIdentifier (juce::PluginDescription& desc)
+{
+    if (desc.pluginFormatName != "VST3") return;
+    if (juce::File (desc.fileOrIdentifier).hasFileExtension (".vst3")) return;
+
+    for (auto walk = juce::File (desc.fileOrIdentifier).getParentDirectory();
+         walk.exists() && walk.getFullPathName().isNotEmpty();
+         walk = walk.getParentDirectory())
+    {
+        if (walk.hasFileExtension (".vst3"))
+        {
+            desc.fileOrIdentifier = walk.getFullPathName();
+            return;
+        }
+        if (walk.getParentDirectory() == walk) break;  // hit fs root
+    }
+}
+
+// One-shot diagnostic so the user (and we) can see exactly what JUCE is
+// reporting after load + bus-layout pass. Helps debug "plugin loaded but
+// silent" cases like an instrument that ends up looking like an effect
+// because of an auto-enabled sidechain bus.
+void logLoadedPlugin (const juce::AudioPluginInstance& instance)
+{
+    juce::PluginDescription desc;
+    instance.fillInPluginDescription (desc);
+    std::fprintf (stderr,
+                  "[Focal/PluginSlot] Loaded \"%s\" (instrument=%d) — "
+                  "totalIn=%d totalOut=%d busesIn=%d busesOut=%d latency=%d\n",
+                  desc.name.toRawUTF8(),
+                  (int) desc.isInstrument,
+                  instance.getTotalNumInputChannels(),
+                  instance.getTotalNumOutputChannels(),
+                  instance.getBusCount (true),
+                  instance.getBusCount (false),
+                  instance.getLatencySamples());
+}
+} // namespace
+
 PluginSlot::~PluginSlot()
 {
     // Audio thread should already be detached by the time this runs (the
@@ -13,12 +98,15 @@ PluginSlot::~PluginSlot()
     currentInstance.store (nullptr, std::memory_order_release);
     if (ownedInstance != nullptr)
         ownedInstance->releaseResources();
+    if (previousInstance != nullptr)
+        previousInstance->releaseResources();
 }
 
 void PluginSlot::prepareToPlay (double sampleRate, int blockSize)
 {
     preparedSampleRate = sampleRate;
     preparedBlockSize  = juce::jmax (1, blockSize);
+    secondsPerTick     = 1.0 / (double) juce::Time::getHighResolutionTicksPerSecond();
 
     // Pre-size the stereo scratch so the audio thread never allocates when
     // a stereo-only plugin is in the slot.
@@ -34,6 +122,12 @@ void PluginSlot::prepareToPlay (double sampleRate, int blockSize)
             ownedInstance->getTotalNumOutputChannels(),
             sampleRate, preparedBlockSize);
         ownedInstance->prepareToPlay (sampleRate, preparedBlockSize);
+        cachedLatencySamples.store (ownedInstance->getLatencySamples(),
+                                      std::memory_order_relaxed);
+    }
+    else
+    {
+        cachedLatencySamples.store (0, std::memory_order_relaxed);
     }
 }
 
@@ -64,11 +158,15 @@ bool PluginSlot::loadFromFile (const juce::File& pluginFile, juce::String& error
         return false;
     }
 
-    // Park the audio thread first. Detach the current instance, release it
-    // off-thread (this destructor can be slow), then spin up the new one.
+    // Park the audio thread first. Detach the current instance, then move
+    // ownership of the prior plugin into previousInstance so its
+    // destructor is deferred until the NEXT swap (see previousInstance
+    // doc comment). This is the difference between a clean Replace and a
+    // crash inside the audio callback under live device operation.
     currentInstance.store (nullptr, std::memory_order_release);
-
-    auto previous = std::move (ownedInstance);  // released after the new load completes
+    if (previousInstance != nullptr)
+        previousInstance->releaseResources();
+    previousInstance = std::move (ownedInstance);
     ownedInstance.reset();
 
     auto fresh = manager->createPluginInstance (pluginFile,
@@ -76,25 +174,32 @@ bool PluginSlot::loadFromFile (const juce::File& pluginFile, juce::String& error
                                                   preparedBlockSize,
                                                   errorMessage);
     if (fresh == nullptr)
-    {
-        if (previous != nullptr) previous->releaseResources();  // explicit
         return false;
-    }
 
+    // Strip auxiliary buses (sidechain inputs, secondary outputs) BEFORE
+    // setPlayConfigDetails so the channel counts we report match the
+    // actual buffer width we'll pass at processBlock time. Without this
+    // an instrument with a sidechain bus auto-enabled would look like
+    // a 2-in / 2-out effect to processStereoBlock and the plugin's main
+    // output would land in channels we never read.
+    disableAuxiliaryBuses (*fresh);
     fresh->setPlayConfigDetails (fresh->getTotalNumInputChannels(),
                                   fresh->getTotalNumOutputChannels(),
                                   preparedSampleRate,
                                   preparedBlockSize);
     if (preparedSampleRate > 0.0)
         fresh->prepareToPlay (preparedSampleRate, preparedBlockSize);
+    logLoadedPlugin (*fresh);
 
     ownedInstance = std::move (fresh);
     blocksSinceLoad     = 0;
     consecutiveOverruns = 0;
     autoBypassed.store (false, std::memory_order_relaxed);
+    if (hostPlayHead != nullptr)
+        ownedInstance->setPlayHead (hostPlayHead);
+    cachedLatencySamples.store (ownedInstance->getLatencySamples(),
+                                  std::memory_order_relaxed);
     currentInstance.store (ownedInstance.get(), std::memory_order_release);
-
-    if (previous != nullptr) previous->releaseResources();
     return true;
 }
 
@@ -107,64 +212,108 @@ bool PluginSlot::loadFromDescription (const juce::PluginDescription& desc,
         return false;
     }
 
+    // Normalize the path - cached KnownPluginList descriptions on Linux
+    // carry the inner-.so path which findFormatForDescription rejects.
+    juce::PluginDescription fixedDesc = desc;
+    normalizeVst3FileOrIdentifier (fixedDesc);
+
     // Same swap-load shape as loadFromFile; just resolves via the
-    // description path inside PluginManager.
+    // description path inside PluginManager. The previous owner moves
+    // into `previousInstance` so its destructor is deferred until the
+    // NEXT swap (or this PluginSlot's destruction). That guarantees at
+    // least one full audio block elapses between the audio thread last
+    // possibly seeing the old pointer and the destructor firing.
     currentInstance.store (nullptr, std::memory_order_release);
-    auto previous = std::move (ownedInstance);
+    if (previousInstance != nullptr)
+        previousInstance->releaseResources();
+    previousInstance = std::move (ownedInstance);
     ownedInstance.reset();
 
-    auto fresh = manager->createPluginInstance (desc, preparedSampleRate,
+    auto fresh = manager->createPluginInstance (fixedDesc, preparedSampleRate,
                                                   preparedBlockSize, errorMessage);
     if (fresh == nullptr)
     {
-        if (previous != nullptr) previous->releaseResources();
+        // No new plugin to install. Slot is now empty (currentInstance is
+        // nullptr, ownedInstance reset). previousInstance still holds the
+        // pre-swap plugin and will be released on the next swap.
         return false;
     }
 
+    // Strip auxiliary buses (sidechain inputs, secondary outputs) BEFORE
+    // setPlayConfigDetails so the channel counts we report match the
+    // actual buffer width we'll pass at processBlock time. Without this
+    // an instrument with a sidechain bus auto-enabled would look like
+    // a 2-in / 2-out effect to processStereoBlock and the plugin's main
+    // output would land in channels we never read.
+    disableAuxiliaryBuses (*fresh);
     fresh->setPlayConfigDetails (fresh->getTotalNumInputChannels(),
                                   fresh->getTotalNumOutputChannels(),
                                   preparedSampleRate,
                                   preparedBlockSize);
     if (preparedSampleRate > 0.0)
         fresh->prepareToPlay (preparedSampleRate, preparedBlockSize);
+    logLoadedPlugin (*fresh);
 
     ownedInstance = std::move (fresh);
     blocksSinceLoad     = 0;
     consecutiveOverruns = 0;
     autoBypassed.store (false, std::memory_order_relaxed);
+    if (hostPlayHead != nullptr)
+        ownedInstance->setPlayHead (hostPlayHead);
+    cachedLatencySamples.store (ownedInstance->getLatencySamples(),
+                                  std::memory_order_relaxed);
     currentInstance.store (ownedInstance.get(), std::memory_order_release);
-
-    if (previous != nullptr) previous->releaseResources();
     return true;
 }
 
 void PluginSlot::unload()
 {
+    // Same deferred-destruction pattern as the load* functions: move
+    // the current owner into previousInstance so its destructor only
+    // fires on the NEXT swap (or this PluginSlot's destruction). Direct
+    // destruction here races the audio thread.
     currentInstance.store (nullptr, std::memory_order_release);
-    if (ownedInstance != nullptr)
-    {
-        ownedInstance->releaseResources();
-        ownedInstance.reset();
-    }
+    cachedLatencySamples.store (0, std::memory_order_relaxed);
+    if (previousInstance != nullptr)
+        previousInstance->releaseResources();
+    previousInstance = std::move (ownedInstance);
+    ownedInstance.reset();
 }
 
-juce::String PluginSlot::getDescriptionXmlForSave() const
+juce::String PluginSlot::getDescriptionXmlForSave()
 {
-    auto* p = currentInstance.load (std::memory_order_acquire);
-    if (p == nullptr) return {};
     juce::PluginDescription desc;
-    p->fillInPluginDescription (desc);
+    bool ok = false;
+    withParkedAtomicPointer (currentInstance, [&] (juce::AudioPluginInstance& p)
+    {
+        p.fillInPluginDescription (desc);
+        ok = true;
+    });
+    if (! ok) return {};
+    // JUCE's Linux VST3 wrapper fills the description with the inner-.so
+    // path. Normalize back to the bundle path so the saved session loads
+    // cleanly without relying on restoreFromSavedState's recovery walk.
+    normalizeVst3FileOrIdentifier (desc);
     if (auto xml = desc.createXml())
         return xml->toString (juce::XmlElement::TextFormat().singleLine());
     return {};
 }
 
-juce::String PluginSlot::getStateBase64ForSave() const
+bool PluginSlot::isLoadedPluginInstrument() const
 {
     auto* p = currentInstance.load (std::memory_order_acquire);
-    if (p == nullptr) return {};
+    if (p == nullptr) return false;
+    juce::PluginDescription desc;
+    p->fillInPluginDescription (desc);
+    return desc.isInstrument;
+}
+
+juce::String PluginSlot::getStateBase64ForSave()
+{
     juce::MemoryBlock mb;
-    p->getStateInformation (mb);
+    auto* p = withParkedAtomicPointer (currentInstance,
+        [&] (juce::AudioPluginInstance& inst) { inst.getStateInformation (mb); });
+    if (p == nullptr) return {};
     return mb.toBase64Encoding();
 }
 
@@ -201,25 +350,28 @@ bool PluginSlot::restoreFromSavedState (const juce::String& descriptionXml,
         return false;
     }
 
-    // Same swap-load shape as loadFromFile: park the audio thread, release
-    // any previously-loaded plugin, instantiate, restore state, install.
+    normalizeVst3FileOrIdentifier (desc);
+
+    // Same swap-load shape as loadFromFile/loadFromDescription, with the
+    // same deferred-destruction-via-previousInstance discipline.
     currentInstance.store (nullptr, std::memory_order_release);
-    auto previous = std::move (ownedInstance);
+    if (previousInstance != nullptr)
+        previousInstance->releaseResources();
+    previousInstance = std::move (ownedInstance);
     ownedInstance.reset();
 
     auto fresh = manager->createPluginInstance (desc, preparedSampleRate,
                                                   preparedBlockSize, errorMessage);
     if (fresh == nullptr)
-    {
-        if (previous != nullptr) previous->releaseResources();
         return false;
-    }
 
+    disableAuxiliaryBuses (*fresh);
     fresh->setPlayConfigDetails (fresh->getTotalNumInputChannels(),
                                   fresh->getTotalNumOutputChannels(),
                                   preparedSampleRate, preparedBlockSize);
     if (preparedSampleRate > 0.0)
         fresh->prepareToPlay (preparedSampleRate, preparedBlockSize);
+    logLoadedPlugin (*fresh);
 
     // Apply the saved state blob (if any).
     if (stateBase64.isNotEmpty())
@@ -230,8 +382,11 @@ bool PluginSlot::restoreFromSavedState (const juce::String& descriptionXml,
     }
 
     ownedInstance = std::move (fresh);
+    if (hostPlayHead != nullptr)
+        ownedInstance->setPlayHead (hostPlayHead);
+    cachedLatencySamples.store (ownedInstance->getLatencySamples(),
+                                  std::memory_order_relaxed);
     currentInstance.store (ownedInstance.get(), std::memory_order_release);
-    if (previous != nullptr) previous->releaseResources();
     return true;
 }
 
@@ -278,6 +433,31 @@ void PluginSlot::processMonoBlock (float* monoData, int numSamples,
         juce::AudioBuffer<float> buf (channels, 1, numSamples);
         p->processBlock (buf, midiMessages);
     }
+    else if (numIn == 0 && numOut >= 1)
+    {
+        // Instrument plugin (no audio input - generates audio from MIDI).
+        // Mirror of the corresponding branch in processStereoBlock so
+        // either entry point handles instruments correctly. Today the
+        // picker filter prevents loading an instrument on a Mono channel
+        // slot, so this branch is unreachable in normal use; keeping it
+        // symmetrical avoids a foot-gun if filtering ever loosens.
+        if (numSamples > stereoScratch.getNumSamples()) return;
+
+        const int procCh = juce::jmin (numOut, stereoScratch.getNumChannels());
+        for (int c = 0; c < procCh; ++c)
+            stereoScratch.clear (c, 0, numSamples);
+
+        float* procPtrs[2] = { stereoScratch.getWritePointer (0),
+                               procCh > 1 ? stereoScratch.getWritePointer (1) : nullptr };
+        juce::AudioBuffer<float> buf (procPtrs, procCh, numSamples);
+        p->processBlock (buf, midiMessages);
+
+        const float* outL = stereoScratch.getReadPointer (0);
+        const float* outR = (numOut >= 2 && procCh >= 2)
+                              ? stereoScratch.getReadPointer (1) : outL;
+        for (int i = 0; i < numSamples; ++i)
+            monoData[i] = (outL[i] + outR[i]) * 0.5f;
+    }
     else
     {
         // Stereo (or wider) plugin: duplicate mono → L+R, process, average
@@ -298,8 +478,8 @@ void PluginSlot::processMonoBlock (float* monoData, int numSamples,
 
     if (bufferMs > 0.0 && blocksSinceLoad >= kGraceBlocks)
     {
-        const double elapsedMs = juce::Time::highResolutionTicksToSeconds (
-            juce::Time::getHighResolutionTicks() - t0) * 1000.0;
+        const double elapsedMs = (double) (juce::Time::getHighResolutionTicks() - t0)
+                                  * secondsPerTick * 1000.0;
         if (elapsedMs > bufferMs * kBudgetFraction)
         {
             if (++consecutiveOverruns >= kMaxConsecutiveOverruns)
@@ -377,6 +557,34 @@ void PluginSlot::processStereoBlock (float* L, float* R, int numSamples,
         std::memcpy (L, outL, sizeof (float) * (size_t) numSamples);
         std::memcpy (R, outR, sizeof (float) * (size_t) numSamples);
     }
+    else if (numIn == 0 && numOut >= 1)
+    {
+        // Instrument plugin (synth / sampler): zero audio inputs, audio
+        // output generated from the MIDI buffer. The buffer width must be
+        // at least numOut so the plugin can write its output channels;
+        // we clear it first because some plugins add to the existing
+        // contents rather than overwriting (a fresh sampler voice on top
+        // of garbage in the scratch would leak the previous block's
+        // contents). Caller (ChannelStrip MIDI path) already cleared L/R
+        // before calling; we still clear stereoScratch because it's
+        // separate storage that may hold the previous block's plugin output.
+        if (numSamples > stereoScratch.getNumSamples()) return;
+
+        const int procCh = juce::jmin (numOut, stereoScratch.getNumChannels());
+        for (int c = 0; c < procCh; ++c)
+            stereoScratch.clear (c, 0, numSamples);
+
+        float* procPtrs[2] = { stereoScratch.getWritePointer (0),
+                               procCh > 1 ? stereoScratch.getWritePointer (1) : nullptr };
+        juce::AudioBuffer<float> buf (procPtrs, procCh, numSamples);
+        p->processBlock (buf, midiMessages);
+
+        const float* outL = stereoScratch.getReadPointer (0);
+        const float* outR = (numOut >= 2 && procCh >= 2)
+                              ? stereoScratch.getReadPointer (1) : outL;
+        std::memcpy (L, outL, sizeof (float) * (size_t) numSamples);
+        std::memcpy (R, outR, sizeof (float) * (size_t) numSamples);
+    }
     else
     {
         // Plugin layout we can't handle (zero outputs, etc.) - bail.
@@ -385,8 +593,8 @@ void PluginSlot::processStereoBlock (float* L, float* R, int numSamples,
 
     if (bufferMs > 0.0 && blocksSinceLoad >= kGraceBlocks)
     {
-        const double elapsedMs = juce::Time::highResolutionTicksToSeconds (
-            juce::Time::getHighResolutionTicks() - t0) * 1000.0;
+        const double elapsedMs = (double) (juce::Time::getHighResolutionTicks() - t0)
+                                  * secondsPerTick * 1000.0;
         if (elapsedMs > bufferMs * kBudgetFraction)
         {
             if (++consecutiveOverruns >= kMaxConsecutiveOverruns)

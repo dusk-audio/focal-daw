@@ -52,7 +52,7 @@ PianoRollComponent::~PianoRollComponent() = default;
 MidiRegion* PianoRollComponent::region()
 {
     if (trackIdx < 0 || trackIdx >= Session::kNumTracks) return nullptr;
-    auto& v = session.track (trackIdx).midiRegions;
+    auto& v = session.track (trackIdx).midiRegions.currentMutable();
     if (regionIdx < 0 || regionIdx >= (int) v.size()) return nullptr;
     return &v[(size_t) regionIdx];
 }
@@ -60,7 +60,7 @@ MidiRegion* PianoRollComponent::region()
 const MidiRegion* PianoRollComponent::region() const
 {
     if (trackIdx < 0 || trackIdx >= Session::kNumTracks) return nullptr;
-    const auto& v = session.track (trackIdx).midiRegions;
+    const auto& v = session.track (trackIdx).midiRegions.current();
     if (regionIdx < 0 || regionIdx >= (int) v.size()) return nullptr;
     return &v[(size_t) regionIdx];
 }
@@ -88,7 +88,7 @@ juce::int64 PianoRollComponent::tickForX (int x) const
 {
     const auto t = (juce::int64) std::round (
         (double) (x - kKeyboardWidth + scrollX) / pixelsPerTick);
-    return juce::jmax<juce::int64> (0, t);
+    return juce::jmax ((juce::int64) 0, t);
 }
 
 void PianoRollComponent::resized() {}
@@ -359,7 +359,7 @@ int PianoRollComponent::hitTestVelocityBar (int x, juce::Rectangle<int> stripAre
 // (the region origin); 0 snapTicks is the "no snap" sentinel.
 static juce::int64 snapTick (juce::int64 t, juce::int64 step)
 {
-    if (step <= 0) return juce::jmax<juce::int64> (0, t);
+    if (step <= 0) return juce::jmax ((juce::int64) 0, t);
     if (t < 0) return 0;
     const auto half = step / 2;
     return ((t + half) / step) * step;
@@ -445,11 +445,11 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
     n.noteNumber = noteNumberForY (e.y);
     n.velocity = 100;
     const auto rawStart = juce::jlimit<juce::int64> (0,
-        juce::jmax<juce::int64> (0, r->lengthInTicks - 1), tickForX (e.x));
+        juce::jmax ((juce::int64) 0, r->lengthInTicks - 1), tickForX (e.x));
     n.startTick = juce::jlimit<juce::int64> (0,
-        juce::jmax<juce::int64> (0, r->lengthInTicks - 1),
+        juce::jmax ((juce::int64) 0, r->lengthInTicks - 1),
         snapTick (rawStart, snapTicks));
-    n.lengthInTicks = juce::jmin<juce::int64> (kMidiTicksPerQuarter,
+    n.lengthInTicks = juce::jmin ((juce::int64) kMidiTicksPerQuarter,
                                                   r->lengthInTicks - n.startTick);
     if (n.lengthInTicks <= 0) return;
     r->notes.push_back (n);
@@ -476,7 +476,7 @@ void PianoRollComponent::mouseDrag (const juce::MouseEvent& e)
         // integer keys.
         const auto newTick = snapTick (tickForX (e.x) - dragOriginTick, snapTicks);
         n.startTick = juce::jlimit<juce::int64> (0,
-            juce::jmax<juce::int64> (0, r->lengthInTicks - n.lengthInTicks), newTick);
+            juce::jmax ((juce::int64) 0, r->lengthInTicks - n.lengthInTicks), newTick);
         n.noteNumber = juce::jlimit (0, kNumKeys - 1, noteNumberForY (e.y));
         repaint();
     }

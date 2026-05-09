@@ -71,7 +71,16 @@ private:
         // When non-null, the editor lives inside this floating window
         // instead of being a child of the lane. Closing the window snaps
         // the editor back inline.
-        juce::Component::SafePointer<juce::DialogWindow> popoutWindow;
+        //
+        // Uses a unique_ptr to a custom DocumentWindow subclass instead
+        // of juce::DialogWindow::launchAsync's auto-deleting raw pointer:
+        // the auto-delete + manual delete race was crashing Mutter on
+        // close (XDestroyWindow landing before XUnmapWindow had been
+        // processed). The custom subclass calls back to AuxLaneComponent
+        // when the user closes the X button so close paths converge on
+        // a single deferred destruction.
+        class AuxPopoutWindow;
+        std::unique_ptr<AuxPopoutWindow> popoutWindow;
     };
     std::array<SlotUI, AuxLaneParams::kMaxLanePlugins> slots;
     std::unique_ptr<juce::FileChooser> activePluginChooser;

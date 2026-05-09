@@ -48,6 +48,13 @@ public:
     // cheap.
     juce::Array<juce::PluginDescription> getInstrumentDescriptions() const;
 
+    // Mirror of getInstrumentDescriptions for the inverse case: effect
+    // plugins (anything with isInstrument == false). Used by the per-
+    // channel picker on Mono / Stereo tracks and by the aux send-FX
+    // picker so instrument plugins (which need MIDI input to produce
+    // sound) don't clutter the list of effect choices.
+    juce::Array<juce::PluginDescription> getEffectDescriptions() const;
+
     // Message-thread only. Mutates knownPluginList and runs synchronous
     // plugin loading (file I/O, JUCE format-manager calls); never call
     // from the audio thread or any RT-sensitive context.

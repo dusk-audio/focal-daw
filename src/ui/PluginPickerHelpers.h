@@ -18,12 +18,24 @@ class PluginSlot;
 // code.
 namespace pluginpicker
 {
+// Filter applied to the installed-plugin list before the picker is
+// shown. Effect slots (channel strip in Mono/Stereo mode, aux send-FX
+// slots) want Effects only - instrument plugins need MIDI input to
+// produce sound and render as no-op or unstable when loaded as audio
+// inserts. Instrument slots (channel strip in MIDI mode) want
+// Instruments only.
+enum class PluginKind { Effects, Instruments };
+
 // Open a popup menu of installed plugins anchored on `target`. On selection:
 //   • 1..N → resolves to KnownPluginList types and loadFromDescription.
 //   • "Scan plugins" → runs the synchronous scan + reopens the picker.
 //   • "Browse for file..." → launches a juce::FileChooser owned by
 //     `chooserOwner` (kept alive across the async callback).
 // `onChange` runs on every successful change to the slot.
+//
+// `kind` filters the visible list: Effects hides instruments,
+// Instruments hides effects. The Browse-for-file path is unfiltered -
+// if the user explicitly browses to a file we trust their choice.
 //
 // `screenPosition` overrides the menu anchor. Pass the cursor's screen
 // position when `target` is a large click-target (full-slot placeholder)
@@ -33,6 +45,7 @@ void openPickerMenu (PluginSlot& slot,
                       juce::Component& target,
                       std::unique_ptr<juce::FileChooser>& chooserOwner,
                       std::function<void()> onChange,
+                      PluginKind kind,
                       juce::Point<int> screenPosition = { -1, -1 });
 
 // Synchronous scan with a tiny modal banner so the user sees progress.

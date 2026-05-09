@@ -70,8 +70,8 @@ void PlaybackEngine::preparePlayback()
             rs.timelineStart   = region.timelineStart;
             rs.lengthInSamples = region.lengthInSamples;
             rs.sourceOffset    = region.sourceOffset;
-            rs.fadeInSamples   = juce::jmax<juce::int64> (0, region.fadeInSamples);
-            rs.fadeOutSamples  = juce::jmax<juce::int64> (0, region.fadeOutSamples);
+            rs.fadeInSamples   = juce::jmax ((juce::int64) 0, region.fadeInSamples);
+            rs.fadeOutSamples  = juce::jmax ((juce::int64) 0, region.fadeOutSamples);
             rs.numChannels     = juce::jlimit (1, 2, region.numChannels);
             // Enforce non-overlap: if fadeIn + fadeOut > length the multiplied
             // ramps produce a gain-notch in the middle. Shrink proportionally

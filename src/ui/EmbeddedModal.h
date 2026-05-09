@@ -31,10 +31,13 @@ public:
     EmbeddedModal()  = default;
     ~EmbeddedModal() override { close(); }
 
-    // Show `body` centred over `parent`. Click on the dim or Esc keypress
-    // fires onDismiss (which usually just calls close()). Caller may
-    // chain teardown logic onto onDismiss for things like clearing
-    // session state when the modal closes.
+    // Show `body` centred over `parent`. The modal takes ownership of
+    // `body`; closing the modal destructs it.
+    //
+    // Click on the dim or Esc keypress fires onDismiss (which usually
+    // just calls close()). Caller may chain teardown logic onto
+    // onDismiss for things like clearing session state when the modal
+    // closes.
     void show (juce::Component& parent,
                std::unique_ptr<juce::Component> body,
                std::function<void()> onDismiss = {})
@@ -73,26 +76,80 @@ public:
         body_->addKeyListener (this);
     }
 
+    // Show a body the modal does NOT own. The caller keeps the body
+    // alive across show / close cycles. Used for plugin editors -
+    // tearing down a plugin's editor window on every close races the
+    // host WM and (on XWayland with OpenGL-heavy plugin GUIs) can crash
+    // the compositor. Keeping the editor alive and only adding /
+    // removing it as a child is significantly more stable.
+    //
+    // Same Esc / click-outside semantics as the owning show().
+    void showBorrowed (juce::Component& parent,
+                       juce::Component& body,
+                       std::function<void()> onDismiss = {})
+    {
+        close();
+        host = &parent;
+        borrowedBody_ = &body;
+        dim_ = std::make_unique<DimOverlay>();
+        dim_->setBounds (parent.getLocalBounds());
+        userOnDismiss = std::move (onDismiss);
+        dim_->onClick = [this]
+        {
+            if (userOnDismiss) userOnDismiss();
+            else close();
+        };
+        parent.addAndMakeVisible (dim_.get());
+
+        const auto bounds = parent.getLocalBounds();
+        const int w = juce::jmax (1, body.getWidth());
+        const int h = juce::jmax (1, body.getHeight());
+        const auto bodyBounds = bounds.withSizeKeepingCentre (
+            juce::jmin (w, bounds.getWidth()  - 16),
+            juce::jmin (h, bounds.getHeight() - 16));
+
+        backdrop_ = std::make_unique<Backdrop>();
+        backdrop_->setBounds (bodyBounds.expanded (kBackdropMargin));
+        parent.addAndMakeVisible (backdrop_.get());
+
+        body.setBounds (bodyBounds);
+        parent.addAndMakeVisible (&body);
+        body.setWantsKeyboardFocus (true);
+        body.grabKeyboardFocus();
+        body.addKeyListener (this);
+    }
+
     // Tear-down. Idempotent. Safe to call when nothing is open.
+    // For owning show(), destructs the body. For showBorrowed(), just
+    // removes the body from the parent without destructing it.
     void close()
     {
         if (host == nullptr) return;
-        if (body_     != nullptr) host->removeChildComponent (body_.get());
+        if (body_         != nullptr) host->removeChildComponent (body_.get());
+        if (borrowedBody_ != nullptr)
+        {
+            borrowedBody_->removeKeyListener (this);
+            host->removeChildComponent (borrowedBody_);
+        }
         if (backdrop_ != nullptr) host->removeChildComponent (backdrop_.get());
         if (dim_      != nullptr) host->removeChildComponent (dim_.get());
         body_.reset();
+        borrowedBody_ = nullptr;
         backdrop_.reset();
         dim_.reset();
         host = nullptr;
         userOnDismiss = {};
     }
 
-    bool isOpen() const noexcept { return body_ != nullptr; }
+    bool isOpen() const noexcept { return body_ != nullptr || borrowedBody_ != nullptr; }
 
     // Body access for typed callers - useful when a host needs to push
     // updates into the panel (e.g. polling a meter). Returns nullptr
     // when nothing is open.
-    juce::Component* getBody() const noexcept { return body_.get(); }
+    juce::Component* getBody() const noexcept
+    {
+        return body_ != nullptr ? body_.get() : borrowedBody_;
+    }
 
 private:
     bool keyPressed (const juce::KeyPress& k, juce::Component*) override
@@ -130,6 +187,7 @@ private:
     std::unique_ptr<DimOverlay> dim_;
     std::unique_ptr<Backdrop> backdrop_;
     std::unique_ptr<juce::Component> body_;
+    juce::Component* borrowedBody_ = nullptr;
     std::function<void()> userOnDismiss;
 };
 } // namespace focal

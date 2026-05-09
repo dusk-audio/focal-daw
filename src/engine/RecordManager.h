@@ -97,6 +97,15 @@ private:
 
     std::array<std::unique_ptr<PerTrackMidi>, Session::kNumTracks> midiCaptures;
 
+    // Audio-thread counter for diagnostic logging. Incremented every
+    // time writeMidiBlock is called with a non-empty buffer; reset at
+    // startRecording, drained + logged at stopRecording. Distinguishes
+    // "track wasn't armed in MIDI mode" (counter 0, cap is null)
+    // from "track was set up but no events arrived" (counter 0, cap
+    // exists) from "events arrived but were filtered out at drain"
+    // (counter > drained.size()).
+    std::array<std::atomic<int>, Session::kNumTracks> writeMidiBlockCalls {};
+
     std::atomic<bool> active { false };
 
     juce::int64 recordStartSample = 0;

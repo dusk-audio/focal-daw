@@ -122,8 +122,54 @@ if(UNIX AND NOT APPLE)
         src/engine/alsa/AlsaAudioIODevice.cpp
         src/engine/alsa/AlsaAudioIODeviceType.cpp
         src/engine/alsa/AlsaPerformanceTest.cpp)
-    target_link_libraries(Focal PRIVATE asound)
+    target_link_libraries(Focal PRIVATE asound X11)
     target_compile_definitions(Focal PRIVATE FOCAL_HAS_FOCAL_ALSA=1)
+
+    # Out-of-process plugin hosting: shared IPC primitives + the
+    # parent-side connection class + a self-test driver. The
+    # focal-plugin-host child binary lives next to Focal in the build
+    # output. Linux-only; the IPC uses memfd_create + futex which are
+    # Linux-specific. Mac/Windows builds keep using the in-process path
+    # (PluginSlot) until the OOP work matures into a portable design.
+    target_sources(Focal PRIVATE
+        src/engine/ipc/RemotePluginConnection.cpp
+        src/engine/ipc/IpcSelfTest.cpp)
+
+    # focal-plugin-host is a JUCE console app so it can pull in the
+    # AudioPluginFormatManager + AudioPluginInstance machinery and
+    # (in Phase 3) the gui_extra modules for plugin-editor embedding.
+    # juce_add_console_app gives us juce::JUCEApplicationBase plumbing
+    # without forcing a UI; we still set NEEDS_*_GRAPHICS / GUI for the
+    # editor module to compile. The host's main() runs JUCE's message
+    # loop on the main thread + a worker juce::Thread for the audio path.
+    juce_add_console_app(focal-plugin-host
+        PRODUCT_NAME "focal-plugin-host"
+        COMPANY_NAME "Marc Korte")
+    target_sources(focal-plugin-host PRIVATE
+        src/engine/ipc/PluginHostMain.cpp)
+    target_compile_features (focal-plugin-host PRIVATE cxx_std_17)
+    target_compile_definitions (focal-plugin-host PRIVATE
+        JUCE_PLUGINHOST_VST3=1
+        JUCE_PLUGINHOST_LV2=1
+        JUCE_PLUGINHOST_AU=0
+        # Stop juce_audio_processors from generating JuceHeader.h-style
+        # stubs and Projucer-only metadata - we drive everything from
+        # CMake.
+        JUCE_DONT_DECLARE_PROJECTINFO=1
+        JUCE_USE_CURL=0
+        JUCE_WEB_BROWSER=0)
+    target_link_libraries(focal-plugin-host PRIVATE
+        juce::juce_audio_processors
+        juce::juce_audio_formats
+        juce::juce_audio_basics
+        juce::juce_events
+        juce::juce_core
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags)
+    target_include_directories(focal-plugin-host PRIVATE src)
+    set_target_properties(focal-plugin-host PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:Focal>")
+    add_dependencies(Focal focal-plugin-host)
 endif()
 
 target_include_directories(Focal PRIVATE
@@ -239,3 +285,9 @@ target_link_libraries(Focal PRIVATE
     juce::juce_recommended_config_flags
     juce::juce_recommended_lto_flags
     juce::juce_recommended_warning_flags)
+
+option(FOCAL_BUILD_TESTS "Build Focal unit tests with Catch2" OFF)
+if(FOCAL_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()

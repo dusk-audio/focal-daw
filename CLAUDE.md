@@ -87,6 +87,52 @@ For plugin instances, audio file readers, or any heavy resource — never block 
 - **Saturation / tubes / transformers** — use the `AnalogEmulation` library at `../plugins/plugins/shared/AnalogEmulation/`. Don't roll your own.
 - **Lock-free skip optimisation** — see the aux DSP-skip in [src/engine/AudioEngine.cpp](src/engine/AudioEngine.cpp). Cheap `findMinAndMax` peak check before the expensive EQ+comp pass; skips when the bus is silent. Smoothers freeze across the skip and resume cleanly.
 
+## Testing
+
+Focal has Catch2 v3 unit tests in [tests/](tests/), gated behind `-DFOCAL_BUILD_TESTS=ON` so the default app build is unaffected. The convention is **narrow-link tests**: each test binary compiles only the `src/...` translation units it actually exercises, plus the JUCE modules those need. No GUI, no Dusk DSP, no full `Focal` target. This keeps the test build fast and isolates failures to the unit under test.
+
+### Build + run
+
+```bash
+cmake -S . -B build-tests -DCMAKE_BUILD_TYPE=Release -DFOCAL_BUILD_TESTS=ON
+cmake --build build-tests --target focal-tests -j$(nproc)
+ctest --test-dir build-tests --output-on-failure
+```
+
+Use `build-tests/` (separate from `build/`) so the two configurations don't fight over CMake cache state.
+
+### When to add a test
+
+- **Any non-trivial DSP change** — new processor, algorithm tweak, or a bug fix where the failure can be expressed as an audio-buffer assertion (silence-in/silence-out, peak ≤ ceiling, gain at unity, latency report matches actual delay, etc.).
+- **Any pure logic change** in `src/session/`, `src/engine/`, or `src/dsp/` that doesn't require a live audio device or Dusk DSP — region edit math, marker math, parameter range conversions, smoother behaviour.
+- **Regression tests for fixed bugs** — write the failing test first, then the fix.
+
+Don't write tests for: UI components (no JUCE message-loop / Component test harness yet), code that requires a real audio device, or anything that would need to spin up the full `AudioEngine` + Dusk DSP chain. Those are integration scope and currently belong in `FOCAL_RUN_SELFTEST=1`.
+
+### How to add a test
+
+1. Drop a new `tests/<unit>_<aspect>.cpp` following the [tests/smoke_brickwall_limiter.cpp](tests/smoke_brickwall_limiter.cpp) pattern (`#include <catch2/...>`, `TEST_CASE(...)`, `REQUIRE(...)` / `REQUIRE_THAT(..., WithinAbs(...))`).
+2. In [tests/CMakeLists.txt](tests/CMakeLists.txt), add the new `.cpp` AND every additional `src/...` source file it pulls in (header-only deps don't need listing). Keep the source list minimal — only what's transitively reachable from the test.
+3. If the unit needs a JUCE module not yet linked (e.g. `juce_dsp` for an oversampler test), add it to `target_link_libraries(focal-tests PRIVATE ...)`.
+4. Build + run the commands above. `catch_discover_tests` registers each `TEST_CASE` with ctest automatically — no manual wiring per test.
+
+### Test style
+
+- **Float comparisons go through `WithinAbs` / `WithinRel`**, never `==`. Pick a tolerance that reflects the math (1e-6 for arithmetic, 1e-4 for accumulated DSP, larger for filters near Nyquist).
+- **Drive DSP through several blocks before measuring** when the unit has lookahead, smoothing, or filter state. Measuring the first block gives misleading results because envelopes / smoothers / delay lines haven't reached steady state.
+- **One concept per `TEST_CASE`.** Use `SECTION` for variations on the same setup, separate `TEST_CASE`s for unrelated scenarios.
+- **No sleeps, no threads, no real audio device.** Tests run in milliseconds and on every build.
+
+### Forced verification (extends rule 4 in Agent directives)
+
+For DSP / engine / session changes, "task complete" now requires the test build + ctest pass in addition to the main build:
+
+```bash
+cmake --build build-tests --target focal-tests -j$(nproc) && ctest --test-dir build-tests --output-on-failure
+```
+
+If a change touches a unit that has tests, those tests must pass. If it touches a unit that *doesn't* have tests but easily could, add at least one.
+
 ## Code style
 
 - **C++17.** No `concepts`, no `std::format`, no `std::ranges` outside of trivially-replaceable uses.

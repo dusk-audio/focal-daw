@@ -25,10 +25,11 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
 
-    void mouseDown  (const juce::MouseEvent&) override;
-    void mouseDrag  (const juce::MouseEvent&) override;
-    void mouseUp    (const juce::MouseEvent&) override;
-    void mouseMove  (const juce::MouseEvent&) override;
+    void mouseDown        (const juce::MouseEvent&) override;
+    void mouseDrag        (const juce::MouseEvent&) override;
+    void mouseUp          (const juce::MouseEvent&) override;
+    void mouseMove        (const juce::MouseEvent&) override;
+    void mouseDoubleClick (const juce::MouseEvent&) override;
 
     static constexpr int kTrackLabelW = 44;
     // Ruler is split into three vertical bands:
@@ -135,6 +136,12 @@ private:
     bool        lastPunchEnabled = false;
     juce::int64 lastPunchIn      = -1;
     juce::int64 lastPunchOut     = -1;
+
+    // Transport-state cache so the timer can full-repaint on
+    // Stopped <-> Recording transitions - the existing thin-band
+    // playhead repaint isn't wide enough to cover the live-recording
+    // overlay's initial paint at the moment of Record-press.
+    bool        lastIsRecording  = false;
 
     // In-flight region drag. Captured on mouseDown when the click hits a
     // region's body or edge gutter; updated on mouseDrag; finalised on

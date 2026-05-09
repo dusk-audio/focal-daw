@@ -205,6 +205,17 @@ void TapeStrip::timerCallback()
         stateChanged = true;
     }
 
+    // Force a full repaint on the Stopped <-> Recording transition so
+    // the live-recording overlay paints / clears the moment the user
+    // presses Record / Stop, not a few frames later when the playhead
+    // band-repaint catches up.
+    const bool nowRec = transport.isRecording();
+    if (nowRec != lastIsRecording)
+    {
+        lastIsRecording = nowRec;
+        stateChanged = true;
+    }
+
     if (stateChanged) repaint();
 
     const auto now = engine.getTransport().getPlayhead();
@@ -490,7 +501,7 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
         {
             const auto row = rowBounds (t);
             if (! row.contains (e.x, e.y)) continue;
-            const auto& mr = session.track (t).midiRegions;
+            const auto& mr = session.track (t).midiRegions.current();
             for (int i = (int) mr.size() - 1; i >= 0; --i)
             {
                 const auto& r = mr[(size_t) i];
@@ -846,6 +857,93 @@ void TapeStrip::mouseUp (const juce::MouseEvent& e)
     repaint();
 }
 
+void TapeStrip::mouseDoubleClick (const juce::MouseEvent& e)
+{
+    // Right-click double doesn't make sense for create-region.
+    if (e.mods.isRightButtonDown()) return;
+
+    auto col = tracksColumnBounds();
+    if (! col.contains (e.x, e.y)) return;
+
+    // Find which track row was double-clicked.
+    int trackIdx = -1;
+    for (int t = 0; t < Session::kNumTracks; ++t)
+    {
+        if (rowBounds (t).contains (e.x, e.y))
+        {
+            trackIdx = t;
+            break;
+        }
+    }
+    if (trackIdx < 0) return;
+
+    // Only MIDI-mode tracks can host MIDI regions. Audio tracks need
+    // a recorded WAV; doubling on those is currently a no-op.
+    if (session.track (trackIdx).mode.load (std::memory_order_relaxed)
+        != (int) Track::Mode::Midi)
+        return;
+
+    // Don't create on top of an existing region - that's the click-to-
+    // edit path. mouseDown's MIDI hit-test would have already opened
+    // the piano roll for that region, so the second click of the
+    // double-click won't reach here unless the user clicked empty.
+    {
+        const auto& mr = session.track (trackIdx).midiRegions.current();
+        for (const auto& r : mr)
+        {
+            const int x0 = xForSample (r.timelineStart);
+            const int x1 = xForSample (r.timelineStart + r.lengthInSamples);
+            if (e.x >= x0 && e.x <= x1) return;
+        }
+    }
+
+    // Create an empty 4-bar region at the click position. The piano
+    // roll is region-driven (no "open empty piano roll on a track" path
+    // exists yet) so this doubles as a manual entry point for users
+    // whose recording captures aren't reaching the lane.
+    //
+    // Wrapped in a CreateMidiRegionAction so undo / redo work the same
+    // way they do for every other timeline mutation (paste, delete,
+    // split, marker add). Without this the user could create a region
+    // and then have no way to undo if they wanted to redo a recording
+    // capture into the same slot.
+    const auto sr  = engine.getCurrentSampleRate();
+    const float bpm = session.tempoBpm.load (std::memory_order_relaxed);
+    const int beatsBar = juce::jmax (1, session.beatsPerBar.load (std::memory_order_relaxed));
+    if (sr <= 0.0 || bpm <= 0.0f) return;
+
+    juce::int64 startSample = juce::jmax ((juce::int64) 0, sampleAtX (e.x));
+
+    // Snap start to the nearest beat when snap-to-grid is on. Mirrors
+    // the drag-snap pattern at line ~641 but operates on an absolute
+    // position rather than a delta - new regions have no prior origin
+    // to be "mid-step" relative to. The user can override by toggling
+    // snap off before the double-click.
+    if (session.snapToGrid && bpm > 0.0f)
+    {
+        const juce::int64 step = (juce::int64) (sr * 60.0 / (double) bpm);
+        if (step > 0)
+            startSample = ((startSample + step / 2) / step) * step;
+    }
+
+    const juce::int64 fourBarsSamples =
+        (juce::int64) (sr * 60.0 / (double) bpm * (double) beatsBar * 4.0);
+    const juce::int64 fourBarsTicks = samplesToTicks (fourBarsSamples, sr, bpm);
+
+    auto action = std::make_unique<CreateMidiRegionAction> (
+        session, trackIdx, startSample, fourBarsSamples, fourBarsTicks);
+    auto* actionRaw = action.get();
+
+    auto& um = engine.getUndoManager();
+    if (! um.perform (action.release(), "Create MIDI region"))
+        return;
+
+    repaint();
+    const int newRegionIdx = actionRaw->getInsertedIndex();
+    if (onMidiRegionClicked && newRegionIdx >= 0)
+        onMidiRegionClicked (trackIdx, newRegionIdx);
+}
+
 void TapeStrip::mouseMove (const juce::MouseEvent& e)
 {
     // Cursor feedback so the user can tell where edges/body are without
@@ -1071,7 +1169,7 @@ void TapeStrip::paint (juce::Graphics& g)
         // regions; the inside paints a stylised note-pile (small dots at
         // each note's start position, vertically distributed by pitch)
         // so the user can read note density at a glance from the timeline.
-        const auto& midiRegions = session.track (t).midiRegions;
+        const auto& midiRegions = session.track (t).midiRegions.current();
         for (const auto& region : midiRegions)
         {
             const int x0 = xForSample (region.timelineStart);
@@ -1155,6 +1253,60 @@ void TapeStrip::paint (juce::Graphics& g)
 
             g.setColour (juce::Colour (0xff7fdfff).withAlpha (0.85f));  // soft cyan
             g.strokePath (curve, juce::PathStrokeType (1.2f));
+        }
+
+        // ── Live-recording overlay ─────────────────────────────────
+        // Translucent red block from record-start to current playhead
+        // on tracks that are armed while the transport is recording.
+        // Until full waveform / note rendering during capture is in
+        // place this gives the user a visible "yes, recording is
+        // happening, here's how much you've captured" indicator
+        // without waiting for stopRecording to publish a region.
+        if (engine.getTransport().isRecording()
+            && session.track (t).recordArmed.load (std::memory_order_relaxed))
+        {
+            const auto recStart = session.lastRecordPointSamples.load (
+                                      std::memory_order_relaxed);
+            const auto playhead = engine.getTransport().getPlayhead();
+            if (playhead > recStart)
+            {
+                const int x0 = xForSample (recStart);
+                const int x1 = xForSample (playhead);
+                if (x1 > col.getX() && x0 < col.getRight())
+                {
+                    auto liveRect = juce::Rectangle<int> (x0, row.getY() + 1,
+                                                            juce::jmax (2, x1 - x0),
+                                                            row.getHeight() - 2)
+                                      .getIntersection (col.withTrimmedTop (1)
+                                                            .withTrimmedBottom (1));
+                    if (! liveRect.isEmpty())
+                    {
+                        // Recording-red wash so it reads "active capture"
+                        // even when the row is otherwise empty.
+                        g.setColour (juce::Colour (0xffd03030).withAlpha (0.30f));
+                        g.fillRoundedRectangle (liveRect.toFloat(), 2.0f);
+                        g.setColour (juce::Colour (0xffd03030).withAlpha (0.95f));
+                        g.drawRoundedRectangle (liveRect.toFloat().reduced (0.5f),
+                                                  2.0f, 1.0f);
+                        // "REC" pill at the left edge of the active block,
+                        // big enough to read but small enough not to crowd
+                        // tiny takes near the start of a session.
+                        if (liveRect.getWidth() >= 26)
+                        {
+                            const auto pill = liveRect.withWidth (24)
+                                                  .withTrimmedTop (2)
+                                                  .withTrimmedBottom (2)
+                                                  .toFloat();
+                            g.setColour (juce::Colour (0xffd03030));
+                            g.fillRoundedRectangle (pill, 2.0f);
+                            g.setColour (juce::Colours::white);
+                            g.setFont (juce::Font (juce::FontOptions (10.0f, juce::Font::bold)));
+                            g.drawText ("REC", pill.toNearestInt(),
+                                          juce::Justification::centred, false);
+                        }
+                    }
+                }
+            }
         }
     }
 

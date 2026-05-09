@@ -120,15 +120,22 @@ void SystemStatusBar::paint (juce::Graphics& g)
     bounds.removeFromRight (8);  // small gap
 
     // Chord readout in the middle column. Held-notes-driven; blank when
-    // nothing's playing or fewer than 2 notes are held. Centre-aligned
-    // and a touch brighter than the telemetry text so it reads as the
-    // performance signal instead of mixing with the system data.
+    // nothing's playing or fewer than 2 notes are held. Bigger font + a
+    // touch brighter than the telemetry text so it reads as the
+    // performance signal instead of mixing with the system data. Wider
+    // bounds to accommodate the larger glyphs (slash chords like "Cmaj7/G"
+    // need the room).
     if (chordInfo.isNotEmpty())
     {
-        auto chordBounds = bounds.removeFromRight (160);
+        auto chordBounds = bounds.removeFromRight (220);
         bounds.removeFromRight (8);
-        g.setColour (juce::Colour (0xffd0d0d8));
+        g.setColour (juce::Colour (0xffe8e8f0));
+        g.setFont (juce::Font (juce::FontOptions (juce::Font::getDefaultMonospacedFontName(),
+                                                    18.0f, juce::Font::bold)));
         g.drawText (chordInfo, chordBounds, juce::Justification::centredRight, false);
+        // Restore the status-bar font for the audio / DSP segments below.
+        g.setFont (juce::Font (juce::FontOptions (juce::Font::getDefaultMonospacedFontName(),
+                                                    12.0f, juce::Font::plain)));
     }
 
     // Audio segment goes red when the device opened with no outputs -

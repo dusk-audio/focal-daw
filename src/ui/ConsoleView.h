@@ -57,6 +57,14 @@ public:
     void setBank (int bankIndex);
     int  getBank() const noexcept { return currentBank; }
 
+    // Force-close every per-strip plugin editor window before app
+    // shutdown. Called from MainComponent::requestQuit's Save / Don't
+    // Save handlers BEFORE systemRequestedQuit() so the editor windows
+    // (real top-level juce::DocumentWindows on Linux) die in a quiet
+    // window rather than racing Mutter's own teardown of our main
+    // window. Safe to call when no editors are open.
+    void dropAllPluginEditors();
+
 private:
     Session& sessionRef;
 

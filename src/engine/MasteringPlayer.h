@@ -28,7 +28,7 @@ public:
     bool loadFile (const juce::File& file);
     void unloadFile();
 
-    bool        isLoaded() const noexcept    { return reader != nullptr; }
+    bool        isLoaded() const noexcept    { return ownedReader != nullptr; }
     juce::File  getLoadedFile() const         { return loadedFile; }
     juce::int64 getLengthSamples() const noexcept;
     double      getSourceSampleRate() const noexcept;
@@ -48,7 +48,20 @@ public:
 
 private:
     juce::AudioFormatManager formatManager;
-    std::unique_ptr<juce::AudioFormatReader> reader;
+
+    // Owning pointer - mutated only on the message thread (loadFile /
+    // unloadFile). The audio thread reads via the `currentReader` atomic
+    // below (PluginSlot pattern). `previousReader` keeps the prior owned
+    // reader alive across one publish so the audio thread can safely finish
+    // its current block with the old pointer; the next publish drops it.
+    std::unique_ptr<juce::AudioFormatReader> ownedReader;
+    std::unique_ptr<juce::AudioFormatReader> previousReader;
+
+    // Audio-thread-safe view of `ownedReader.get()`. The audio thread
+    // acquire-loads this once per block and uses the resulting pointer for
+    // the rest of the block. Message-thread writes are release-stores.
+    std::atomic<juce::AudioFormatReader*> currentReader { nullptr };
+
     juce::File loadedFile;
 
     juce::AudioBuffer<float> readScratch;  // 2 ch × maxBlockSize, pre-allocated

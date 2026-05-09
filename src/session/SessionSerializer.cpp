@@ -1,10 +1,36 @@
 #include "SessionSerializer.h"
+#include <juce_audio_devices/juce_audio_devices.h>
 
 namespace focal
 {
 namespace
 {
 constexpr int kFormatVersion = 1;
+
+// Resolve a MIDI device identifier (saved with a prior session) to its
+// current index in juce::MidiInput::getAvailableDevices(). Returns -1 if
+// the identifier doesn't match any currently-available device. The lookup
+// is O(N) in the device list but called at most once per track on load,
+// which is negligible compared to the JSON parse.
+int resolveMidiInputIndexByIdentifier (const juce::String& identifier)
+{
+    if (identifier.isEmpty()) return -1;
+    const auto devices = juce::MidiInput::getAvailableDevices();
+    for (int i = 0; i < devices.size(); ++i)
+        if (devices[i].identifier == identifier)
+            return i;
+    return -1;
+}
+
+int resolveMidiOutputIndexByIdentifier (const juce::String& identifier)
+{
+    if (identifier.isEmpty()) return -1;
+    const auto devices = juce::MidiOutput::getAvailableDevices();
+    for (int i = 0; i < devices.size(); ++i)
+        if (devices[i].identifier == identifier)
+            return i;
+    return -1;
+}
 
 juce::String colourToHex (juce::Colour c)
 {
@@ -62,8 +88,16 @@ juce::DynamicObject::Ptr trackToObject (const Track& t)
     obj->setProperty ("print_effects",  t.printEffects.load());
     obj->setProperty ("input_source",   t.inputSource.load());
     obj->setProperty ("input_source_r", t.inputSourceR.load());
-    obj->setProperty ("midi_input_idx", t.midiInputIndex.load());
-    obj->setProperty ("midi_channel",   t.midiChannel.load());
+    // midi_input_idx is the legacy raw-int form (kept for back-compat
+    // reading); midi_input_id is the stable identifier we resolve back to
+    // an index on load. Older sessions without the id field fall through
+    // to the int.
+    obj->setProperty ("midi_input_idx",  t.midiInputIndex.load());
+    obj->setProperty ("midi_input_id",   t.midiInputIdentifier);
+    // External-MIDI-output side. Same shape as the input fields above.
+    obj->setProperty ("midi_output_idx", t.midiOutputIndex.load());
+    obj->setProperty ("midi_output_id",  t.midiOutputIdentifier);
+    obj->setProperty ("midi_channel",    t.midiChannel.load());
     obj->setProperty ("track_mode",     t.mode.load());
 
     juce::Array<juce::var> buses;
@@ -164,10 +198,10 @@ juce::DynamicObject::Ptr trackToObject (const Track& t)
     // CCs are flat arrays so the JSON stays compact even on dense regions.
     // Only serialised when the track actually has MIDI data; absent for
     // audio tracks so existing sessions don't gain noise.
-    if (! t.midiRegions.empty())
+    if (! t.midiRegions.current().empty())
     {
         juce::Array<juce::var> midiRegions;
-        for (auto& r : t.midiRegions)
+        for (const auto& r : t.midiRegions.current())
         {
             auto* rObj = new juce::DynamicObject();
             rObj->setProperty ("timeline_start",   (juce::int64) r.timelineStart);
@@ -340,7 +374,39 @@ void restoreTrack (Track& t, const juce::var& v)
     setBool  (t.printEffects,       "print_effects");
     setInt   (t.inputSource,        "input_source");
     setInt   (t.inputSourceR,       "input_source_r");
-    setInt   (t.midiInputIndex,     "midi_input_idx");
+    // MIDI input: prefer the stable identifier when present (resolved to
+    // the current device list's index). Fall back to the legacy raw int
+    // for sessions saved before identifiers existed, OR when the saved
+    // identifier doesn't match any currently-available device (USB MIDI
+    // gear unplugged, different machine, etc.) so the user can re-pick
+    // without the index pointing at a wrong device.
+    if (v.hasProperty ("midi_input_id"))
+    {
+        t.midiInputIdentifier = v["midi_input_id"].toString();
+        const int resolved = resolveMidiInputIndexByIdentifier (t.midiInputIdentifier);
+        if (resolved >= 0)
+            t.midiInputIndex.store (resolved, std::memory_order_relaxed);
+        else
+            t.midiInputIndex.store (-1, std::memory_order_relaxed);
+    }
+    else
+    {
+        setInt (t.midiInputIndex, "midi_input_idx");
+        t.midiInputIdentifier = juce::String();
+    }
+    // Same shape on the external-MIDI-output side.
+    if (v.hasProperty ("midi_output_id"))
+    {
+        t.midiOutputIdentifier = v["midi_output_id"].toString();
+        const int resolved = resolveMidiOutputIndexByIdentifier (t.midiOutputIdentifier);
+        t.midiOutputIndex.store (resolved >= 0 ? resolved : -1,
+                                  std::memory_order_relaxed);
+    }
+    else
+    {
+        setInt (t.midiOutputIndex, "midi_output_idx");
+        t.midiOutputIdentifier = juce::String();
+    }
     setInt   (t.midiChannel,        "midi_channel");
     setInt   (t.mode,               "track_mode");
 
@@ -516,8 +582,8 @@ void restoreTrack (Track& t, const juce::var& v)
             n.channel       = juce::jlimit (1, 16,  nv.hasProperty ("ch")    ? (int) nv["ch"]    : 1);
             n.noteNumber    = juce::jlimit (0, 127, nv.hasProperty ("note")  ? (int) nv["note"]  : 60);
             n.velocity      = juce::jlimit (1, 127, nv.hasProperty ("vel")   ? (int) nv["vel"]   : 100);
-            n.startTick     = juce::jmax<juce::int64> (0, nv.hasProperty ("start") ? (juce::int64) nv["start"] : 0);
-            n.lengthInTicks = juce::jmax<juce::int64> (0, nv.hasProperty ("len")   ? (juce::int64) nv["len"]   : 0);
+            n.startTick     = juce::jmax ((juce::int64) 0, nv.hasProperty ("start") ? (juce::int64) nv["start"] : 0);
+            n.lengthInTicks = juce::jmax ((juce::int64) 0, nv.hasProperty ("len")   ? (juce::int64) nv["len"]   : 0);
             dst.push_back (n);
         }
     };
@@ -533,12 +599,15 @@ void restoreTrack (Track& t, const juce::var& v)
             c.channel    = juce::jlimit (1, 16,  cv.hasProperty ("ch")   ? (int) cv["ch"]   : 1);
             c.controller = juce::jlimit (0, 127, cv.hasProperty ("ctrl") ? (int) cv["ctrl"] : 0);
             c.value      = juce::jlimit (0, 127, cv.hasProperty ("val")  ? (int) cv["val"]  : 0);
-            c.atTick     = juce::jmax<juce::int64> (0, cv.hasProperty ("at")   ? (juce::int64) cv["at"] : 0);
+            c.atTick     = juce::jmax ((juce::int64) 0, cv.hasProperty ("at")   ? (juce::int64) cv["at"] : 0);
             dst.push_back (c);
         }
     };
 
-    t.midiRegions.clear();
+    // Build the regions list off-snapshot, then publish atomically so the
+    // audio thread either sees the prior set or the new one - never a
+    // half-loaded state.
+    auto freshMidi = std::make_unique<std::vector<MidiRegion>>();
     if (auto midiRegions = v["midi_regions"]; midiRegions.isArray())
     {
         for (int i = 0; i < midiRegions.size(); ++i)
@@ -566,9 +635,10 @@ void restoreTrack (Track& t, const juce::var& v)
                 }
             }
 
-            t.midiRegions.push_back (std::move (r));
+            freshMidi->push_back (std::move (r));
         }
     }
+    t.midiRegions.publish (std::move (freshMidi));
 }
 
 void restoreBus (Bus& a, const juce::var& v)
@@ -694,9 +764,8 @@ bool SessionSerializer::save (const Session& s, const juce::File& target)
     tport->setProperty ("metronome_enabled", s.metronomeEnabled.load());
     tport->setProperty ("metronome_vol_db",  s.metronomeVolDb.load());
     tport->setProperty ("count_in_enabled",  s.countInEnabled.load());
-    // Tascam-style transport-cluster state. Persist so the user's
-    // jumpback amount and last-record point survive a reload.
-    tport->setProperty ("jumpback_seconds",   (double) s.jumpbackSeconds.load());
+    // Tascam-style transport-cluster state. The last-record point is
+    // what the FFWD-while-stopped tap (= TO LAST REC) snaps to.
     tport->setProperty ("last_record_point",  (juce::int64) s.lastRecordPointSamples.load());
     tport->setProperty ("pre_roll_seconds",   (double) s.preRollSeconds.load());
     tport->setProperty ("post_roll_seconds",  (double) s.postRollSeconds.load());
@@ -705,10 +774,10 @@ bool SessionSerializer::save (const Session& s, const juce::File& target)
     // trigger) source onto a target enum + per-strip index. Only emit
     // when at least one binding exists so the JSON stays compact for
     // sessions that never wire a controller.
-    if (! s.midiBindings.empty())
+    if (! s.midiBindings.current().empty())
     {
         juce::Array<juce::var> arr;
-        for (const auto& b : s.midiBindings)
+        for (const auto& b : s.midiBindings.current())
         {
             auto* o = new juce::DynamicObject();
             o->setProperty ("channel",     b.channel);
@@ -854,12 +923,19 @@ bool SessionSerializer::load (Session& s, const juce::File& source)
         if (tport.hasProperty ("metronome_enabled")) s.metronomeEnabled.store ((bool)   tport["metronome_enabled"]);
         if (tport.hasProperty ("metronome_vol_db"))  s.metronomeVolDb.store   ((float) (double) tport["metronome_vol_db"]);
         if (tport.hasProperty ("count_in_enabled"))  s.countInEnabled.store   ((bool)   tport["count_in_enabled"]);
-        if (tport.hasProperty ("jumpback_seconds"))  s.jumpbackSeconds.store  ((float)  (double) tport["jumpback_seconds"]);
+        // jumpback_seconds was a previous-version Session field powering
+        // the standalone "« 5s" jumpback button; the button has been
+        // removed in favor of the DP-24SD-style multi-action REW. We
+        // silently ignore the legacy field on load so older session.json
+        // files still parse cleanly.
         if (tport.hasProperty ("last_record_point")) s.lastRecordPointSamples.store ((juce::int64) tport["last_record_point"]);
         if (tport.hasProperty ("pre_roll_seconds"))  s.preRollSeconds.store   ((float)  (double) tport["pre_roll_seconds"]);
         if (tport.hasProperty ("post_roll_seconds")) s.postRollSeconds.store  ((float)  (double) tport["post_roll_seconds"]);
 
-        s.midiBindings.clear();
+        // Build the bindings list off-snapshot, then publish atomically so
+        // the audio thread either sees the prior set or the new one - never
+        // a half-loaded state.
+        auto fresh = std::make_unique<std::vector<MidiBinding>>();
         if (auto arr = tport["midi_bindings"]; arr.isArray())
         {
             for (int i = 0; i < arr.size(); ++i)
@@ -898,9 +974,10 @@ bool SessionSerializer::load (Session& s, const juce::File& source)
                 b.targetIndex = juce::jlimit (0, Session::kNumTracks - 1,
                     v.hasProperty ("target_idx") ? (int) v["target_idx"] : 0);
                 if (b.isValid())
-                    s.midiBindings.push_back (b);
+                    fresh->push_back (b);
             }
         }
+        s.midiBindings.publish (std::move (fresh));
         if (tport.hasProperty ("oversampling_factor"))
         {
             const int f = (int) tport["oversampling_factor"];

@@ -20,7 +20,10 @@ bool RecordManager::startRecording (double sampleRate, juce::int64 startSample)
     if (active.load (std::memory_order_relaxed))
         return true;
     if (! session.anyTrackArmed())
+    {
+        std::fprintf (stderr, "[Focal/RecordManager] startRecording: anyTrackArmed=false; aborting.\n");
         return false;
+    }
 
     auto audioDir = session.getAudioDirectory();
     if (! audioDir.exists())
@@ -28,6 +31,12 @@ bool RecordManager::startRecording (double sampleRate, juce::int64 startSample)
 
     recordStartSample = startSample;
     recordSampleRate  = sampleRate;
+
+    // Reset the per-track audio-thread counters before the audio
+    // callback can start writing - the counter readout at stopRecording
+    // depends on a clean slate per take.
+    for (auto& c : writeMidiBlockCalls)
+        c.store (0, std::memory_order_relaxed);
 
     const auto stamp = juce::Time::getCurrentTime().formatted ("%Y%m%d-%H%M%S");
 
@@ -46,6 +55,12 @@ bool RecordManager::startRecording (double sampleRate, juce::int64 startSample)
             auto cap = std::make_unique<PerTrackMidi>();
             cap->fifo.reset();
             midiCaptures[(size_t) t] = std::move (cap);
+            std::fprintf (stderr,
+                          "[Focal/RecordManager] startRecording: track %d set up MIDI capture "
+                          "(midiInputIndex=%d, midiChannel=%d).\n",
+                          t + 1,
+                          session.track (t).midiInputIndex.load (std::memory_order_relaxed),
+                          session.track (t).midiChannel.load (std::memory_order_relaxed));
             continue;
         }
 
@@ -99,7 +114,7 @@ void RecordManager::stopRecording (juce::int64 endSample)
     // ordering doesn't matter, but doing MIDI first keeps the two paths
     // visibly separate and the failure cases isolated.
     const float bpm = session.tempoBpm.load (std::memory_order_relaxed);
-    const juce::int64 totalSamples = juce::jmax<juce::int64> (1, endSample - recordStartSample);
+    const juce::int64 totalSamples = juce::jmax ((juce::int64) 1, endSample - recordStartSample);
     for (int t = 0; t < Session::kNumTracks; ++t)
     {
         auto& cap = midiCaptures[(size_t) t];
@@ -119,6 +134,21 @@ void RecordManager::stopRecording (juce::int64 endSample)
         for (int i = 0; i < sz1; ++i) drained.push_back (cap->events[(size_t) (s1 + i)]);
         for (int i = 0; i < sz2; ++i) drained.push_back (cap->events[(size_t) (s2 + i)]);
         cap->fifo.finishedRead (sz1 + sz2);
+
+        // Diagnostic: how many MIDI events did we actually capture for
+        // this track? 0 means perTrackMidiScratch was empty across the
+        // whole take - usually means the track's midiInputIndex was -1
+        // (no MIDI input picked in the dropdown), so the per-track filter
+        // never copied any events into the scratch even though the chord
+        // analyzer (which reads engine-wide perInputMidi) might have
+        // shown chords.
+        std::fprintf (stderr,
+                      "[Focal/RecordManager] Track %d MIDI capture: %d events drained, "
+                      "writeMidiBlock-calls=%d, %d total samples, midiInputIndex=%d\n",
+                      t + 1, (int) drained.size(),
+                      writeMidiBlockCalls[(size_t) t].load (std::memory_order_relaxed),
+                      (int) totalSamples,
+                      session.track (t).midiInputIndex.load (std::memory_order_relaxed));
 
         if (drained.empty())
         {
@@ -166,7 +196,7 @@ void RecordManager::stopRecording (juce::int64 endSample)
                 n.velocity   = it->second.velocity;
                 n.startTick  = samplesToTicks (it->second.startSample, recordSampleRate, bpm);
                 const auto offTick = samplesToTicks (ev.samplePos, recordSampleRate, bpm);
-                n.lengthInTicks = juce::jmax<juce::int64> (1, offTick - n.startTick);
+                n.lengthInTicks = juce::jmax ((juce::int64) 1, offTick - n.startTick);
                 region.notes.push_back (n);
                 pending.erase (it);
             }
@@ -197,7 +227,7 @@ void RecordManager::stopRecording (juce::int64 endSample)
             n.noteNumber = (key % 256);
             n.velocity   = pn.velocity;
             n.startTick  = samplesToTicks (pn.startSample, recordSampleRate, bpm);
-            n.lengthInTicks = juce::jmax<juce::int64> (1,
+            n.lengthInTicks = juce::jmax ((juce::int64) 1,
                 region.lengthInTicks - n.startTick);
             region.notes.push_back (n);
         }
@@ -219,27 +249,30 @@ void RecordManager::stopRecording (juce::int64 endSample)
         // a tick-domain split routine that's out of scope here.
         const juce::int64 newStart = region.timelineStart;
         const juce::int64 newEnd   = newStart + region.lengthInSamples;
-        auto& mregs = session.track (t).midiRegions;
-        for (auto it = mregs.begin(); it != mregs.end(); )
-        {
-            const auto exStart = it->timelineStart;
-            const auto exEnd   = it->timelineStart + it->lengthInSamples;
-            const bool fullyContained = exStart >= newStart && exEnd <= newEnd;
-            if (! fullyContained) { ++it; continue; }
+        session.track (t).midiRegions.mutate (
+            [&region, newStart, newEnd] (std::vector<MidiRegion>& mregs)
+            {
+                for (auto it = mregs.begin(); it != mregs.end(); )
+                {
+                    const auto exStart = it->timelineStart;
+                    const auto exEnd   = it->timelineStart + it->lengthInSamples;
+                    const bool fullyContained = exStart >= newStart && exEnd <= newEnd;
+                    if (! fullyContained) { ++it; continue; }
 
-            MidiTakeRef ref;
-            ref.lengthInTicks = it->lengthInTicks;
-            ref.notes = std::move (it->notes);
-            ref.ccs   = std::move (it->ccs);
-            region.previousTakes.push_back (std::move (ref));
+                    MidiTakeRef ref;
+                    ref.lengthInTicks = it->lengthInTicks;
+                    ref.notes = std::move (it->notes);
+                    ref.ccs   = std::move (it->ccs);
+                    region.previousTakes.push_back (std::move (ref));
 
-            for (auto& deeper : it->previousTakes)
-                region.previousTakes.push_back (std::move (deeper));
+                    for (auto& deeper : it->previousTakes)
+                        region.previousTakes.push_back (std::move (deeper));
 
-            it = mregs.erase (it);
-        }
+                    it = mregs.erase (it);
+                }
 
-        mregs.push_back (std::move (region));
+                mregs.push_back (std::move (region));
+            });
 
         cap.reset();
     }
@@ -284,8 +317,8 @@ void RecordManager::stopRecording (juce::int64 endSample)
             // length so a punch shorter than 20 ms still gets symmetric
             // ramps without the in/out fades overlapping each other.
             const juce::int64 fadeSamplesNominal = (juce::int64) (recordSampleRate * 0.010);
-            const juce::int64 fadeSamples = juce::jmax<juce::int64> (
-                0, juce::jmin (fadeSamplesNominal, region.lengthInSamples / 2));
+            const juce::int64 fadeSamples = juce::jmax (
+                (juce::int64) 0, juce::jmin (fadeSamplesNominal, region.lengthInSamples / 2));
 
             // Pass 1 — fully-contained takes get absorbed into the new
             // region's previousTakes (no audio overlap, just history).
@@ -348,7 +381,7 @@ void RecordManager::stopRecording (juce::int64 endSample)
                     // Right fragment ends at the original exEnd, so any fade-out
                     // the source region carried still applies. Clamp so the new
                     // shorter length still satisfies fadeIn + fadeOut <= length.
-                    right.fadeOutSamples  = juce::jmax<juce::int64> (0,
+                    right.fadeOutSamples  = juce::jmax ((juce::int64) 0,
                         juce::jmin (right.fadeOutSamples,
                                      right.lengthInSamples - right.fadeInSamples));
                     right.previousTakes.clear();  // history stays with the left half
@@ -410,6 +443,7 @@ void RecordManager::writeMidiBlock (int trackIndex,
     if (trackIndex < 0 || trackIndex >= Session::kNumTracks) return;
     auto& cap = midiCaptures[(size_t) trackIndex];
     if (cap == nullptr) return;
+    writeMidiBlockCalls[(size_t) trackIndex].fetch_add (1, std::memory_order_relaxed);
 
     for (const auto meta : events)
     {
