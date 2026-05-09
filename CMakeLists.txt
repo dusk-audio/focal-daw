@@ -9,14 +9,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Same priority order as the Dusk Audio plugins repo so a developer with both
 # repos checked out only needs JUCE in one place.
 if(DEFINED JUCE_PATH)
-    message(STATUS "Using JUCE from: ${JUCE_PATH}")
-    add_subdirectory(${JUCE_PATH} ${CMAKE_CURRENT_BINARY_DIR}/JUCE)
+    set(FOCAL_JUCE_SOURCE_DIR "${JUCE_PATH}")
 elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../JUCE/CMakeLists.txt")
-    message(STATUS "Using JUCE from sibling directory: ${CMAKE_CURRENT_SOURCE_DIR}/../JUCE")
-    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../JUCE ${CMAKE_CURRENT_BINARY_DIR}/JUCE)
+    set(FOCAL_JUCE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../JUCE")
 elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/JUCE/CMakeLists.txt")
-    message(STATUS "Using JUCE from submodule: external/JUCE")
-    add_subdirectory(external/JUCE)
+    set(FOCAL_JUCE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/JUCE")
 else()
     message(FATAL_ERROR
         "JUCE not found. Options:\n"
@@ -25,11 +22,57 @@ else()
         "  3. Add as submodule: git submodule add https://github.com/juce-framework/JUCE.git external/JUCE")
 endif()
 
+message(STATUS "Using JUCE from: ${FOCAL_JUCE_SOURCE_DIR}")
+
+# Linux-only: verify our local XEmbed mapping fix is present in the JUCE checkout.
+# Stock JUCE 8.0.10 ties the host container's X11 mapping to the embedded
+# plugin's _XEMBED_INFO flag, which leaves pure-xcb VST3s (e.g. MininnDrum) as
+# blank rectangles. The fix splits WindowMapper by Role; the marker below is in
+# our local commit. Detect drift if JUCE is ever updated without re-applying.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(_focal_xembed_file
+        "${FOCAL_JUCE_SOURCE_DIR}/modules/juce_gui_extra/native/juce_XEmbedComponent_linux.cpp")
+    if(NOT EXISTS "${_focal_xembed_file}")
+        message(FATAL_ERROR "Expected JUCE source not found: ${_focal_xembed_file}")
+    endif()
+    file(READ "${_focal_xembed_file}" _focal_xembed_src)
+    if(NOT _focal_xembed_src MATCHES "enum class Role { host, client }")
+        message(FATAL_ERROR
+            "Focal requires a patched JUCE: the XEmbed host-mapping fix is missing in\n"
+            "  ${_focal_xembed_file}\n"
+            "Without it, pure-xcb VST3 plugins (e.g. MininnDrum) render as a blank\n"
+            "rectangle. Re-apply the local commit titled\n"
+            "  \"XEmbed: stop tying host-window mapping to client _XEMBED_INFO\"\n"
+            "in your JUCE checkout, or pull a JUCE branch that contains it.")
+    endif()
+    unset(_focal_xembed_file)
+    unset(_focal_xembed_src)
+endif()
+
+add_subdirectory(${FOCAL_JUCE_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/JUCE)
+
+# App icon. JUCE bakes the PNG into platform-specific resources at
+# build time (.ico on Windows, .icns on macOS, embedded data block on
+# Linux). Same file is used for both BIG and SMALL - JUCE downscales
+# internally as needed. The conditional keeps a fresh checkout
+# building when assets/icon.png hasn't been added yet.
+set(FOCAL_ICON_PATH "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon.png")
+if(EXISTS "${FOCAL_ICON_PATH}")
+    set(FOCAL_ICON_ARGS
+        ICON_BIG   "${FOCAL_ICON_PATH}"
+        ICON_SMALL "${FOCAL_ICON_PATH}")
+    message(STATUS "Focal app icon: ${FOCAL_ICON_PATH}")
+else()
+    set(FOCAL_ICON_ARGS "")
+    message(STATUS "Focal app icon not found at ${FOCAL_ICON_PATH} - building without one")
+endif()
+
 juce_add_gui_app(Focal
     PRODUCT_NAME       "Focal"
     COMPANY_NAME       "Marc Korte"
     BUNDLE_ID          "com.marckorte.focal"
     VERSION            ${PROJECT_VERSION}
+    ${FOCAL_ICON_ARGS}
     MICROPHONE_PERMISSION_ENABLED TRUE
     MICROPHONE_PERMISSION_TEXT    "Focal needs microphone access to record audio from your inputs.")
 
