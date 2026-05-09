@@ -103,21 +103,39 @@ void prepareForTopLevelDestruction (juce::Component& topLevel)
     //      meta_window_unmanage with "focus_window != window" and
     //      takes the Wayland session down with it.
     //
-    // The XSetInputFocus call hands focus back to the root pointer
-    // (PointerRoot + RevertToPointerRoot), which is the safest target
-    // - no specific window has to exist for it. The XSync that
-    // follows is load-bearing: it round-trips with the X server so
-    // mutter actually processes the FocusOut before we proceed to
-    // unmap or destroy.
+    // PointerRoot is "focus follows pointer" - under XWayland, mutter
+    // does not always translate that to focus_window=NULL on the
+    // Wayland side, and meta_window_unmanage later asserts.
+    // None/RevertToNone is the unambiguous "nothing has focus" form
+    // the XWayland bridge honours.
     juce::Component::unfocusAllComponents();
     topLevel.giveAwayKeyboardFocus();
 
     if (auto* d = juceDisplay())
     {
-        ::XSetInputFocus (d, PointerRoot, RevertToPointerRoot, CurrentTime);
+        ::XSetInputFocus (d, None, RevertToNone, CurrentTime);
+
+        // Withdrawing the toplevel triggers mutter's Withdrawn-state
+        // path, which clears focus_window as part of the transition -
+        // before the destroy event would otherwise hit the assertion.
+        if (auto* peer = topLevel.getPeer())
+        {
+            const auto win = (::Window) (uintptr_t) peer->getNativeHandle();
+            ::XWithdrawWindow (d, win, DefaultScreen (d));
+        }
+
         ::XSync (d, False);
     }
 
     flushWindowOperations();
+}
+
+void clearXInputFocus()
+{
+    if (auto* d = juceDisplay())
+    {
+        ::XSetInputFocus (d, None, RevertToNone, CurrentTime);
+        ::XSync (d, False);
+    }
 }
 } // namespace focal::platform

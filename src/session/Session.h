@@ -348,6 +348,12 @@ struct MidiRegion
     // block (no playback rebuild needed - MIDI regions are lock-
     // free-readable from the audio thread via AtomicSnapshot).
     bool muted = false;
+
+    // Per-region lock - same semantics as AudioRegion::locked.
+    // Affects right-click delete and (when piano roll handlers
+    // grow lock-awareness) edit gestures. Doesn't affect
+    // playback or note scheduling.
+    bool locked = false;
 };
 
 // Audio region - references a mono WAV file on disk. Multiple recordings
@@ -410,6 +416,14 @@ struct AudioRegion
     // preparePlayback (i.e. next stop+play); the painter dims
     // muted regions immediately.
     bool muted = false;
+
+    // Per-region lock. true = the region rejects drag / resize /
+    // delete / split / nudge / gain operations. Useful for marking
+    // a finalised take so a stray drag doesn't move it. Doesn't
+    // affect playback - locked regions still play through every
+    // signal-flow path. Toggle from the right-click menu; the
+    // painter shows a small lock badge.
+    bool locked = false;
 
     // Older takes that occupied this region's timeline range, captured by
     // RecordManager::stopRecording when the new take's range fully contains

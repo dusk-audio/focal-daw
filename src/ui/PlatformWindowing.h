@@ -71,4 +71,18 @@ void prepareNativePeerForChildAttach (juce::ComponentPeer& parentPeer);
 // other platforms (Mac/Windows compositors don't have the same focused-
 // window-destroy assertion).
 void prepareForTopLevelDestruction (juce::Component& topLevel);
+
+// Force the X protocol's input focus to "no window" (None /
+// RevertToNone) and round-trip with the server. Used as a final
+// authoritative focus clear AFTER the main-window unmap and before
+// the actual JUCE destroy. Plugin teardown (Diva's
+// AM_VST3_Processor::terminate, etc.) can re-arm focus through
+// transient helper windows we don't iterate via
+// juce::TopLevelWindow; reasserting "no focus" here keeps mutter's
+// focus_window NULL at the moment meta_window_unmanage runs.
+//
+// Linux: XSetInputFocus(None, RevertToNone) + XSync.
+// Mac/Windows: no-op (the compositor / WM doesn't have the same
+// focused-window-destroy assertion).
+void clearXInputFocus();
 } // namespace focal::platform

@@ -1230,6 +1230,14 @@ void MainComponent::beginSafeShutdown()
         tlw->setVisible (false);
     focal::platform::flushWindowOperations();
 
+    // Plugin destructors that run between phase 5b and the actual
+    // JUCE window destroy (Diva's AM_VST3_Processor::terminate,
+    // etc.) can re-arm X11 input focus through transient helper
+    // windows we don't iterate via juce::TopLevelWindow. Reassert
+    // "no focus" here so mutter's focus_window is NULL at the
+    // moment meta_window_unmanage runs.
+    focal::platform::clearXInputFocus();
+
     // Defensive: defer systemRequestedQuit by one message-loop turn
     // so any in-flight message-loop work that queued from phase 6's
     // unmap drains BEFORE JUCE starts ~MainWindow. Phase 5b's

@@ -585,6 +585,25 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
 
     if (hit.op != RegionOp::None)
     {
+        // Locked regions reject drag / resize / fade / gain. The
+        // take-badge rotation is still allowed - it's reversible by
+        // another click and doesn't change geometry. Shift-click
+        // for selection is also allowed so the user can pick up
+        // locked regions to copy / paste somewhere else.
+        const auto& clickedRegion = session.track (hit.track).regions[(size_t) hit.regionIdx];
+        if (clickedRegion.locked && hit.op != RegionOp::TakeBadge
+            && ! (e.mods.isShiftDown() || e.mods.isCommandDown()))
+        {
+            // Just select the region so the user knows what they
+            // clicked on, but don't enter drag mode.
+            clearAllSelections();
+            selectedTrack  = hit.track;
+            selectedRegion = hit.regionIdx;
+            drag.op = RegionOp::None;
+            repaint();
+            return;
+        }
+
         // Shift / Cmd-click on a region body toggles it in/out of the
         // multi-selection without starting a drag. Edge ops (trim,
         // fade, take badge) ignore the modifier - those are still
@@ -1499,6 +1518,40 @@ void TapeStrip::showRegionContextMenu (const RegionHit& hit, juce::Point<int> sc
                     safeThis->repaint();
                 });
 
+    // Lock toggle. Same multi-aware pattern as Mute. Locked regions
+    // reject move / trim / fade / gain / split / nudge / delete -
+    // playback unaffected. Toggle is the only operation that works
+    // on a locked region, so the menu item itself is always
+    // clickable.
+    m.addItem (region.locked ? "Unlock region" : "Lock region",
+                [safeThis = juce::Component::SafePointer<TapeStrip> (this),
+                 hitCopy = hit, currentlyLocked = region.locked]
+                {
+                    if (safeThis == nullptr) return;
+                    const bool target = ! currentlyLocked;
+                    std::vector<RegionId> targets;
+                    if (safeThis->isRegionSelected (hitCopy.track, hitCopy.regionIdx))
+                        targets = safeThis->allSelectedRegions();
+                    else
+                        targets.push_back ({ hitCopy.track, hitCopy.regionIdx });
+                    auto& um = safeThis->engine.getUndoManager();
+                    um.beginNewTransaction (target ? "Lock regions" : "Unlock regions");
+                    for (const auto& id : targets)
+                    {
+                        const auto& regs = safeThis->session.track (id.track).regions;
+                        if (id.regionIdx < 0 || id.regionIdx >= (int) regs.size()) continue;
+                        const auto& current = regs[(size_t) id.regionIdx];
+                        if (current.locked == target) continue;
+                        AudioRegion afterState  = current;
+                        AudioRegion beforeState = current;
+                        afterState.locked = target;
+                        um.perform (new RegionEditAction (
+                            safeThis->session, safeThis->engine,
+                            id.track, id.regionIdx, beforeState, afterState));
+                    }
+                    safeThis->repaint();
+                });
+
     m.addSeparator();
 
     // Color submenu - 8 curated accent options + "Reset to track
@@ -1653,6 +1706,22 @@ void TapeStrip::showMidiRegionContextMenu (int trackIdx, int regionIdx,
                                     .midiRegions.currentMutable();
                     if (regionIdx < 0 || regionIdx >= (int) live.size()) return;
                     live[(size_t) regionIdx].muted = ! currentlyMuted;
+                    safeThis->repaint();
+                });
+    // Lock toggle. MIDI regions today only have one place where
+    // lock matters (this menu - tape-strip drag isn't supported on
+    // MIDI, so there's nothing else to gate). The flag still
+    // serialises and the painter shows the lock badge so users
+    // can mark "this part is final" for visual organisation.
+    m.addItem (region.locked ? "Unlock region" : "Lock region",
+                [safeThis = juce::Component::SafePointer<TapeStrip> (this),
+                 trackIdx, regionIdx, currentlyLocked = region.locked]
+                {
+                    if (safeThis == nullptr) return;
+                    auto& live = safeThis->session.track (trackIdx)
+                                    .midiRegions.currentMutable();
+                    if (regionIdx < 0 || regionIdx >= (int) live.size()) return;
+                    live[(size_t) regionIdx].locked = ! currentlyLocked;
                     safeThis->repaint();
                 });
 
@@ -1853,6 +1922,26 @@ void TapeStrip::paint (juce::Graphics& g)
                 }
             }
 
+            // Lock indicator: a small amber filled circle at the
+            // bottom-right of the region body, far from the top-
+            // right gain badge and top-left label / take badge.
+            // The shape doesn't have to be a literal padlock - at
+            // 14 px row height nothing more elaborate would read
+            // anyway. The accent colour is the same amber used on
+            // the gain-up badge so the user sees "this is a state
+            // indicator", not a fade artefact.
+            if (region.locked
+                && regionRect.getHeight() >= 8
+                && regionRect.getWidth()  >= 10)
+            {
+                const float cx = (float) regionRect.getRight() - 5.0f;
+                const float cy = (float) regionRect.getBottom() - 5.0f;
+                g.setColour (juce::Colours::black.withAlpha (0.6f));
+                g.fillEllipse (cx - 3.0f, cy - 3.0f, 6.0f, 6.0f);
+                g.setColour (juce::Colour (0xffe0c060));
+                g.fillEllipse (cx - 2.0f, cy - 2.0f, 4.0f, 4.0f);
+            }
+
             // Region-gain badge: small "+3.0 dB" / "-6.0 dB" readout
             // at the top-right of the region body. Only painted when
             // gain is meaningfully off unity so an unedited timeline
@@ -2007,6 +2096,19 @@ void TapeStrip::paint (juce::Graphics& g)
                     g.drawText (region.label, labelArea,
                                  juce::Justification::topLeft, true);
                 }
+            }
+
+            // Lock indicator (same idiom as the audio painter).
+            if (region.locked
+                && regionRect.getHeight() >= 8
+                && regionRect.getWidth()  >= 10)
+            {
+                const float cx = (float) regionRect.getRight() - 5.0f;
+                const float cy = (float) regionRect.getBottom() - 5.0f;
+                g.setColour (juce::Colours::black.withAlpha (0.6f));
+                g.fillEllipse (cx - 3.0f, cy - 3.0f, 6.0f, 6.0f);
+                g.setColour (juce::Colour (0xffe0c060));
+                g.fillEllipse (cx - 2.0f, cy - 2.0f, 4.0f, 4.0f);
             }
 
             // Note dots. Walk the region's notes; each note's start tick
@@ -2420,6 +2522,18 @@ bool TapeStrip::deleteSelectedRegion()
     auto selection = allSelectedRegions();
     if (selection.empty()) return false;
 
+    // Drop locked regions from the target list. Locked = reject
+    // destructive operations. If every selected region is locked
+    // the call is a no-op.
+    selection.erase (std::remove_if (selection.begin(), selection.end(),
+        [this] (const RegionId& id)
+        {
+            const auto& regs = session.track (id.track).regions;
+            return id.regionIdx < 0 || id.regionIdx >= (int) regs.size()
+                || regs[(size_t) id.regionIdx].locked;
+        }), selection.end());
+    if (selection.empty()) return false;
+
     // Erase in descending order PER TRACK so earlier indices on the
     // same track stay valid through the loop. Sort by (track ASC,
     // regionIdx DESC) and walk linearly.
@@ -2472,9 +2586,18 @@ bool TapeStrip::duplicateSelectedRegion()
 
 bool TapeStrip::nudgeSelectedRegion (juce::int64 deltaSamples)
 {
-    const auto selection = allSelectedRegions();
+    auto selection = allSelectedRegions();
     if (selection.empty()) return false;
     if (deltaSamples == 0) return false;
+    // Locked regions reject nudge. Drop them from the target list.
+    selection.erase (std::remove_if (selection.begin(), selection.end(),
+        [this] (const RegionId& id)
+        {
+            const auto& regs = session.track (id.track).regions;
+            return id.regionIdx < 0 || id.regionIdx >= (int) regs.size()
+                || regs[(size_t) id.regionIdx].locked;
+        }), selection.end());
+    if (selection.empty()) return false;
 
     // Group-clamp: don't let any selected region's timelineStart go
     // negative. So minSelectedStart sets the floor on -delta.
@@ -2515,20 +2638,22 @@ bool TapeStrip::splitSelectedAtPlayhead()
     const auto playhead = engine.getTransport().getPlayhead();
 
     // Filter down to regions whose range strictly contains the
-    // playhead. SplitRegionAction tolerates edge cases internally
-    // but a click without movement shouldn't change anything; the
-    // strict-inside gate matches the right-click menu's behaviour.
-    auto containsPlayhead = [this, playhead] (const RegionId& id)
+    // playhead AND that aren't locked. SplitRegionAction tolerates
+    // edge cases internally but a click without movement shouldn't
+    // change anything; the strict-inside gate matches the right-
+    // click menu's behaviour. Locked regions reject split.
+    auto eligible = [this, playhead] (const RegionId& id)
     {
         const auto& regs = session.track (id.track).regions;
         if (id.regionIdx < 0 || id.regionIdx >= (int) regs.size()) return false;
         const auto& r = regs[(size_t) id.regionIdx];
+        if (r.locked) return false;
         return playhead > r.timelineStart
             && playhead < r.timelineStart + r.lengthInSamples;
     };
     selection.erase (std::remove_if (selection.begin(), selection.end(),
                                        [&] (const RegionId& id)
-                                       { return ! containsPlayhead (id); }),
+                                       { return ! eligible (id); }),
                        selection.end());
     if (selection.empty()) return false;
 
