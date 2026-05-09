@@ -75,14 +75,16 @@ public:
                           const juce::MouseWheelDetails&) override;
 
     // Visual constants exposed so the host overlay can size itself.
-    static constexpr int kKeyboardWidth     = 56;
-    static constexpr int kToolbarHeight     = 26;   // mode indicators + hotkey legend
-    static constexpr int kHeaderHeight      = 22;   // bar/beat ruler (below toolbar)
-    static constexpr int kNoteHeight        = 12;
+    // Sized for daily-use legibility - earlier 10 pt / 12 px values
+    // read as cramped on 1080p+ displays.
+    static constexpr int kKeyboardWidth     = 76;
+    static constexpr int kToolbarHeight     = 34;   // mode indicators + hotkey legend
+    static constexpr int kHeaderHeight      = 28;   // bar/beat ruler (below toolbar)
+    static constexpr int kNoteHeight        = 16;
     static constexpr int kNumKeys           = 128;
     static constexpr int kFullGridHeight    = kNumKeys * kNoteHeight;
-    static constexpr int kVelocityStripH    = 56;   // bottom strip for vel bars
-    static constexpr int kCcStripH          = 56;   // CC lane below velocity
+    static constexpr int kVelocityStripH    = 72;   // bottom strip for vel bars
+    static constexpr int kCcStripH          = 72;   // CC lane below velocity
 
 private:
     Session& session;

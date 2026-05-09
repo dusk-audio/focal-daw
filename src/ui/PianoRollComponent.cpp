@@ -191,14 +191,14 @@ void PianoRollComponent::paintToolbar (juce::Graphics& g, juce::Rectangle<int> a
         g.setColour (juce::Colour (0xff3a3a44));
         g.drawRoundedRectangle (r.toFloat(), 3.0f, 0.8f);
 
-        auto inner = r.reduced (6, 2);
-        g.setFont (juce::Font (juce::FontOptions (10.0f, juce::Font::plain)));
+        auto inner = r.reduced (8, 4);
+        g.setFont (juce::Font (juce::FontOptions (12.0f, juce::Font::plain)));
         g.setColour (juce::Colour (0xff8090a0));
         const int labelW = g.getCurrentFont().getStringWidth (label);
         g.drawText (label, inner.removeFromLeft (labelW),
                      juce::Justification::centredLeft, false);
-        inner.removeFromLeft (4);
-        g.setFont (juce::Font (juce::FontOptions (10.0f, juce::Font::bold)));
+        inner.removeFromLeft (5);
+        g.setFont (juce::Font (juce::FontOptions (12.0f, juce::Font::bold)));
         g.setColour (valueColour);
         g.drawText (value, inner, juce::Justification::centredLeft, false);
     };
@@ -249,19 +249,19 @@ void PianoRollComponent::paintToolbar (juce::Graphics& g, juce::Rectangle<int> a
 
     // Lay out chips left-to-right with a small gap. Each is sized to
     // fit its content; the legend gets the rest of the bar.
-    auto chips = area.reduced (6, 3);
+    auto chips = area.reduced (8, 4);
     auto cursorX = chips.getX();
     auto placeChip = [&] (const juce::String& label, const juce::String& value,
                             juce::Colour valueColour)
     {
-        g.setFont (juce::Font (juce::FontOptions (10.0f, juce::Font::bold)));
+        g.setFont (juce::Font (juce::FontOptions (12.0f, juce::Font::bold)));
         const int valueW = g.getCurrentFont().getStringWidth (value);
-        g.setFont (juce::Font (juce::FontOptions (10.0f, juce::Font::plain)));
+        g.setFont (juce::Font (juce::FontOptions (12.0f, juce::Font::plain)));
         const int labelW = g.getCurrentFont().getStringWidth (label);
-        const int chipW  = labelW + valueW + 18;
+        const int chipW  = labelW + valueW + 24;
         juce::Rectangle<int> r (cursorX, chips.getY(), chipW, chips.getHeight());
         drawChip (r, label, value, valueColour);
-        cursorX += chipW + 4;
+        cursorX += chipW + 6;
     };
     placeChip ("Q",    snapStr,  juce::Colour (0xffe0c060));
     placeChip ("Color", colorStr, juce::Colour (0xff70b0e0));
@@ -271,10 +271,10 @@ void PianoRollComponent::paintToolbar (juce::Graphics& g, juce::Rectangle<int> a
     // Hotkey legend in the remaining space - small dim text with a
     // few of the most-used bindings. Truncated by JUCE's drawText
     // when the bar is narrow.
-    g.setFont (juce::Font (juce::FontOptions (10.0f, juce::Font::plain)));
+    g.setFont (juce::Font (juce::FontOptions (11.5f, juce::Font::plain)));
     g.setColour (juce::Colour (0xff707080));
-    auto legendArea = area.reduced (6, 3);
-    legendArea.setX (cursorX + 4);
+    auto legendArea = area.reduced (8, 4);
+    legendArea.setX (cursorX + 6);
     g.drawText (
         juce::String::fromUTF8 (
             "1\xe2\x80\x936/0 snap   C colour   L CC   Q quantize   "
@@ -378,27 +378,25 @@ void PianoRollComponent::paintBeatRuler (juce::Graphics& g, juce::Rectangle<int>
     const int ticksPerBar = ticksPerBeat * beatsPerBar;
     const int totalBars = (int) (r->lengthInTicks / ticksPerBar) + 1;
 
-    g.setFont (juce::Font (juce::FontOptions (10.0f, juce::Font::bold)));
+    g.setFont (juce::Font (juce::FontOptions (12.5f, juce::Font::bold)));
     g.setColour (kHeaderText);
     // Pixels per beat tells us whether sub-beat labels ("4.2", "4.3", ...)
-    // would visually fit. Below ~36 px/beat the labels overlap each other,
-    // so we drop them and show bar numbers only.
+    // would visually fit. Below ~40 px/beat the labels overlap each other,
+    // so we drop them and show bar numbers only. Bumped from 36 to 40
+    // when the bar-number font grew.
     const float pxPerBeat = (float) ticksPerBeat * pixelsPerTick;
-    const bool showSubBeats = pxPerBeat >= 36.0f;
+    const bool showSubBeats = pxPerBeat >= 40.0f;
     for (int bar = 0; bar <= totalBars; ++bar)
     {
         const int bx = xForTick ((juce::int64) bar * ticksPerBar);
         if (bx >= kKeyboardWidth && bx <= area.getRight())
         {
-            g.drawText (juce::String (bar + 1), bx + 2, area.getY(),
-                         40, area.getHeight(), juce::Justification::centredLeft, false);
+            g.drawText (juce::String (bar + 1), bx + 3, area.getY(),
+                         48, area.getHeight(), juce::Justification::centredLeft, false);
         }
 
         if (! showSubBeats) continue;
-        // Reaper-style sub-beat labels: "<bar>.<beat>" at every beat
-        // line within the bar. Beat 1 is the bar number we already drew,
-        // so start from beat 2.
-        g.setFont (juce::Font (juce::FontOptions (9.0f, juce::Font::plain)));
+        g.setFont (juce::Font (juce::FontOptions (10.5f, juce::Font::plain)));
         g.setColour (kHeaderText.withAlpha (0.65f));
         for (int beat = 1; beat < beatsPerBar; ++beat)
         {
@@ -406,11 +404,11 @@ void PianoRollComponent::paintBeatRuler (juce::Graphics& g, juce::Rectangle<int>
                                           + (juce::int64) beat * ticksPerBeat);
             if (bbx < kKeyboardWidth || bbx > area.getRight()) continue;
             g.drawText (juce::String (bar + 1) + "." + juce::String (beat + 1),
-                         bbx + 2, area.getY(),
-                         40, area.getHeight(),
+                         bbx + 3, area.getY(),
+                         48, area.getHeight(),
                          juce::Justification::centredLeft, false);
         }
-        g.setFont (juce::Font (juce::FontOptions (10.0f, juce::Font::bold)));
+        g.setFont (juce::Font (juce::FontOptions (12.5f, juce::Font::bold)));
         g.setColour (kHeaderText);
     }
 
@@ -437,9 +435,9 @@ void PianoRollComponent::paintKeyboard (juce::Graphics& g, juce::Rectangle<int> 
         if (! black && (n % 12 == 0))
         {
             g.setColour (kKeyText);
-            g.setFont (juce::Font (juce::FontOptions (9.0f, juce::Font::plain)));
+            g.setFont (juce::Font (juce::FontOptions (11.0f, juce::Font::bold)));
             g.drawText (noteNameForC (n),
-                         area.getRight() - 22, y, 20, kNoteHeight,
+                         area.getRight() - 30, y, 26, kNoteHeight,
                          juce::Justification::centredRight, false);
         }
     }
@@ -1227,9 +1225,9 @@ void PianoRollComponent::paintCcStrip (juce::Graphics& g, juce::Rectangle<int> a
     if (name != nullptr) label = "CC " + juce::String (activeCcController) + " (" + name + ")";
     else                  label = "CC " + juce::String (activeCcController);
     g.setColour (kHeaderText.withAlpha (0.85f));
-    g.setFont (juce::Font (juce::FontOptions (10.0f, juce::Font::bold)));
-    g.drawText (label, area.getX() + 6, area.getY() + 2,
-                 area.getWidth() - 12, 14,
+    g.setFont (juce::Font (juce::FontOptions (12.0f, juce::Font::bold)));
+    g.drawText (label, area.getX() + 8, area.getY() + 3,
+                 area.getWidth() - 16, 18,
                  juce::Justification::centredLeft, false);
 }
 
