@@ -47,6 +47,13 @@ AuxView::AuxView (Session& session, AudioEngine& engine)
 
 AuxView::~AuxView() = default;
 
+void AuxView::closeAllAuxPopouts()
+{
+    for (auto& lane : lanes)
+        if (lane != nullptr)
+            lane->closeAllPopoutsForShutdown();
+}
+
 void AuxView::setActiveLane (int index)
 {
     index = juce::jlimit (0, Session::kNumAuxLanes - 1, index);

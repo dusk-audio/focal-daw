@@ -32,6 +32,13 @@ public:
     int  getActiveLane() const noexcept { return activeLaneIndex; }
     void setActiveLane (int index);
 
+    // Walk every aux lane and tear down its open plugin-editor popout
+    // windows through the X-focus-safe path. Called from
+    // MainComponent::beginSafeShutdown phase 4 alongside
+    // ConsoleView::dropAllPluginEditors so EVERY top-level window the
+    // host owns is hit BEFORE the unmap of the main window in phase 6.
+    void closeAllAuxPopouts();
+
 private:
     int activeLaneIndex = 0;
 

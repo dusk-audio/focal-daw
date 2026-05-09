@@ -25,6 +25,16 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
 
+    // Tear down every aux-slot popout window owned by this lane,
+    // routing each through focal::platform::prepareForTopLevelDestruction
+    // first so the X-protocol focus is transferred BEFORE the
+    // unique_ptr.reset(). Called from AuxView::closeAllAuxPopouts at
+    // app shutdown - without this, an open Diva popout cascading
+    // through ~MainWindow → ~AuxLaneComponent destroyed an X11
+    // toplevel that mutter still considered focused, aborting the
+    // Wayland session at meta_window_unmanage.
+    void closeAllPopoutsForShutdown();
+
     static constexpr int kMinLaneWidth = 220;
     static constexpr int kHeaderHeight = 60;     // name + return level
     static constexpr int kSlotHeaderH  = 24;     // bypass + remove + name strip

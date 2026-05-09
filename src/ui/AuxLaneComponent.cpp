@@ -334,6 +334,26 @@ void AuxLaneComponent::closePopoutForSlot (int slotIdx)
     refreshSlotControls (slotIdx);
 }
 
+void AuxLaneComponent::closeAllPopoutsForShutdown()
+{
+    // Mirror of closePopoutForSlot's destruction half, but with no
+    // re-inline step (we're shutting down - no parent left to host
+    // the editor). Walk every slot, defocus + destroy each live
+    // popout window; the XSetInputFocus inside the helper guarantees
+    // mutter sees a FocusOut before the X11 peer goes away.
+    for (auto& ui : slots)
+    {
+        if (ui.popoutWindow == nullptr) continue;
+        if (ui.editor != nullptr
+            && ui.editor->getParentComponent() != nullptr)
+        {
+            ui.editor->getParentComponent()->removeChildComponent (ui.editor.get());
+        }
+        focal::platform::prepareForTopLevelDestruction (*ui.popoutWindow);
+        ui.popoutWindow.reset();
+    }
+}
+
 void AuxLaneComponent::rebuildSlots()
 {
     // For each slot whose plugin is loaded, ensure the editor exists so the

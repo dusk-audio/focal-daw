@@ -1145,32 +1145,59 @@ void MainComponent::beginSafeShutdown()
     markPhase ("phase 4: drop plugin editor windows");
     if (consoleView != nullptr)
         consoleView->dropAllPluginEditors();
+    // Channel-strip plugin editors are owned by ConsoleView's strips;
+    // aux-bus plugin pop-out windows are owned by AuxView's lanes and
+    // sit in a separate ownership chain. Without this call, an open
+    // aux popout cascades through ~MainWindow → ~AuxLaneComponent →
+    // popoutWindow.reset() WITHOUT going through prepareForTopLevel-
+    // Destruction, so the X-protocol focus stays on the popout and
+    // mutter aborts at meta_window_unmanage. Diagnosed from a 12:53
+    // crash trace where AM_VST3_Processor::terminate (Diva, on an
+    // aux bus) was the last Focal log line before the assertion.
+    if (auxView != nullptr)
+        auxView->closeAllAuxPopouts();
 
     markPhase ("phase 5: flush window operations");
     focal::platform::flushWindowOperations();
 
-    // Phase 5b: clear keyboard focus BEFORE hiding the main window.
-    // Wayland/Mutter aborts the desktop session if a top-level
-    // xdg_toplevel is destroyed while the compositor still records it
-    // as the focus_window (libmutter assertion in meta_window_unmanage:
-    // focus_window != window). prepareForTopLevelDestruction issues
-    // the focus-out via JUCE and flushes the windowing system so the
-    // compositor's bookkeeping is consistent before we unmap + destroy.
-    markPhase ("phase 5b: clear keyboard focus from main window");
-    if (auto* tlw = getTopLevelComponent())
-        focal::platform::prepareForTopLevelDestruction (*tlw);
+    // Phase 5b: hand keyboard focus off EVERY top-level window owned
+    // by this process before the unmap in phase 6. Wayland/Mutter
+    // aborts the desktop session if any top-level xdg_toplevel is
+    // destroyed while the compositor still records it as the
+    // focus_window (libmutter assertion in meta_window_unmanage:
+    // focus_window != window). The actual FocusOut event the
+    // compositor watches comes from XSetInputFocus(PointerRoot, ...)
+    // inside prepareForTopLevelDestruction; the JUCE-side
+    // unfocusAllComponents / giveAwayKeyboardFocus is a
+    // complementary cleanup of the component tree (no FocusOut on
+    // its own). The XSync that follows guarantees mutter has
+    // observed the focus change before phase 6's unmap lands.
+    //
+    // Walking juce::TopLevelWindow::getNumTopLevelWindows() rather
+    // than just getTopLevelComponent() is the belt-and-braces step:
+    // any future top-level window class (mastering popout, file
+    // dialog left open, etc.) inherits the protection without per-
+    // site plumbing. Phase 4's explicit aux-popout teardown stays
+    // (it's the actual destroy path); phase 5b is the catch-all.
+    markPhase ("phase 5b: clear keyboard focus from every top-level window");
+    for (int i = juce::TopLevelWindow::getNumTopLevelWindows(); --i >= 0;)
+        if (auto* w = juce::TopLevelWindow::getTopLevelWindow (i))
+            focal::platform::prepareForTopLevelDestruction (*w);
 
     markPhase ("phase 6: hide main window");
     if (auto* tlw = getTopLevelComponent())
         tlw->setVisible (false);
     focal::platform::flushWindowOperations();
 
-    // Defer systemRequestedQuit by one message-loop turn so the
-    // unmap + focus-out events we just queued get dispatched to the
-    // compositor BEFORE JUCE starts ~MainWindow. Without this,
-    // setVisible(false) + systemRequestedQuit + the subsequent
-    // teardown all run in a single dispatch, and Mutter sees the
-    // xdg_toplevel destroyed before its focus state has caught up.
+    // Defensive: defer systemRequestedQuit by one message-loop turn
+    // so any in-flight message-loop work that queued from phase 6's
+    // unmap drains BEFORE JUCE starts ~MainWindow. Phase 5b's
+    // XSetInputFocus + XSync already ensures the compositor's
+    // focus_window has moved off this toplevel by the time we get
+    // here, so this defer is no longer the load-bearing part of the
+    // shutdown contract - it's belt-and-suspenders for non-focus-
+    // related window-system races (paint events, child-window
+    // unmaps from hosted plugins) we'd rather not race.
     markPhase ("phase 7: defer systemRequestedQuit to next message-loop tick");
     juce::MessageManager::callAsync ([]
     {
