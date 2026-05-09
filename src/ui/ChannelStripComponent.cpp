@@ -1393,6 +1393,10 @@ void ChannelStripComponent::closePluginEditor()
     // window's teardown only tears down its own peer, not the cached
     // editor.
     pluginEditorWindow->setContentNonOwned (nullptr, false);
+    // Transfer keyboard focus off the window before destruct - on
+    // Wayland/Mutter, destroying a focused xdg_toplevel aborts the
+    // desktop session. No-op flushless work on Mac/Windows.
+    focal::platform::prepareForTopLevelDestruction (*pluginEditorWindow);
     pluginEditorWindow.reset();
 }
 

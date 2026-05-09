@@ -1152,17 +1152,13 @@ void MainComponent::beginSafeShutdown()
     // Phase 5b: clear keyboard focus BEFORE hiding the main window.
     // Wayland/Mutter aborts the desktop session if a top-level
     // xdg_toplevel is destroyed while the compositor still records it
-    // as the focus_window (assertion meta_window_unmanage:
-    // focus_window != window in libmutter). The compositor moves
-    // focus_window when it observes a focus-leave protocol message,
-    // not when the window unmaps. Calling unfocusAllComponents +
-    // giveAwayKeyboardFocus on the top-level forces JUCE to issue the
-    // focus-out so Mutter's bookkeeping is consistent before destroy.
+    // as the focus_window (libmutter assertion in meta_window_unmanage:
+    // focus_window != window). prepareForTopLevelDestruction issues
+    // the focus-out via JUCE and flushes the windowing system so the
+    // compositor's bookkeeping is consistent before we unmap + destroy.
     markPhase ("phase 5b: clear keyboard focus from main window");
-    juce::Component::unfocusAllComponents();
     if (auto* tlw = getTopLevelComponent())
-        tlw->giveAwayKeyboardFocus();
-    focal::platform::flushWindowOperations();
+        focal::platform::prepareForTopLevelDestruction (*tlw);
 
     markPhase ("phase 6: hide main window");
     if (auto* tlw = getTopLevelComponent())

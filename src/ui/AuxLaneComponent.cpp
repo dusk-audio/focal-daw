@@ -1,4 +1,5 @@
 #include "AuxLaneComponent.h"
+#include "PlatformWindowing.h"
 #include "PluginPickerHelpers.h"
 #include "../dsp/AuxLaneStrip.h"
 #include "../engine/PluginSlot.h"
@@ -323,6 +324,9 @@ void AuxLaneComponent::closePopoutForSlot (int slotIdx)
         ui.editor->getParentComponent()->removeChildComponent (ui.editor.get());
     }
 
+    // Transfer keyboard focus off the popout window before destruct so
+    // Wayland/Mutter doesn't abort the session inside meta_window_unmanage.
+    focal::platform::prepareForTopLevelDestruction (*ui.popoutWindow);
     ui.popoutWindow.reset();
 
     if (ui.editor != nullptr)

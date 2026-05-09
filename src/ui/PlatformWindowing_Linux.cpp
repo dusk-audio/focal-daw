@@ -86,4 +86,17 @@ void prepareNativePeerForChildAttach (juce::ComponentPeer&)
     // ChannelStripComponent::PluginEditorWindow if we want to
     // consolidate it here later.
 }
+
+void prepareForTopLevelDestruction (juce::Component& topLevel)
+{
+    // Transfer keyboard focus off the window's component tree so JUCE
+    // emits the focus-out protocol events Mutter needs to update its
+    // focus_window state. flushWindowOperations() then waits for those
+    // events to land on the compositor before the destroy that follows.
+    // Without this, Mutter aborts in meta_window_unmanage with
+    // "focus_window != window" on Wayland.
+    juce::Component::unfocusAllComponents();
+    topLevel.giveAwayKeyboardFocus();
+    flushWindowOperations();
+}
 } // namespace focal::platform

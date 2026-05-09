@@ -57,4 +57,18 @@ void flushWindowOperations();
 //
 // Empty stub on macOS / Windows.
 void prepareNativePeerForChildAttach (juce::ComponentPeer& parentPeer);
+
+// Call BEFORE destroying any top-level juce::DocumentWindow / DialogWindow.
+// On Wayland (Mutter), destroying an xdg_toplevel that the compositor
+// still records as its focus_window aborts the desktop session with
+// "meta_window_unmanage: focus_window != window". This helper transfers
+// keyboard focus off `topLevel`'s component tree and flushes the
+// windowing system so the compositor processes the focus-out event
+// before the subsequent destroy lands.
+//
+// Cross-platform: the focus-transfer is a JUCE call (works everywhere);
+// the flush is the same XSync-via-JUCE-display on Linux and a stub on
+// other platforms (Mac/Windows compositors don't have the same focused-
+// window-destroy assertion).
+void prepareForTopLevelDestruction (juce::Component& topLevel);
 } // namespace focal::platform

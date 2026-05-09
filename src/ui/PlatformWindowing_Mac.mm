@@ -20,4 +20,12 @@ namespace focal::platform
 void bringWindowToFront (juce::ComponentPeer&)             {}
 void flushWindowOperations()                                {}
 void prepareNativePeerForChildAttach (juce::ComponentPeer&) {}
+void prepareForTopLevelDestruction (juce::Component& topLevel)
+{
+    // macOS doesn't have Mutter's focused-window-destroy assertion,
+    // but defocusing before destruct is good hygiene and matches the
+    // contract callsites expect.
+    juce::Component::unfocusAllComponents();
+    topLevel.giveAwayKeyboardFocus();
+}
 } // namespace focal::platform
