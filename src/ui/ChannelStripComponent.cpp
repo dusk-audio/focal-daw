@@ -1333,6 +1333,10 @@ public:
         // Detach the borrowed editor before we go away so this window's
         // destructor doesn't touch it, then ask the host to drop us.
         setContentNonOwned (nullptr, false);
+        // EWMH-activate a sibling top-level so mutter's focus_window is
+        // off this peer before the deferred destroy lands - else
+        // meta_window_unmanage asserts on a focused xdg_toplevel.
+        focal::platform::prepareForTopLevelDestruction (*this);
         if (onClose) onClose();
     }
 
@@ -1389,15 +1393,19 @@ void ChannelStripComponent::openPluginEditor()
 void ChannelStripComponent::closePluginEditor()
 {
     if (pluginEditorWindow == nullptr) return;
-    // Remove the editor from the window before destruction so the
-    // window's teardown only tears down its own peer, not the cached
-    // editor.
     pluginEditorWindow->setContentNonOwned (nullptr, false);
-    // Transfer keyboard focus off the window before destruct - on
-    // Wayland/Mutter, destroying a focused xdg_toplevel aborts the
-    // desktop session. No-op flushless work on Mac/Windows.
     focal::platform::prepareForTopLevelDestruction (*pluginEditorWindow);
-    pluginEditorWindow.reset();
+
+    // Defer the wrapper's destruction one message-loop tick so mutter
+    // gets a chance to retarget focus_window from the EWMH activate
+    // above. Synchronous reset() races mutter's compositor loop and
+    // trips meta_window_unmanage.
+    juce::Component::SafePointer<ChannelStripComponent> safe (this);
+    juce::MessageManager::callAsync ([safe]
+    {
+        if (auto* self = safe.getComponent())
+            self->pluginEditorWindow.reset();
+    });
 }
 
 void ChannelStripComponent::dropPluginEditor()

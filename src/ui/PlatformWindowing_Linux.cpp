@@ -26,12 +26,10 @@ namespace
     return sys != nullptr ? sys->getDisplay() : nullptr;
 }
 
-// Return the native X window of any visible top-level OTHER than the
-// one departing, or None when none exists (genuine final shutdown).
-::Window pickSiblingFocusTarget (juce::Component& departing)
+juce::ComponentPeer* pickSiblingFocusTargetPeer (juce::Component& departing)
 {
     auto* departingPeer = departing.getPeer();
-    if (departingPeer == nullptr) return None;
+    if (departingPeer == nullptr) return nullptr;
 
     const int n = juce::TopLevelWindow::getNumTopLevelWindows();
     for (int i = 0; i < n; ++i)
@@ -40,9 +38,9 @@ namespace
         if (tlw == nullptr || ! tlw->isVisible()) continue;
         auto* peer = tlw->getPeer();
         if (peer == nullptr || peer == departingPeer) continue;
-        return (::Window) (uintptr_t) peer->getNativeHandle();
+        return peer;
     }
-    return None;
+    return nullptr;
 }
 } // namespace
 
@@ -113,36 +111,25 @@ void prepareForTopLevelDestruction (juce::Component& topLevel)
     juce::Component::unfocusAllComponents();
     topLevel.giveAwayKeyboardFocus();
 
-    if (auto* d = juceDisplay())
+    // EWMH _NET_ACTIVE_WINDOW (via bringWindowToFront) is the path mutter
+    // actually honours under XWayland - focus_window is updated by
+    // mutter's own focus-management code in response to compositor
+    // surface events, never by raw XSetInputFocus. Pairs with a
+    // callAsync at the call site so mutter's loop ticks between this
+    // and the destroy.
+    if (auto* sibling = pickSiblingFocusTargetPeer (topLevel))
     {
-        const auto sibling = pickSiblingFocusTarget (topLevel);
-        if (sibling != None)
-        {
-            // Pointing focus at a live sibling keeps mutter's wayland-
-            // side focus_window coherent across the upcoming UnmapNotify;
-            // XSync round-trips the X protocol but does NOT wait for
-            // mutter to drain its event queue, so a None target can
-            // race the unmap and trip meta_window_unmanage.
-            ::XSetInputFocus (d, sibling, RevertToParent, CurrentTime);
-            std::fprintf (stderr,
-                          "[Focal/X] focus -> sibling 0x%lx\n",
-                          (unsigned long) sibling);
-        }
-        else
-        {
-            ::XSetInputFocus (d, None, RevertToNone, CurrentTime);
-            std::fprintf (stderr, "[Focal/X] focus -> None (no sibling)\n");
-        }
-        std::fflush (stderr);
-
-        if (auto* peer = topLevel.getPeer())
-        {
-            const auto win = (::Window) (uintptr_t) peer->getNativeHandle();
-            ::XWithdrawWindow (d, win, DefaultScreen (d));
-        }
-
-        ::XSync (d, False);
+        bringWindowToFront (*sibling);
+        std::fprintf (stderr, "[Focal/X] focus -> sibling peer (EWMH)\n");
     }
+    else
+    {
+        std::fprintf (stderr, "[Focal/X] focus -> none (no sibling)\n");
+    }
+    std::fflush (stderr);
+
+    if (auto* d = juceDisplay())
+        ::XSync (d, False);
 
     flushWindowOperations();
 }

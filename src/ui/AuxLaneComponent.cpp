@@ -324,10 +324,18 @@ void AuxLaneComponent::closePopoutForSlot (int slotIdx)
         ui.editor->getParentComponent()->removeChildComponent (ui.editor.get());
     }
 
-    // Transfer keyboard focus off the popout window before destruct so
-    // Wayland/Mutter doesn't abort the session inside meta_window_unmanage.
     focal::platform::prepareForTopLevelDestruction (*ui.popoutWindow);
-    ui.popoutWindow.reset();
+
+    // Defer destruction so mutter's compositor loop has a tick to
+    // process the EWMH activate above before this xdg_toplevel is
+    // unmapped - else meta_window_unmanage trips on focus_window
+    // still pointing at this peer.
+    juce::Component::SafePointer<AuxLaneComponent> safe (this);
+    juce::MessageManager::callAsync ([safe, slotIdx]
+    {
+        if (auto* self = safe.getComponent())
+            self->slots[(size_t) slotIdx].popoutWindow.reset();
+    });
 
     if (ui.editor != nullptr)
         attachEditorInline (slotIdx);
