@@ -650,6 +650,117 @@ void PianoRollComponent::showVelocityPopup()
         });
 }
 
+void PianoRollComponent::setChannelForSelected (int channel)
+{
+    auto* r = region();
+    if (r == nullptr) return;
+    const int ch = juce::jlimit (1, 16, channel);
+    auto applyToOne = [ch] (MidiNote& n) { n.channel = ch; };
+    if (selectedNotes.empty()) for (auto& n : r->notes) applyToOne (n);
+    else
+        for (int idx : selectedNotes)
+            if (idx >= 0 && idx < (int) r->notes.size())
+                applyToOne (r->notes[(size_t) idx]);
+}
+
+void PianoRollComponent::setLengthTicksForSelected (juce::int64 ticks)
+{
+    auto* r = region();
+    if (r == nullptr) return;
+    if (ticks <= 0) return;
+    auto applyToOne = [r, ticks] (MidiNote& n)
+    {
+        // Clamp so the note can't extend past the region. Hard floor
+        // is 1 tick - any positive length is valid.
+        const auto maxLen = juce::jmax ((juce::int64) 1, r->lengthInTicks - n.startTick);
+        n.lengthInTicks = juce::jlimit ((juce::int64) 1, maxLen, ticks);
+    };
+    if (selectedNotes.empty()) for (auto& n : r->notes) applyToOne (n);
+    else
+        for (int idx : selectedNotes)
+            if (idx >= 0 && idx < (int) r->notes.size())
+                applyToOne (r->notes[(size_t) idx]);
+}
+
+void PianoRollComponent::showNotePropertiesPopup (int hitNoteIdx)
+{
+    juce::PopupMenu m;
+    m.addSectionHeader (selectedNotes.size() > 1
+                          ? juce::String::formatted ("Note Properties (%d notes)",
+                                                       (int) selectedNotes.size())
+                          : juce::String ("Note Properties"));
+
+    // Channel submenu (1..16). Highlight the channel of the
+    // right-clicked note for visual context.
+    int hitChannel = -1;
+    auto* r = region();
+    if (r != nullptr && hitNoteIdx >= 0 && hitNoteIdx < (int) r->notes.size())
+        hitChannel = r->notes[(size_t) hitNoteIdx].channel;
+    juce::PopupMenu chSub;
+    for (int ch = 1; ch <= 16; ++ch)
+        chSub.addItem (1000 + ch, "Channel " + juce::String (ch),
+                        true, ch == hitChannel);
+    m.addSubMenu ("Channel", chSub);
+
+    // Length submenu - common note values plus dotted variants.
+    juce::PopupMenu lenSub;
+    struct LenChoice { const char* label; juce::int64 ticks; };
+    const LenChoice lengths[] = {
+        { "Whole",        kMidiTicksPerQuarter * 4 },
+        { "Half",         kMidiTicksPerQuarter * 2 },
+        { "Quarter",      kMidiTicksPerQuarter     },
+        { "Eighth",       kMidiTicksPerQuarter / 2 },
+        { "Sixteenth",    kMidiTicksPerQuarter / 4 },
+        { "Thirty-second",kMidiTicksPerQuarter / 8 },
+    };
+    for (int i = 0; i < (int) (sizeof (lengths) / sizeof (lengths[0])); ++i)
+        lenSub.addItem (2000 + i, lengths[i].label);
+    m.addSubMenu ("Length", lenSub);
+
+    // Velocity submenu - same set the dedicated 'V' popup uses.
+    juce::PopupMenu velSub;
+    velSub.addItem (3001, "127 (max)");
+    velSub.addItem (3002, "100");
+    velSub.addItem (3003, "80");
+    velSub.addItem (3004, "64 (mid)");
+    velSub.addItem (3005, "32");
+    m.addSubMenu ("Velocity", velSub);
+
+    juce::Component::SafePointer<PianoRollComponent> safe (this);
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this),
+        [safe] (int chosen)
+        {
+            auto* self = safe.getComponent();
+            if (self == nullptr || chosen <= 0) return;
+            if (chosen >= 1001 && chosen <= 1016)
+            {
+                self->setChannelForSelected (chosen - 1000);
+            }
+            else if (chosen >= 2000 && chosen < 2006)
+            {
+                static const juce::int64 lens[] = {
+                    kMidiTicksPerQuarter * 4, kMidiTicksPerQuarter * 2,
+                    kMidiTicksPerQuarter,     kMidiTicksPerQuarter / 2,
+                    kMidiTicksPerQuarter / 4, kMidiTicksPerQuarter / 8,
+                };
+                self->setLengthTicksForSelected (lens[chosen - 2000]);
+            }
+            else
+            {
+                switch (chosen)
+                {
+                    case 3001: self->setVelocityFor (127); break;
+                    case 3002: self->setVelocityFor (100); break;
+                    case 3003: self->setVelocityFor (80);  break;
+                    case 3004: self->setVelocityFor (64);  break;
+                    case 3005: self->setVelocityFor (32);  break;
+                    default: return;
+                }
+            }
+            self->repaint();
+        });
+}
+
 void PianoRollComponent::glueSelectedNotes()
 {
     auto* r = region();
@@ -1123,6 +1234,27 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
     grabKeyboardFocus();
     auto* r = region();
     if (r == nullptr) return;
+
+    // Right-click on a note opens the per-note properties popup.
+    // If the clicked note isn't already selected, promote it to a
+    // single-note selection first so the menu's actions have a
+    // sensible target. Acts on the entire selection when the
+    // clicked note IS already part of one. Right-click on empty
+    // grid space falls through to the existing logic (no menu;
+    // nothing useful to set).
+    if (e.mods.isPopupMenu())
+    {
+        bool onEdgeIgnored = false;
+        const int rightClickHit = hitTestNote (e.x, e.y, onEdgeIgnored);
+        if (rightClickHit >= 0)
+        {
+            if (! isNoteSelected (rightClickHit))
+                selectOnly (rightClickHit);
+            showNotePropertiesPopup (rightClickHit);
+            repaint();
+            return;
+        }
+    }
 
     const bool extendSelection = e.mods.isShiftDown() || e.mods.isCommandDown();
 

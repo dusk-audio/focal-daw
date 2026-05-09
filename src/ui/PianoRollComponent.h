@@ -258,6 +258,17 @@ private:
     void setVelocityFor (int value);
     void showVelocityPopup();
 
+    // Per-note property setters. Same "selected notes" rule as the
+    // velocity helpers: empty selection = whole region. Channel
+    // clamped to [1, 16]; length clamped to [1, region length].
+    void setChannelForSelected (int channel);
+    void setLengthTicksForSelected (juce::int64 ticks);
+    // Right-click context menu on a note. Three submenus: channel,
+    // length, velocity. Acts on the current selection (the right-
+    // click promotes the clicked note to selected first if it
+    // wasn't already).
+    void showNotePropertiesPopup (int hitNoteIdx);
+
     // Glue every selected same-pitch + contiguous note into one. Two
     // notes are "contiguous" when the second's startTick falls at or
     // before the first's endTick. The lower-index note absorbs the
