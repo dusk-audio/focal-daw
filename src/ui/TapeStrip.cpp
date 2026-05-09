@@ -1801,6 +1801,53 @@ bool TapeStrip::deleteSelectedRegion()
     return true;
 }
 
+bool TapeStrip::duplicateSelectedRegion()
+{
+    if (selectedTrack < 0 || selectedRegion < 0) return false;
+    const auto& regs = session.track (selectedTrack).regions;
+    if (selectedRegion >= (int) regs.size()) return false;
+
+    AudioRegion clone = regs[(size_t) selectedRegion];
+    // Drop take history on the duplicate - it's a fresh region as far
+    // as the user is concerned; cycling alternate takes on the clone
+    // would be confusing. The original keeps its history intact.
+    clone.previousTakes.clear();
+    clone.timelineStart = regs[(size_t) selectedRegion].timelineStart
+                         + regs[(size_t) selectedRegion].lengthInSamples;
+
+    auto& um = engine.getUndoManager();
+    um.beginNewTransaction ("Duplicate region");
+    um.perform (new PasteRegionAction (session, engine, selectedTrack, clone));
+    repaint();
+    return true;
+}
+
+bool TapeStrip::nudgeSelectedRegion (juce::int64 deltaSamples)
+{
+    if (selectedTrack < 0 || selectedRegion < 0) return false;
+    auto& regs = session.track (selectedTrack).regions;
+    if (selectedRegion >= (int) regs.size()) return false;
+    if (deltaSamples == 0) return false;
+
+    const auto& current = regs[(size_t) selectedRegion];
+    const auto clamped = juce::jmax ((juce::int64) 0,
+                                       current.timelineStart + deltaSamples);
+    if (clamped == current.timelineStart) return false;
+
+    AudioRegion afterState  = current;
+    AudioRegion beforeState = current;
+    afterState.timelineStart = clamped;
+
+    auto& um = engine.getUndoManager();
+    um.beginNewTransaction (deltaSamples > 0 ? "Nudge region right"
+                                              : "Nudge region left");
+    um.perform (new RegionEditAction (session, engine,
+                                        selectedTrack, selectedRegion,
+                                        beforeState, afterState));
+    repaint();
+    return true;
+}
+
 bool TapeStrip::splitSelectedAtPlayhead()
 {
     if (selectedTrack < 0 || selectedRegion < 0) return false;

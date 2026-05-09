@@ -240,6 +240,13 @@ private:
     // because the indices we held are now stale.
     void glueSelectedNotes();
 
+    // Clone every selected note shifted right by the selection's
+    // span (max-end - min-start), so the duplicate sits cleanly
+    // after the original block. New notes are appended to
+    // region->notes; selection is replaced with the freshly-cloned
+    // indices so a follow-up nudge / transpose acts on the copy.
+    void duplicateSelectedNotes();
+
     // Shift every selected note's startTick by deltaTicks, clamped so
     // no note ends up out of [0, lengthInTicks - lengthInTicks_of_note].
     // Used by Left/Right arrow nudge handlers.

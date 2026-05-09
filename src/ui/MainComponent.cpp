@@ -409,6 +409,37 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
         {
             if (tapeStrip->splitSelectedAtPlayhead()) return true;
         }
+        // Cmd/Ctrl+D duplicates the selected region. The piano roll's
+        // own Cmd+D handler runs first when the modal is open (its
+        // keyPressed has priority via JUCE focus), so this only fires
+        // for tape-strip selection. Falls through harmlessly when
+        // nothing is selected.
+        if (code == 'D' && cmd && ! shift)
+        {
+            if (tapeStrip->duplicateSelectedRegion()) return true;
+        }
+        // Cmd/Ctrl + Left/Right nudges the selected region by 1 beat;
+        // Shift adds for 1 bar. Computed from the live tempo so the
+        // nudge matches the user's musical grid. Cmd was already used
+        // for clipboard / save / open so it composes cleanly with
+        // arrow keys (no existing binding).
+        if ((key == juce::KeyPress::leftKey || key == juce::KeyPress::rightKey)
+            && cmd)
+        {
+            const double sr   = engine.getCurrentSampleRate();
+            const float  bpm  = session.tempoBpm.load (std::memory_order_relaxed);
+            if (sr > 0.0 && bpm > 0.0f)
+            {
+                const int beatsPerBar = juce::jmax (1,
+                    session.beatsPerBar.load (std::memory_order_relaxed));
+                const double beatSamples = sr * 60.0 / (double) bpm;
+                const double stepSamples = shift ? beatSamples * (double) beatsPerBar
+                                                  : beatSamples;
+                const juce::int64 delta = (juce::int64) std::round (stepSamples);
+                const juce::int64 signedDelta = key == juce::KeyPress::leftKey ? -delta : delta;
+                if (tapeStrip->nudgeSelectedRegion (signedDelta)) return true;
+            }
+        }
     }
 
     // ── File: Ctrl/Cmd+S (save), Ctrl/Cmd+Shift+S (save as), Ctrl/Cmd+O (open) ──

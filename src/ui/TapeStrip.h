@@ -60,6 +60,16 @@ public:
     // Same SplitRegionAction the right-click menu uses, so undo/redo
     // behaviour matches.
     bool splitSelectedAtPlayhead();
+    // Duplicate the selected region. The clone is positioned right
+    // after the original (timelineStart + lengthInSamples). Routes
+    // through PasteRegionAction so undo/redo work. Returns false if
+    // nothing is selected.
+    bool duplicateSelectedRegion();
+    // Nudge the selected region's timelineStart by deltaSamples,
+    // routed through RegionEditAction so undo/redo work. Clamps so
+    // the region can't move past the timeline origin. deltaSamples is
+    // signed - negative values move the region earlier.
+    bool nudgeSelectedRegion (juce::int64 deltaSamples);
 
     // Click-to-edit hook for MIDI regions. Fired when the user clicks the
     // body of a MidiRegion in the timeline. The host (MainComponent) is

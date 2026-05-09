@@ -713,6 +713,45 @@ void PianoRollComponent::glueSelectedNotes()
     clearSelection();
 }
 
+void PianoRollComponent::duplicateSelectedNotes()
+{
+    auto* r = region();
+    if (r == nullptr || selectedNotes.empty()) return;
+
+    // Compute the selection span so the clone block sits cleanly
+    // after the original. minStart/maxEnd over all selected notes;
+    // span = maxEnd - minStart. Empty span (a single zero-length
+    // note) falls back to one quarter-note shift.
+    juce::int64 minStart = std::numeric_limits<juce::int64>::max();
+    juce::int64 maxEnd   = std::numeric_limits<juce::int64>::min();
+    for (int idx : selectedNotes)
+    {
+        if (idx < 0 || idx >= (int) r->notes.size()) continue;
+        const auto& n = r->notes[(size_t) idx];
+        minStart = juce::jmin (minStart, n.startTick);
+        maxEnd   = juce::jmax (maxEnd,   n.startTick + n.lengthInTicks);
+    }
+    juce::int64 shift = maxEnd - minStart;
+    if (shift <= 0) shift = kMidiTicksPerQuarter;
+
+    // Append clones, recording the indices of the new notes so we
+    // can replace the selection with them. We don't clamp against
+    // r->lengthInTicks here - the user can extend the region or
+    // move the clones afterwards.
+    std::vector<int> newSelection;
+    newSelection.reserve (selectedNotes.size());
+    for (int idx : selectedNotes)
+    {
+        if (idx < 0 || idx >= (int) r->notes.size()) continue;
+        MidiNote clone = r->notes[(size_t) idx];
+        clone.startTick += shift;
+        r->notes.push_back (clone);
+        newSelection.push_back ((int) r->notes.size() - 1);
+    }
+    selectedNotes = std::move (newSelection);
+    std::sort (selectedNotes.begin(), selectedNotes.end());
+}
+
 void PianoRollComponent::nudgeSelectedTicks (juce::int64 deltaTicks)
 {
     auto* r = region();
@@ -1373,6 +1412,18 @@ bool PianoRollComponent::keyPressed (const juce::KeyPress& k)
     if (k.getKeyCode() == 'G' && selectedNotes.size() >= 2)
     {
         glueSelectedNotes();
+        repaint();
+        return true;
+    }
+    // Cmd/Ctrl+D duplicates every selected note - clones land
+    // immediately after the selection's span, replacing the
+    // selection with the new copies so the user can keep nudging /
+    // transposing the duplicate without an extra click.
+    if (k.getKeyCode() == 'D'
+        && k.getModifiers().isCommandDown()
+        && ! selectedNotes.empty())
+    {
+        duplicateSelectedNotes();
         repaint();
         return true;
     }
