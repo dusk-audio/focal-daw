@@ -89,14 +89,35 @@ void prepareNativePeerForChildAttach (juce::ComponentPeer&)
 
 void prepareForTopLevelDestruction (juce::Component& topLevel)
 {
-    // Transfer keyboard focus off the window's component tree so JUCE
-    // emits the focus-out protocol events Mutter needs to update its
-    // focus_window state. flushWindowOperations() then waits for those
-    // events to land on the compositor before the destroy that follows.
-    // Without this, Mutter aborts in meta_window_unmanage with
-    // "focus_window != window" on Wayland.
+    // Two layers of focus need to come off the window before destroy:
+    //
+    //   1. JUCE's internal component-tree focus model (unfocusAll +
+    //      giveAwayKeyboardFocus). Without this, JUCE-level focus
+    //      callbacks fire on a half-destroyed widget tree.
+    //   2. The X protocol's input focus, tracked separately by the
+    //      compositor. Mutter's focus_window only updates when it
+    //      observes a FocusOut event on the X server; JUCE's calls
+    //      above DON'T issue XSetInputFocus, so the compositor
+    //      keeps recording our window as focused. When setVisible
+    //      (false) then unmaps the toplevel, mutter aborts at
+    //      meta_window_unmanage with "focus_window != window" and
+    //      takes the Wayland session down with it.
+    //
+    // The XSetInputFocus call hands focus back to the root pointer
+    // (PointerRoot + RevertToPointerRoot), which is the safest target
+    // - no specific window has to exist for it. The XSync that
+    // follows is load-bearing: it round-trips with the X server so
+    // mutter actually processes the FocusOut before we proceed to
+    // unmap or destroy.
     juce::Component::unfocusAllComponents();
     topLevel.giveAwayKeyboardFocus();
+
+    if (auto* d = juceDisplay())
+    {
+        ::XSetInputFocus (d, PointerRoot, RevertToPointerRoot, CurrentTime);
+        ::XSync (d, False);
+    }
+
     flushWindowOperations();
 }
 } // namespace focal::platform
