@@ -90,13 +90,16 @@ const MidiRegion* PianoRollComponent::region() const
 int PianoRollComponent::yForNoteNumber (int n) const
 {
     // High notes at the top (matches a piano keyboard's visual layout).
-    // Note 127 → row 0, note 0 → row kNumKeys-1.
-    return kHeaderHeight + (kNumKeys - 1 - n) * kNoteHeight - scrollY;
+    // Note 127 → row 0, note 0 → row kNumKeys-1. Top band = toolbar
+    // (kToolbarHeight) + bar ruler (kHeaderHeight).
+    return kToolbarHeight + kHeaderHeight
+         + (kNumKeys - 1 - n) * kNoteHeight - scrollY;
 }
 
 int PianoRollComponent::noteNumberForY (int y) const
 {
-    const int row = (y - kHeaderHeight + scrollY) / kNoteHeight;
+    const int topBand = kToolbarHeight + kHeaderHeight;
+    const int row = (y - topBand + scrollY) / kNoteHeight;
     return juce::jlimit (0, kNumKeys - 1, kNumKeys - 1 - row);
 }
 
@@ -120,7 +123,13 @@ void PianoRollComponent::paint (juce::Graphics& g)
     g.fillAll (kBgDark);
 
     const auto bounds = getLocalBounds();
-    const auto headerArea  = bounds.withHeight (kHeaderHeight);
+    // Top stack: toolbar (mode indicators + hotkey legend) over the
+    // bar/beat ruler.
+    const auto toolbarArea = bounds.withHeight (kToolbarHeight);
+    const auto headerArea  = juce::Rectangle<int> (0, kToolbarHeight,
+                                                      bounds.getWidth(), kHeaderHeight);
+    const int  topBandH    = kToolbarHeight + kHeaderHeight;
+
     // Bottom strips stack: CC lane at the very bottom, velocity lane
     // above it. The note grid fills the space between header and
     // velocity lane.
@@ -132,14 +141,16 @@ void PianoRollComponent::paint (juce::Graphics& g)
                                                        ccArea.getY() - kVelocityStripH,
                                                        bounds.getWidth() - kKeyboardWidth,
                                                        kVelocityStripH);
-    const auto keyboardArea = juce::Rectangle<int> (0, kHeaderHeight,
+    const auto keyboardArea = juce::Rectangle<int> (0, topBandH,
                                                        kKeyboardWidth,
-                                                       bounds.getHeight() - kHeaderHeight);
-    const auto gridArea    = juce::Rectangle<int> (kKeyboardWidth, kHeaderHeight,
+                                                       bounds.getHeight() - topBandH);
+    const auto gridArea    = juce::Rectangle<int> (kKeyboardWidth, topBandH,
                                                      bounds.getWidth() - kKeyboardWidth,
-                                                     bounds.getHeight() - kHeaderHeight - kVelocityStripH - kCcStripH);
+                                                     bounds.getHeight() - topBandH
+                                                       - kVelocityStripH - kCcStripH);
 
     paintNoteGrid     (g, gridArea);
+    paintToolbar      (g, toolbarArea);
     paintBeatRuler    (g, headerArea);
     paintKeyboard     (g, keyboardArea);
     paintNotes        (g, gridArea);
@@ -155,6 +166,122 @@ void PianoRollComponent::paint (juce::Graphics& g)
         g.setColour (kNoteSelected.withAlpha (0.85f));
         g.drawRect (rubberBand, 1);
     }
+}
+
+void PianoRollComponent::paintToolbar (juce::Graphics& g, juce::Rectangle<int> area)
+{
+    // Solid background a touch lighter than the grid so the toolbar
+    // reads as a separate band. 1 px hairline at the bottom to
+    // visually separate it from the bar ruler below.
+    g.setColour (juce::Colour (0xff20202c));
+    g.fillRect (area);
+    g.setColour (kGridLine);
+    g.drawHorizontalLine (area.getBottom() - 1,
+                            (float) area.getX(), (float) area.getRight());
+
+    // Pill helper - draws a label/value pair as a chip with the
+    // "label:" portion dimmed and the value portion bright. Reads
+    // at a glance.
+    auto drawChip = [&g] (juce::Rectangle<int> r,
+                            const juce::String& label, const juce::String& value,
+                            juce::Colour valueColour)
+    {
+        g.setColour (juce::Colour (0xff181820));
+        g.fillRoundedRectangle (r.toFloat(), 3.0f);
+        g.setColour (juce::Colour (0xff3a3a44));
+        g.drawRoundedRectangle (r.toFloat(), 3.0f, 0.8f);
+
+        auto inner = r.reduced (6, 2);
+        g.setFont (juce::Font (juce::FontOptions (10.0f, juce::Font::plain)));
+        g.setColour (juce::Colour (0xff8090a0));
+        const int labelW = g.getCurrentFont().getStringWidth (label);
+        g.drawText (label, inner.removeFromLeft (labelW),
+                     juce::Justification::centredLeft, false);
+        inner.removeFromLeft (4);
+        g.setFont (juce::Font (juce::FontOptions (10.0f, juce::Font::bold)));
+        g.setColour (valueColour);
+        g.drawText (value, inner, juce::Justification::centredLeft, false);
+    };
+
+    // Snap value
+    juce::String snapStr;
+    if (snapTicks <= 0) snapStr = "Off";
+    else if (snapTicks == kMidiTicksPerQuarter * 4) snapStr = "1/1";
+    else if (snapTicks == kMidiTicksPerQuarter * 2) snapStr = "1/2";
+    else if (snapTicks == kMidiTicksPerQuarter)     snapStr = "1/4";
+    else if (snapTicks == kMidiTicksPerQuarter / 2) snapStr = "1/8";
+    else if (snapTicks == kMidiTicksPerQuarter / 4) snapStr = "1/16";
+    else if (snapTicks == kMidiTicksPerQuarter / 8) snapStr = "1/32";
+    else snapStr = juce::String ((int) snapTicks) + "t";
+
+    // Colour-mode value
+    const char* colorStr = colorMode == ColorMode::Pitch    ? "Pitch"
+                          : colorMode == ColorMode::Velocity ? "Vel"
+                                                              : "Chan";
+
+    // Scale value
+    juce::String scaleStr;
+    if (scale == Scale::Off) scaleStr = "Off";
+    else
+    {
+        static const char* roots[] = { "C", "C#", "D", "D#", "E", "F", "F#",
+                                          "G", "G#", "A", "A#", "B" };
+        const char* modeShort =
+            scale == Scale::Major      ? "Maj" :
+            scale == Scale::Minor      ? "Min" :
+            scale == Scale::Dorian     ? "Dor" :
+            scale == Scale::Phrygian   ? "Phr" :
+            scale == Scale::Lydian     ? "Lyd" :
+            scale == Scale::Mixolydian ? "Mix" :
+            scale == Scale::Locrian    ? "Loc" : "";
+        scaleStr = juce::String (roots[scaleRoot]) + " " + modeShort;
+    }
+
+    // CC controller name
+    const char* ccName =
+        activeCcController == 1   ? "Mod"     :
+        activeCcController == 7   ? "Volume"  :
+        activeCcController == 11  ? "Express" :
+        activeCcController == 64  ? "Sustain" :
+        activeCcController == 74  ? "Filter"  : nullptr;
+    juce::String ccStr = juce::String (activeCcController);
+    if (ccName != nullptr) ccStr += " (" + juce::String (ccName) + ")";
+
+    // Lay out chips left-to-right with a small gap. Each is sized to
+    // fit its content; the legend gets the rest of the bar.
+    auto chips = area.reduced (6, 3);
+    auto cursorX = chips.getX();
+    auto placeChip = [&] (const juce::String& label, const juce::String& value,
+                            juce::Colour valueColour)
+    {
+        g.setFont (juce::Font (juce::FontOptions (10.0f, juce::Font::bold)));
+        const int valueW = g.getCurrentFont().getStringWidth (value);
+        g.setFont (juce::Font (juce::FontOptions (10.0f, juce::Font::plain)));
+        const int labelW = g.getCurrentFont().getStringWidth (label);
+        const int chipW  = labelW + valueW + 18;
+        juce::Rectangle<int> r (cursorX, chips.getY(), chipW, chips.getHeight());
+        drawChip (r, label, value, valueColour);
+        cursorX += chipW + 4;
+    };
+    placeChip ("Q",    snapStr,  juce::Colour (0xffe0c060));
+    placeChip ("Color", colorStr, juce::Colour (0xff70b0e0));
+    placeChip ("Scale", scaleStr, juce::Colour (0xff60c060));
+    placeChip ("CC",    ccStr,    juce::Colour (0xff60c0a8));
+
+    // Hotkey legend in the remaining space - small dim text with a
+    // few of the most-used bindings. Truncated by JUCE's drawText
+    // when the bar is narrow.
+    g.setFont (juce::Font (juce::FontOptions (10.0f, juce::Font::plain)));
+    g.setColour (juce::Colour (0xff707080));
+    auto legendArea = area.reduced (6, 3);
+    legendArea.setX (cursorX + 4);
+    g.drawText (
+        juce::String::fromUTF8 (
+            "1\xe2\x80\x936/0 snap   C colour   L CC   Q quantize   "
+            "S scale   V velocity   G glue   T split"
+            "   Cmd+D dup   \xe2\x86\x91\xe2\x86\x93 transpose"
+            "   \xe2\x86\x90\xe2\x86\x92 nudge"),
+        legendArea, juce::Justification::centredLeft, true);
 }
 
 void PianoRollComponent::paintNoteGrid (juce::Graphics& g, juce::Rectangle<int> area)
@@ -282,71 +409,9 @@ void PianoRollComponent::paintBeatRuler (juce::Graphics& g, juce::Rectangle<int>
         g.setColour (kHeaderText);
     }
 
-    // Quantize HUD - tiny label in the upper-right of the ruler showing
-    // the current snap denomination so the user can see what the 1..6 / 0
-    // keyboard shortcuts are doing. Format: "Q: 1/16" or "Q: Off".
-    juce::String qLabel ("Q: Off");
-    if (snapTicks > 0)
-    {
-        // Convert ticks back to a denomination of a quarter. 480 ticks =
-        // 1 quarter; 240 = 1/8; 120 = 1/16; etc. Whole-bar values map back
-        // to "1/1" / "1/2" / "1/4". Anything outside the standard table
-        // falls back to a raw tick count so the user still gets a hint.
-        const int q = (int) snapTicks;
-        const char* label =
-            (q == kMidiTicksPerQuarter * 4) ? "Q: 1/1"  :
-            (q == kMidiTicksPerQuarter * 2) ? "Q: 1/2"  :
-            (q == kMidiTicksPerQuarter)     ? "Q: 1/4"  :
-            (q == kMidiTicksPerQuarter / 2) ? "Q: 1/8"  :
-            (q == kMidiTicksPerQuarter / 4) ? "Q: 1/16" :
-            (q == kMidiTicksPerQuarter / 8) ? "Q: 1/32" :
-                                                nullptr;
-        qLabel = label != nullptr ? juce::String (label)
-                                   : "Q: " + juce::String (q) + "t";
-    }
-    g.setColour (kHeaderText.withAlpha (0.85f));
-    g.setFont (juce::Font (juce::FontOptions (9.5f, juce::Font::bold)));
-    g.drawText (qLabel,
-                 area.getRight() - 60, area.getY(),
-                 56, area.getHeight(),
-                 juce::Justification::centredRight, false);
-
-    // Color-mode HUD just to the left of the Q label. Same font / tone.
-    // 'C' cycles the mode at runtime.
-    const char* colorLabel = colorMode == ColorMode::Pitch    ? "C: Pitch"
-                            : colorMode == ColorMode::Velocity ? "C: Vel"
-                                                                : "C: Chan";
-    g.drawText (colorLabel,
-                 area.getRight() - 130, area.getY(),
-                 64, area.getHeight(),
-                 juce::Justification::centredRight, false);
-
-    // Scale label, left of the colour HUD. "S: Off" when the scale-
-    // highlight overlay is disabled; otherwise "S: <root> <mode>"
-    // (e.g. "S: D Min"). 'S' opens the picker.
-    juce::String scaleLabel;
-    if (scale == Scale::Off)
-    {
-        scaleLabel = "S: Off";
-    }
-    else
-    {
-        static const char* roots[] = { "C", "C#", "D", "D#", "E", "F", "F#",
-                                         "G", "G#", "A", "A#", "B" };
-        const char* modeShort =
-            scale == Scale::Major      ? "Maj" :
-            scale == Scale::Minor      ? "Min" :
-            scale == Scale::Dorian     ? "Dor" :
-            scale == Scale::Phrygian   ? "Phr" :
-            scale == Scale::Lydian     ? "Lyd" :
-            scale == Scale::Mixolydian ? "Mix" :
-            scale == Scale::Locrian    ? "Loc" : "";
-        scaleLabel = "S: " + juce::String (roots[scaleRoot]) + " " + modeShort;
-    }
-    g.drawText (scaleLabel,
-                 area.getRight() - 210, area.getY(),
-                 76, area.getHeight(),
-                 juce::Justification::centredRight, false);
+    // Snap / colour / scale / CC indicators moved up to the new
+    // toolbar (paintToolbar). Keep the bar ruler focused on bar +
+    // beat numbers.
 }
 
 void PianoRollComponent::paintKeyboard (juce::Graphics& g, juce::Rectangle<int> area)
@@ -1362,7 +1427,7 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
     // Empty-grid hit. Two paths:
     //   - Shift / Cmd held: start a rubber-band box-select drag.
     //   - Otherwise: create a new note (existing pencil-on-default).
-    if (e.x < kKeyboardWidth || e.y < kHeaderHeight) return;
+    if (e.x < kKeyboardWidth || e.y < kToolbarHeight + kHeaderHeight) return;
 
     if (extendSelection)
     {
@@ -1730,7 +1795,7 @@ void PianoRollComponent::mouseWheelMove (const juce::MouseEvent& e,
     // Vertical scroll. wheel deltaY > 0 = scroll up (show higher notes).
     const int delta = (int) (-w.deltaY * 60.0f);
     const int maxScroll = juce::jmax (0,
-        kFullGridHeight - (getHeight() - kHeaderHeight - kVelocityStripH));
+        kFullGridHeight - (getHeight() - kToolbarHeight - kHeaderHeight - kVelocityStripH - kCcStripH));
     scrollY = juce::jlimit (0, maxScroll, scrollY + delta);
     repaint();
 }

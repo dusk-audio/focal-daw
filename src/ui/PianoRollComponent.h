@@ -76,7 +76,8 @@ public:
 
     // Visual constants exposed so the host overlay can size itself.
     static constexpr int kKeyboardWidth     = 56;
-    static constexpr int kHeaderHeight      = 22;   // bar/beat ruler
+    static constexpr int kToolbarHeight     = 26;   // mode indicators + hotkey legend
+    static constexpr int kHeaderHeight      = 22;   // bar/beat ruler (below toolbar)
     static constexpr int kNoteHeight        = 12;
     static constexpr int kNumKeys           = 128;
     static constexpr int kFullGridHeight    = kNumKeys * kNoteHeight;
@@ -204,6 +205,7 @@ private:
     // Drawing helpers.
     void paintKeyboard      (juce::Graphics&, juce::Rectangle<int> area);
     void paintNoteGrid      (juce::Graphics&, juce::Rectangle<int> area);
+    void paintToolbar       (juce::Graphics&, juce::Rectangle<int> area);
     void paintBeatRuler     (juce::Graphics&, juce::Rectangle<int> area);
     void paintNotes         (juce::Graphics&, juce::Rectangle<int> area);
     void paintVelocityStrip (juce::Graphics&, juce::Rectangle<int> area);
