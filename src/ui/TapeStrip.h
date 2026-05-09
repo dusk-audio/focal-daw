@@ -54,6 +54,12 @@ public:
     bool cutSelectedRegion();
     bool pasteAtPlayhead();
     bool deleteSelectedRegion();
+    // Split the selected audio region at the current transport playhead.
+    // No-op (returns false) when nothing is selected, the playhead is
+    // outside the region's range, or the region is too short to split.
+    // Same SplitRegionAction the right-click menu uses, so undo/redo
+    // behaviour matches.
+    bool splitSelectedAtPlayhead();
 
     // Click-to-edit hook for MIDI regions. Fired when the user clicks the
     // body of a MidiRegion in the timeline. The host (MainComponent) is
@@ -209,5 +215,12 @@ private:
     // undo/redo because the action might have shifted indices.
     int selectedTrack    = -1;
     int selectedRegion   = -1;
+
+    // Hover state - set in mouseMove, cleared in mouseExit. Drives
+    // affordance visibility (fade handles only paint on the hovered
+    // or selected region, otherwise the timeline reads cluttered).
+    int hoveredTrack  = -1;
+    int hoveredRegion = -1;
+    void mouseExit (const juce::MouseEvent&) override;
 };
 } // namespace focal

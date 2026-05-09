@@ -1023,6 +1023,18 @@ void TapeStrip::mouseMove (const juce::MouseEvent& e)
     }
 
     const auto hit = hitTestRegion (e.x, e.y);
+
+    // Update hover state so paint() can show the fade handles only
+    // for the region under the cursor (or the selected region). Skip
+    // the repaint when nothing changed - mouseMove fires per pixel
+    // of cursor motion.
+    if (hit.track != hoveredTrack || hit.regionIdx != hoveredRegion)
+    {
+        hoveredTrack  = hit.track;
+        hoveredRegion = hit.regionIdx;
+        repaint();
+    }
+
     switch (hit.op)
     {
         case RegionOp::TrimStart:
@@ -1044,6 +1056,16 @@ void TapeStrip::mouseMove (const juce::MouseEvent& e)
         case RegionOp::None:
             setMouseCursor (juce::MouseCursor::NormalCursor);
             break;
+    }
+}
+
+void TapeStrip::mouseExit (const juce::MouseEvent&)
+{
+    if (hoveredTrack != -1 || hoveredRegion != -1)
+    {
+        hoveredTrack  = -1;
+        hoveredRegion = -1;
+        repaint();
     }
 }
 
@@ -1205,24 +1227,21 @@ void TapeStrip::paint (juce::Graphics& g)
             g.drawHorizontalLine ((int) midY, (float) regionRect.getX() + 2.0f,
                                    (float) regionRect.getRight() - 2.0f);
 
-            // Fade-in / fade-out visualisation. Slope line from the
-            // bottom corner of the fade zone up to the top corner at
-            // the fade end-point, plus a tiny grab handle (filled
-            // square) at the top so the user has something to aim
-            // for. Always drawn so the user can drag from a fade=0
-            // region to create a fade.
+            // Fade-in / fade-out visualisation. Slope line is always
+            // drawn so non-zero fades read at a glance; the grab
+            // handles only paint for the hovered or selected region
+            // so the timeline stays uncluttered when you're not
+            // actively editing fades.
             if (region.lengthInSamples > 0)
             {
                 const auto fadeInSamples  = juce::jmax ((juce::int64) 0, region.fadeInSamples);
                 const auto fadeOutSamples = juce::jmax ((juce::int64) 0, region.fadeOutSamples);
                 const double pxPerSample = (double) regionRect.getWidth()
                     / (double) region.lengthInSamples;
-                const float fadeColAlpha = 0.85f;
-                const auto fadeCol = juce::Colours::yellow.withAlpha (fadeColAlpha);
+                const auto fadeCol = juce::Colours::yellow.withAlpha (0.85f);
                 const float topY    = (float) regionRect.getY();
                 const float bottomY = (float) regionRect.getBottom();
 
-                // Fade-in slope.
                 if (fadeInSamples > 0)
                 {
                     const float xEnd = (float) regionRect.getX()
@@ -1230,7 +1249,6 @@ void TapeStrip::paint (juce::Graphics& g)
                     g.setColour (fadeCol);
                     g.drawLine ((float) regionRect.getX(), bottomY, xEnd, topY, 1.2f);
                 }
-                // Fade-out slope.
                 if (fadeOutSamples > 0)
                 {
                     const float xStart = (float) regionRect.getRight()
@@ -1240,18 +1258,31 @@ void TapeStrip::paint (juce::Graphics& g)
                                  (float) regionRect.getRight(), bottomY, 1.2f);
                 }
 
-                // Grab handles - filled 4x4 squares at the fade
-                // end-points along the top edge. Drawn for every
-                // region (even at fade=0) so the affordance is always
-                // discoverable: the user sees a handle at the
-                // corner and learns by dragging.
-                const float fadeInEndX  = (float) regionRect.getX()
-                    + (float) std::round ((double) fadeInSamples * pxPerSample);
-                const float fadeOutBegX = (float) regionRect.getRight()
-                    - (float) std::round ((double) fadeOutSamples * pxPerSample);
-                g.setColour (juce::Colours::yellow);
-                g.fillRect (juce::Rectangle<float> (fadeInEndX  - 2.0f, topY, 4.0f, 4.0f));
-                g.fillRect (juce::Rectangle<float> (fadeOutBegX - 2.0f, topY, 4.0f, 4.0f));
+                const bool isHovered = (t == hoveredTrack && ri == hoveredRegion);
+                if (isHovered || isSelected)
+                {
+                    // 6 px square grab handles at each fade end-point,
+                    // outlined in black so they pop against any track
+                    // colour. The hit zone (kFadeHitPx = 5) stays the
+                    // same size; this just makes the visible target
+                    // bigger when the user is interacting with this
+                    // region.
+                    const float fadeInEndX  = (float) regionRect.getX()
+                        + (float) std::round ((double) fadeInSamples * pxPerSample);
+                    const float fadeOutBegX = (float) regionRect.getRight()
+                        - (float) std::round ((double) fadeOutSamples * pxPerSample);
+                    auto drawHandle = [&] (float cx)
+                    {
+                        const auto outer = juce::Rectangle<float> (cx - 4.0f, topY - 1.0f, 8.0f, 8.0f);
+                        const auto inner = juce::Rectangle<float> (cx - 3.0f, topY,         6.0f, 6.0f);
+                        g.setColour (juce::Colours::black.withAlpha (0.85f));
+                        g.fillRect (outer);
+                        g.setColour (juce::Colours::yellow);
+                        g.fillRect (inner);
+                    };
+                    drawHandle (fadeInEndX);
+                    drawHandle (fadeOutBegX);
+                }
             }
 
             // Take-history badge. Shows total take count (current + prior)
@@ -1709,6 +1740,31 @@ bool TapeStrip::deleteSelectedRegion()
 
     selectedTrack  = -1;
     selectedRegion = -1;
+    repaint();
+    return true;
+}
+
+bool TapeStrip::splitSelectedAtPlayhead()
+{
+    if (selectedTrack < 0 || selectedRegion < 0) return false;
+    const auto& regs = session.track (selectedTrack).regions;
+    if (selectedRegion >= (int) regs.size()) return false;
+
+    const auto& region = regs[(size_t) selectedRegion];
+    const auto playhead   = engine.getTransport().getPlayhead();
+    const auto regionEnd  = region.timelineStart + region.lengthInSamples;
+    // Same gate the right-click menu uses: split only meaningful when
+    // the playhead lands strictly inside the region. SplitRegionAction
+    // tolerates edge cases internally but a click without movement
+    // shouldn't change anything.
+    if (playhead <= region.timelineStart || playhead >= regionEnd)
+        return false;
+
+    auto& um = engine.getUndoManager();
+    um.beginNewTransaction ("Split region");
+    um.perform (new SplitRegionAction (session, engine,
+                                         selectedTrack, selectedRegion,
+                                         playhead));
     repaint();
     return true;
 }

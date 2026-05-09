@@ -399,6 +399,16 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
         {
             if (tapeStrip->deleteSelectedRegion()) return true;
         }
+        // 'T' (no modifiers) splits the selected region at the
+        // playhead - razor-tool equivalent without needing a tool
+        // mode. No-op when no region is selected or the playhead is
+        // outside it. Mnemonic: "Trim / spliT". 'B' (Reaper-style
+        // razor) is taken by Bounce; Cmd+T (Logic-style) was rejected
+        // for consistency with Focal's other no-mod transport hotkeys.
+        if (code == 'T' && noMods)
+        {
+            if (tapeStrip->splitSelectedAtPlayhead()) return true;
+        }
     }
 
     // ── File: Ctrl/Cmd+S (save), Ctrl/Cmd+Shift+S (save as), Ctrl/Cmd+O (open) ──
