@@ -1149,14 +1149,41 @@ void MainComponent::beginSafeShutdown()
     markPhase ("phase 5: flush window operations");
     focal::platform::flushWindowOperations();
 
+    // Phase 5b: clear keyboard focus BEFORE hiding the main window.
+    // Wayland/Mutter aborts the desktop session if a top-level
+    // xdg_toplevel is destroyed while the compositor still records it
+    // as the focus_window (assertion meta_window_unmanage:
+    // focus_window != window in libmutter). The compositor moves
+    // focus_window when it observes a focus-leave protocol message,
+    // not when the window unmaps. Calling unfocusAllComponents +
+    // giveAwayKeyboardFocus on the top-level forces JUCE to issue the
+    // focus-out so Mutter's bookkeeping is consistent before destroy.
+    markPhase ("phase 5b: clear keyboard focus from main window");
+    juce::Component::unfocusAllComponents();
+    if (auto* tlw = getTopLevelComponent())
+        tlw->giveAwayKeyboardFocus();
+    focal::platform::flushWindowOperations();
+
     markPhase ("phase 6: hide main window");
     if (auto* tlw = getTopLevelComponent())
         tlw->setVisible (false);
     focal::platform::flushWindowOperations();
 
-    markPhase ("phase 7: post quit message");
-    if (auto* app = juce::JUCEApplicationBase::getInstance())
-        app->systemRequestedQuit();
+    // Defer systemRequestedQuit by one message-loop turn so the
+    // unmap + focus-out events we just queued get dispatched to the
+    // compositor BEFORE JUCE starts ~MainWindow. Without this,
+    // setVisible(false) + systemRequestedQuit + the subsequent
+    // teardown all run in a single dispatch, and Mutter sees the
+    // xdg_toplevel destroyed before its focus state has caught up.
+    markPhase ("phase 7: defer systemRequestedQuit to next message-loop tick");
+    juce::MessageManager::callAsync ([]
+    {
+        std::fprintf (stderr,
+                      "[Focal/shutdown] phase 7b: posting systemRequestedQuit\n");
+        std::fflush (stderr);
+        if (auto* app = juce::JUCEApplicationBase::getInstance())
+            app->systemRequestedQuit();
+    });
 
     markPhase ("phase 8: beginSafeShutdown returning to message loop");
 }
