@@ -1201,63 +1201,50 @@ void MainComponent::beginSafeShutdown()
     markPhase ("phase 5: flush window operations");
     focal::platform::flushWindowOperations();
 
-    // Phase 5b: hand keyboard focus off EVERY top-level window owned
-    // by this process before the unmap in phase 6. Wayland/Mutter
-    // aborts the desktop session if any top-level xdg_toplevel is
-    // destroyed while the compositor still records it as the
-    // focus_window (libmutter assertion in meta_window_unmanage:
-    // focus_window != window). The actual FocusOut event the
-    // compositor watches comes from XSetInputFocus(PointerRoot, ...)
-    // inside prepareForTopLevelDestruction; the JUCE-side
-    // unfocusAllComponents / giveAwayKeyboardFocus is a
-    // complementary cleanup of the component tree (no FocusOut on
-    // its own). The XSync that follows guarantees mutter has
-    // observed the focus change before phase 6's unmap lands.
-    //
-    // Walking juce::TopLevelWindow::getNumTopLevelWindows() rather
-    // than just getTopLevelComponent() is the belt-and-braces step:
-    // any future top-level window class (mastering popout, file
-    // dialog left open, etc.) inherits the protection without per-
-    // site plumbing. Phase 4's explicit aux-popout teardown stays
-    // (it's the actual destroy path); phase 5b is the catch-all.
+    // Walk every juce::TopLevelWindow so any future window class
+    // (mastering popout, file dialog left open) inherits the
+    // protection without per-site plumbing.
     markPhase ("phase 5b: clear keyboard focus from every top-level window");
     for (int i = juce::TopLevelWindow::getNumTopLevelWindows(); --i >= 0;)
         if (auto* w = juce::TopLevelWindow::getTopLevelWindow (i))
             focal::platform::prepareForTopLevelDestruction (*w);
 
-    markPhase ("phase 6: hide main window");
-    if (auto* tlw = getTopLevelComponent())
-        tlw->setVisible (false);
-    focal::platform::flushWindowOperations();
-
-    // Plugin destructors that run between phase 5b and the actual
-    // JUCE window destroy (Diva's AM_VST3_Processor::terminate,
-    // etc.) can re-arm X11 input focus through transient helper
-    // windows we don't iterate via juce::TopLevelWindow. Reassert
-    // "no focus" here so mutter's focus_window is NULL at the
-    // moment meta_window_unmanage runs.
-    focal::platform::clearXInputFocus();
-
-    // Defensive: defer systemRequestedQuit by one message-loop turn
-    // so any in-flight message-loop work that queued from phase 6's
-    // unmap drains BEFORE JUCE starts ~MainWindow. Phase 5b's
-    // XSetInputFocus + XSync already ensures the compositor's
-    // focus_window has moved off this toplevel by the time we get
-    // here, so this defer is no longer the load-bearing part of the
-    // shutdown contract - it's belt-and-suspenders for non-focus-
-    // related window-system races (paint events, child-window
-    // unmaps from hosted plugins) we'd rather not race.
-    markPhase ("phase 7: defer systemRequestedQuit to next message-loop tick");
-    juce::MessageManager::callAsync ([]
+    // Yield to mutter's compositor loop so it ticks a focus-out /
+    // focus-in cycle and updates its internal focus_window tracker
+    // before phase 6's unmap arrives. Without this gap, mutter sees
+    // the unmap before processing the EWMH activate above and trips
+    // meta_window_unmanage.
+    juce::Component::SafePointer<MainComponent> safeThis (this);
+    juce::MessageManager::callAsync ([safeThis]
     {
-        std::fprintf (stderr,
-                      "[Focal/shutdown] phase 7b: posting systemRequestedQuit\n");
-        std::fflush (stderr);
-        if (auto* app = juce::JUCEApplicationBase::getInstance())
-            app->systemRequestedQuit();
+        auto* self = safeThis.getComponent();
+        if (self == nullptr) return;
+
+        auto mark = [] (const char* msg)
+        {
+            std::fprintf (stderr, "[Focal/shutdown] %s\n", msg);
+            std::fflush (stderr);
+        };
+
+        mark ("phase 6: hide main window");
+        if (auto* tlw = self->getTopLevelComponent())
+            tlw->setVisible (false);
+        focal::platform::flushWindowOperations();
+
+        focal::platform::clearXInputFocus();
+
+        mark ("phase 7: defer systemRequestedQuit to next message-loop tick");
+        juce::MessageManager::callAsync ([]
+        {
+            std::fprintf (stderr,
+                          "[Focal/shutdown] phase 7b: posting systemRequestedQuit\n");
+            std::fflush (stderr);
+            if (auto* app = juce::JUCEApplicationBase::getInstance())
+                app->systemRequestedQuit();
+        });
     });
 
-    markPhase ("phase 8: beginSafeShutdown returning to message loop");
+    markPhase ("phase 8: beginSafeShutdown returning to message loop (yield to mutter)");
 }
 
 void MainComponent::saveSessionAndThen (std::function<void(bool)> onComplete)
