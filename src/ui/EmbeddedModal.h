@@ -149,14 +149,18 @@ public:
             // Hand ownership to a callAsync lambda - the body destructs
             // when that lambda is invoked (and then destroyed) on the
             // next message-loop tick, AFTER the current button-callback
-            // stack has fully unwound. The lambda holds the body by
-            // value (move-captured unique_ptr); we don't capture `this`
-            // because the EmbeddedModal itself may have been destructed
-            // by the time the message-loop processes the call (e.g. on
-            // app shutdown). Self-contained ownership = safe across
-            // every teardown order.
+            // stack has fully unwound. We don't capture `this` because
+            // the EmbeddedModal itself may have been destructed by the
+            // time the message-loop processes the call (e.g. on app
+            // shutdown). Self-contained ownership = safe across every
+            // teardown order.
+            //
+            // shared_ptr (not unique_ptr) so the capturing lambda is
+            // copyable - std::function requires copy-constructible
+            // callables on libc++ (macOS).
+            std::shared_ptr<juce::Component> trash (body_.release());
             juce::MessageManager::callAsync (
-                [trash = std::move (body_)]() mutable { (void) trash; });
+                [trash]() mutable { (void) trash; });
         }
         borrowedBody_ = nullptr;
         backdrop_.reset();
