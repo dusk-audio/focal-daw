@@ -67,6 +67,139 @@ PianoRollComponent::PianoRollComponent (Session& s, AudioEngine& e, int t, int r
 {
     setOpaque (true);
     setWantsKeyboardFocus (true);
+
+    // Status-bar readouts. Read-only labels styled to match Reaper's
+    // small-grey-on-dark aesthetic. setInterceptsMouseClicks(false,
+    // false) keeps the label transparent to the rest of the routing.
+    auto styleReadout = [] (juce::Label& l, juce::Justification just)
+    {
+        l.setJustificationType (just);
+        l.setColour (juce::Label::textColourId, juce::Colour (0xffd0d0d8));
+        l.setColour (juce::Label::backgroundColourId, juce::Colour (0xff181820));
+        l.setColour (juce::Label::outlineColourId,    juce::Colour (0xff3a3a44));
+        l.setFont (juce::Font (juce::FontOptions (12.0f, juce::Font::bold)));
+        l.setEditable (false, false, false);
+    };
+    styleReadout (positionLabel, juce::Justification::centredLeft);
+    styleReadout (valueLabel,    juce::Justification::centredLeft);
+    styleReadout (trackLabel,    juce::Justification::centredRight);
+    addAndMakeVisible (positionLabel);
+    addAndMakeVisible (valueLabel);
+    addAndMakeVisible (trackLabel);
+
+    // Combo boxes - JUCE's standard control with the look-and-feel
+    // already in use across the app (Audio settings, mastering
+    // limiter, channel strip).
+    auto styleCombo = [] (juce::ComboBox& c)
+    {
+        c.setColour (juce::ComboBox::backgroundColourId, juce::Colour (0xff181820));
+        c.setColour (juce::ComboBox::outlineColourId,    juce::Colour (0xff3a3a44));
+        c.setColour (juce::ComboBox::textColourId,       juce::Colour (0xffd0d0d8));
+        c.setColour (juce::ComboBox::arrowColourId,      juce::Colour (0xff8090a0));
+    };
+
+    // Item IDs: 1=1/1, 2=1/2, 3=1/4, 4=1/8, 5=1/16, 6=1/32, 7=Off.
+    gridCombo.addItem ("1/1",  1);
+    gridCombo.addItem ("1/2",  2);
+    gridCombo.addItem ("1/4",  3);
+    gridCombo.addItem ("1/8",  4);
+    gridCombo.addItem ("1/16", 5);
+    gridCombo.addItem ("1/32", 6);
+    gridCombo.addItem ("Off",  7);
+    gridCombo.setSelectedId (5, juce::dontSendNotification);   // 1/16 default
+    gridCombo.onChange = [this]
+    {
+        switch (gridCombo.getSelectedId())
+        {
+            case 1: snapTicks = (juce::int64) kMidiTicksPerQuarter * 4; break;
+            case 2: snapTicks = (juce::int64) kMidiTicksPerQuarter * 2; break;
+            case 3: snapTicks = (juce::int64) kMidiTicksPerQuarter;     break;
+            case 4: snapTicks = (juce::int64) kMidiTicksPerQuarter / 2; break;
+            case 5: snapTicks = (juce::int64) kMidiTicksPerQuarter / 4; break;
+            case 6: snapTicks = (juce::int64) kMidiTicksPerQuarter / 8; break;
+            case 7: snapTicks = 0; break;
+            default: break;
+        }
+        repaint();
+    };
+    styleCombo (gridCombo);
+    addAndMakeVisible (gridCombo);
+
+    notesCombo.addItem ("Grid",    1);
+    notesCombo.addItem ("Free",    2);
+    notesCombo.addItem ("Triplet", 3);
+    notesCombo.addItem ("Dotted",  4);
+    notesCombo.setSelectedId (1, juce::dontSendNotification);
+    notesCombo.onChange = [this]
+    {
+        noteEntryMode = (NoteEntryMode) (notesCombo.getSelectedId() - 1);
+    };
+    styleCombo (notesCombo);
+    addAndMakeVisible (notesCombo);
+
+    colorCombo.addItem ("Pitch",    1);
+    colorCombo.addItem ("Velocity", 2);
+    colorCombo.addItem ("Channel",  3);
+    colorCombo.setSelectedId (1, juce::dontSendNotification);
+    colorCombo.onChange = [this]
+    {
+        colorMode = (ColorMode) (colorCombo.getSelectedId() - 1);
+        repaint();
+    };
+    styleCombo (colorCombo);
+    addAndMakeVisible (colorCombo);
+
+    keySnapToggle.setButtonText ("Key snap");
+    keySnapToggle.setToggleState (true, juce::dontSendNotification);
+    keySnapToggle.setColour (juce::ToggleButton::textColourId,
+                              juce::Colour (0xffd0d0d8));
+    keySnapToggle.onClick = [this]
+    {
+        keySnap = keySnapToggle.getToggleState();
+    };
+    addAndMakeVisible (keySnapToggle);
+
+    // Top icon row - mirror of the chip popup actions, plus a few
+    // mouse-only conveniences (zoom-fit, CC-lane toggle).
+    addAndMakeVisible (undoButton);
+    undoButton.setTooltip ("Undo");
+    undoButton.onClick = [this] { engine.getUndoManager().undo(); repaint(); };
+
+    addAndMakeVisible (redoButton);
+    redoButton.setTooltip ("Redo");
+    redoButton.onClick = [this] { engine.getUndoManager().redo(); repaint(); };
+
+    addAndMakeVisible (splitButton);
+    splitButton.setTooltip ("Split at edit cursor");
+    splitButton.onClick = [this] { splitSelectedAtCursor(); };
+
+    addAndMakeVisible (glueButton);
+    glueButton.setTooltip ("Glue selection");
+    glueButton.onClick = [this]
+    {
+        if (selectedNotes.size() >= 2) { glueSelectedNotes(); repaint(); }
+    };
+
+    addAndMakeVisible (quantizeButton);
+    quantizeButton.setTooltip ("Quantize…");
+    quantizeButton.onClick = [this] { showQuantizePopup(); };
+
+    addAndMakeVisible (propertiesButton);
+    propertiesButton.setTooltip ("Note properties…");
+    propertiesButton.onClick = [this]
+    {
+        if (! selectedNotes.empty()) showNotePropertiesPopup (selectedNotes.front());
+    };
+
+    addAndMakeVisible (zoomFitButton);
+    zoomFitButton.setTooltip ("Zoom to fit region");
+    zoomFitButton.onClick = [this] { zoomFit(); };
+
+    addAndMakeVisible (toggleCcButton);
+    toggleCcButton.setTooltip ("Show / hide CC lane");
+    toggleCcButton.onClick = [this] { toggleCcLane(); };
+
+    refreshStatusBarReadouts();
 }
 
 PianoRollComponent::~PianoRollComponent() = default;
@@ -116,10 +249,113 @@ juce::int64 PianoRollComponent::tickForX (int x) const
     return juce::jmax ((juce::int64) 0, t);
 }
 
-void PianoRollComponent::resized() {}
+void PianoRollComponent::resized()
+{
+    layoutIconRow    (juce::Rectangle<int> (0, 0, getWidth(), kToolbarHeight));
+    layoutStatusBar  (juce::Rectangle<int> (0, getHeight() - kStatusBarH,
+                                                getWidth(), kStatusBarH));
+}
+
+void PianoRollComponent::layoutIconRow (juce::Rectangle<int> area)
+{
+    auto inner = area.reduced (8, 3);
+    const int dia = juce::jmin (inner.getHeight(), 28);
+    const int gap = 6;
+
+    auto place = [&] (IconButton& b)
+    {
+        b.setBounds (inner.removeFromLeft (dia)
+                          .withSizeKeepingCentre (dia, dia));
+        inner.removeFromLeft (gap);
+    };
+    place (undoButton);
+    place (redoButton);
+    inner.removeFromLeft (gap);          // small group separator
+    place (splitButton);
+    place (glueButton);
+    place (quantizeButton);
+    place (propertiesButton);
+    inner.removeFromLeft (gap);
+    place (zoomFitButton);
+    place (toggleCcButton);
+}
+
+void PianoRollComponent::layoutStatusBar (juce::Rectangle<int> area)
+{
+    auto inner = area.reduced (8, 4);
+
+    // Left cluster: position + value readouts.
+    positionLabel.setBounds (inner.removeFromLeft (110));
+    inner.removeFromLeft (4);
+    valueLabel.setBounds    (inner.removeFromLeft (62));
+    inner.removeFromLeft (10);
+
+    // Centre cluster: grid / notes / color combos + key-snap toggle.
+    auto placeLabelled = [&] (juce::ComboBox& c, int w)
+    {
+        c.setBounds (inner.removeFromLeft (w));
+        inner.removeFromLeft (8);
+    };
+    placeLabelled (gridCombo,  82);
+    placeLabelled (notesCombo, 92);
+    placeLabelled (colorCombo, 100);
+    keySnapToggle.setBounds (inner.removeFromLeft (96));
+    inner.removeFromLeft (8);
+
+    // Right cluster: track / channel readout, anchored to the right edge.
+    trackLabel.setBounds (inner.removeFromRight (juce::jmin (180, inner.getWidth())));
+}
+
+juce::String PianoRollComponent::formatBarBeat (juce::int64 tick) const
+{
+    const int beatsPerBar = juce::jmax (1, session.beatsPerBar.load (std::memory_order_relaxed));
+    const auto ticksPerBeat = (juce::int64) kMidiTicksPerQuarter;
+    const auto ticksPerBar  = ticksPerBeat * beatsPerBar;
+    const auto safeTick = juce::jmax ((juce::int64) 0, tick);
+    const auto bar  = safeTick / ticksPerBar;
+    const auto rem  = safeTick % ticksPerBar;
+    const auto beat = rem / ticksPerBeat;
+    const auto sub  = rem % ticksPerBeat;
+    return juce::String ((int) (bar + 1)) + "."
+         + juce::String ((int) (beat + 1)) + "."
+         + juce::String ((int) sub).paddedLeft ('0', 3);
+}
+
+int PianoRollComponent::activeVelocity() const noexcept
+{
+    if (selectedNotes.empty()) return -1;
+    const auto* r = region();
+    if (r == nullptr) return -1;
+    const int idx = selectedNotes.back();   // most-recently-added
+    if (idx < 0 || idx >= (int) r->notes.size()) return -1;
+    return r->notes[(size_t) idx].velocity;
+}
+
+void PianoRollComponent::refreshStatusBarReadouts()
+{
+    positionLabel.setText ("pos " + formatBarBeat (editCursorTick),
+                              juce::dontSendNotification);
+    const int v = activeVelocity();
+    valueLabel.setText (v < 0 ? juce::String ("vel \xe2\x80\x94")
+                                : "vel " + juce::String (v),
+                            juce::dontSendNotification);
+
+    const auto* r = region();
+    int channel = 1;
+    if (r != nullptr && ! r->notes.empty()) channel = r->notes.front().channel;
+    trackLabel.setText ("Track " + juce::String (trackIdx + 1)
+                            + "  \xc2\xb7  ch " + juce::String (channel),
+                            juce::dontSendNotification);
+}
 
 void PianoRollComponent::paint (juce::Graphics& g)
 {
+    // Pull the status-bar labels up to date before any drawing - the
+    // labels are children and JUCE will repaint them on their own pass,
+    // so setting their text here (with dontSendNotification) is the
+    // cheapest sync point for the parent gesture handlers.
+    refreshStatusBarReadouts();
+
     g.fillAll (kBgDark);
 
     const auto bounds = getLocalBounds();
@@ -130,30 +366,42 @@ void PianoRollComponent::paint (juce::Graphics& g)
                                                       bounds.getWidth(), kHeaderHeight);
     const int  topBandH    = kToolbarHeight + kHeaderHeight;
 
-    // Bottom strips stack: CC lane at the very bottom, velocity lane
-    // above it. The note grid fills the space between header and
-    // velocity lane.
+    // Bottom strips stack: status bar at the very bottom, then CC
+    // lane, then velocity lane. The note grid fills the space between
+    // header and velocity lane.
+    const int statusBarBottom = bounds.getBottom();
+    const int ccBottom        = statusBarBottom - kStatusBarH;
     const auto ccArea = juce::Rectangle<int> (kKeyboardWidth,
-                                                 bounds.getBottom() - kCcStripH,
+                                                 ccBottom - ccStripH,
                                                  bounds.getWidth() - kKeyboardWidth,
-                                                 kCcStripH);
+                                                 ccStripH);
     const auto velocityArea = juce::Rectangle<int> (kKeyboardWidth,
-                                                       ccArea.getY() - kVelocityStripH,
+                                                       ccArea.getY() - velocityStripH,
                                                        bounds.getWidth() - kKeyboardWidth,
-                                                       kVelocityStripH);
+                                                       velocityStripH);
     const auto keyboardArea = juce::Rectangle<int> (0, topBandH,
                                                        kKeyboardWidth,
-                                                       bounds.getHeight() - topBandH);
+                                                       bounds.getHeight() - topBandH - kStatusBarH);
     const auto gridArea    = juce::Rectangle<int> (kKeyboardWidth, topBandH,
                                                      bounds.getWidth() - kKeyboardWidth,
                                                      bounds.getHeight() - topBandH
-                                                       - kVelocityStripH - kCcStripH);
+                                                       - velocityStripH - ccStripH - kStatusBarH);
+
+    // Status-bar background fill - children are positioned in resized().
+    const auto statusArea = juce::Rectangle<int> (0, ccBottom,
+                                                     bounds.getWidth(), kStatusBarH);
+    g.setColour (juce::Colour (0xff181820));
+    g.fillRect (statusArea);
+    g.setColour (kGridLine);
+    g.drawHorizontalLine (statusArea.getY(), (float) statusArea.getX(),
+                                                (float) statusArea.getRight());
 
     paintNoteGrid     (g, gridArea);
     paintToolbar      (g, toolbarArea);
     paintBeatRuler    (g, headerArea);
     paintKeyboard     (g, keyboardArea);
     paintNotes        (g, gridArea);
+    paintEditCursor   (g, gridArea);
     paintVelocityStrip (g, velocityArea);
     paintCcStrip      (g, ccArea);
 
@@ -179,109 +427,8 @@ void PianoRollComponent::paintToolbar (juce::Graphics& g, juce::Rectangle<int> a
     g.drawHorizontalLine (area.getBottom() - 1,
                             (float) area.getX(), (float) area.getRight());
 
-    // Pill helper - draws a label/value pair as a chip with the
-    // "label:" portion dimmed and the value portion bright. Reads
-    // at a glance.
-    auto drawChip = [&g] (juce::Rectangle<int> r,
-                            const juce::String& label, const juce::String& value,
-                            juce::Colour valueColour)
-    {
-        g.setColour (juce::Colour (0xff181820));
-        g.fillRoundedRectangle (r.toFloat(), 3.0f);
-        g.setColour (juce::Colour (0xff3a3a44));
-        g.drawRoundedRectangle (r.toFloat(), 3.0f, 0.8f);
-
-        auto inner = r.reduced (8, 4);
-        g.setFont (juce::Font (juce::FontOptions (12.0f, juce::Font::plain)));
-        g.setColour (juce::Colour (0xff8090a0));
-        const int labelW = g.getCurrentFont().getStringWidth (label);
-        g.drawText (label, inner.removeFromLeft (labelW),
-                     juce::Justification::centredLeft, false);
-        inner.removeFromLeft (5);
-        g.setFont (juce::Font (juce::FontOptions (12.0f, juce::Font::bold)));
-        g.setColour (valueColour);
-        g.drawText (value, inner, juce::Justification::centredLeft, false);
-    };
-
-    // Snap value
-    juce::String snapStr;
-    if (snapTicks <= 0) snapStr = "Off";
-    else if (snapTicks == kMidiTicksPerQuarter * 4) snapStr = "1/1";
-    else if (snapTicks == kMidiTicksPerQuarter * 2) snapStr = "1/2";
-    else if (snapTicks == kMidiTicksPerQuarter)     snapStr = "1/4";
-    else if (snapTicks == kMidiTicksPerQuarter / 2) snapStr = "1/8";
-    else if (snapTicks == kMidiTicksPerQuarter / 4) snapStr = "1/16";
-    else if (snapTicks == kMidiTicksPerQuarter / 8) snapStr = "1/32";
-    else snapStr = juce::String ((int) snapTicks) + "t";
-
-    // Colour-mode value
-    const char* colorStr = colorMode == ColorMode::Pitch    ? "Pitch"
-                          : colorMode == ColorMode::Velocity ? "Vel"
-                                                              : "Chan";
-
-    // Scale value
-    juce::String scaleStr;
-    if (scale == Scale::Off) scaleStr = "Off";
-    else
-    {
-        static const char* roots[] = { "C", "C#", "D", "D#", "E", "F", "F#",
-                                          "G", "G#", "A", "A#", "B" };
-        const char* modeShort =
-            scale == Scale::Major      ? "Maj" :
-            scale == Scale::Minor      ? "Min" :
-            scale == Scale::Dorian     ? "Dor" :
-            scale == Scale::Phrygian   ? "Phr" :
-            scale == Scale::Lydian     ? "Lyd" :
-            scale == Scale::Mixolydian ? "Mix" :
-            scale == Scale::Locrian    ? "Loc" : "";
-        scaleStr = juce::String (roots[scaleRoot]) + " " + modeShort;
-    }
-
-    // CC controller name
-    const char* ccName =
-        activeCcController == 1   ? "Mod"     :
-        activeCcController == 7   ? "Volume"  :
-        activeCcController == 11  ? "Express" :
-        activeCcController == 64  ? "Sustain" :
-        activeCcController == 74  ? "Filter"  : nullptr;
-    juce::String ccStr = juce::String (activeCcController);
-    if (ccName != nullptr) ccStr += " (" + juce::String (ccName) + ")";
-
-    // Lay out chips left-to-right with a small gap. Each is sized to
-    // fit its content; the legend gets the rest of the bar.
-    auto chips = area.reduced (8, 4);
-    auto cursorX = chips.getX();
-    auto placeChip = [&] (const juce::String& label, const juce::String& value,
-                            juce::Colour valueColour)
-    {
-        g.setFont (juce::Font (juce::FontOptions (12.0f, juce::Font::bold)));
-        const int valueW = g.getCurrentFont().getStringWidth (value);
-        g.setFont (juce::Font (juce::FontOptions (12.0f, juce::Font::plain)));
-        const int labelW = g.getCurrentFont().getStringWidth (label);
-        const int chipW  = labelW + valueW + 24;
-        juce::Rectangle<int> r (cursorX, chips.getY(), chipW, chips.getHeight());
-        drawChip (r, label, value, valueColour);
-        cursorX += chipW + 6;
-    };
-    placeChip ("Q",    snapStr,  juce::Colour (0xffe0c060));
-    placeChip ("Color", colorStr, juce::Colour (0xff70b0e0));
-    placeChip ("Scale", scaleStr, juce::Colour (0xff60c060));
-    placeChip ("CC",    ccStr,    juce::Colour (0xff60c0a8));
-
-    // Hotkey legend in the remaining space - small dim text with a
-    // few of the most-used bindings. Truncated by JUCE's drawText
-    // when the bar is narrow.
-    g.setFont (juce::Font (juce::FontOptions (11.5f, juce::Font::plain)));
-    g.setColour (juce::Colour (0xff707080));
-    auto legendArea = area.reduced (8, 4);
-    legendArea.setX (cursorX + 6);
-    g.drawText (
-        juce::String::fromUTF8 (
-            "1\xe2\x80\x936/0 snap   C colour   L CC   Q quantize   "
-            "S scale   V velocity   G glue   T split"
-            "   Cmd+D dup   \xe2\x86\x91\xe2\x86\x93 transpose"
-            "   \xe2\x86\x90\xe2\x86\x92 nudge"),
-        legendArea, juce::Justification::centredLeft, true);
+    // Icon row paints itself via the IconButton children. The toolbar
+    // band itself just paints its background + separator hairline.
 }
 
 void PianoRollComponent::paintNoteGrid (juce::Graphics& g, juce::Rectangle<int> area)
@@ -337,13 +484,36 @@ void PianoRollComponent::paintNoteGrid (juce::Graphics& g, juce::Rectangle<int> 
     const int ticksPerBeat = kMidiTicksPerQuarter;
     const int ticksPerBar  = ticksPerBeat * beatsPerBar;
     const int totalBars = (int) (r->lengthInTicks / ticksPerBar) + 1;
+    // Subdivision lines at the active snap step - drawn first so the
+    // beat / bar lines paint over them. Skipped when snap is Off, when
+    // the snap step is one full beat (would just duplicate beat lines),
+    // or when zoomed too far out to read.
+    const float pxPerBeat = (float) ticksPerBeat * pixelsPerTick;
+    if (snapTicks > 0 && snapTicks < ticksPerBeat && pxPerBeat >= 28.0f)
+    {
+        g.setColour (kBeatLine.withAlpha (0.35f));
+        const int subTicksTotal = (int) ((juce::int64) totalBars * ticksPerBar);
+        for (juce::int64 t = 0; t <= subTicksTotal; t += snapTicks)
+        {
+            if (t % ticksPerBeat == 0) continue;   // beat / bar lines paint themselves
+            const int sx = xForTick (t);
+            if (sx < area.getX() || sx > area.getRight()) continue;
+            g.drawVerticalLine (sx, (float) area.getY(), (float) area.getBottom());
+        }
+    }
+
     for (int bar = 0; bar <= totalBars; ++bar)
     {
         const auto barTick = (juce::int64) bar * ticksPerBar;
         const int  bx = xForTick (barTick);
-        if (bx < area.getX() || bx > area.getRight()) continue;
-        g.setColour (kBarLine);
-        g.drawVerticalLine (bx, (float) area.getY(), (float) area.getBottom());
+        if (bx >= area.getX() && bx <= area.getRight())
+        {
+            // 2 px wide filled rect so the bar line reads as the
+            // dominant rhythmic anchor against the lighter beat /
+            // subdivision lines.
+            g.setColour (kBarLine);
+            g.fillRect (bx, area.getY(), 2, area.getHeight());
+        }
         for (int beat = 1; beat < beatsPerBar; ++beat)
         {
             const int  bex = xForTick (barTick + beat * ticksPerBeat);
@@ -468,16 +638,54 @@ void PianoRollComponent::paintNotes (juce::Graphics& g, juce::Rectangle<int> are
         const bool selected = isNoteSelected (i);
         const auto fill = selected ? kNoteSelected : colourForNote (n);
         g.setColour (fill);
-        g.fillRoundedRectangle (rect.toFloat(), 1.5f);
+        g.fillRect (rect);
         g.setColour (kNoteEdge);
-        g.drawRoundedRectangle (rect.toFloat(), 1.5f, 0.8f);
+        g.drawRect (rect, 1);
     }
+}
+
+void PianoRollComponent::paintEditCursor (juce::Graphics& g, juce::Rectangle<int> gridArea)
+{
+    const int cx = xForTick (editCursorTick);
+    if (cx < gridArea.getX() - 1 || cx > gridArea.getRight() + 1) return;
+
+    juce::Graphics::ScopedSaveState saved (g);
+    g.reduceClipRegion (gridArea);
+    // Reaper-style gold cursor. Slight alpha so the line reads as
+    // "marker" rather than "transport playhead" - the latter would
+    // be solid yellow and is reserved for when transport playhead
+    // gets added.
+    g.setColour (juce::Colour (0xffffd060).withAlpha (0.65f));
+    g.drawVerticalLine (cx, (float) gridArea.getY(), (float) gridArea.getBottom());
+    // Tiny triangle anchor at the top so the cursor is visible even
+    // when it falls right under a note.
+    juce::Path tri;
+    tri.addTriangle ((float) cx - 4.0f, (float) gridArea.getY(),
+                       (float) cx + 4.0f, (float) gridArea.getY(),
+                       (float) cx,         (float) gridArea.getY() + 5.0f);
+    g.setColour (juce::Colour (0xffffd060));
+    g.fillPath (tri);
 }
 
 void PianoRollComponent::paintVelocityStrip (juce::Graphics& g, juce::Rectangle<int> area)
 {
     g.setColour (juce::Colour (0xff121218));
     g.fillRect (area);
+
+    // Resize-grab strip just above the lane's top edge. Painted as a
+    // hairline + 4 px gradient so the user has a visual cue that the
+    // border is draggable. Sits ABOVE area.getY() in screen space.
+    {
+        const auto handleR = juce::Rectangle<int> (
+            area.getX(), area.getY() - kStripResizeGrabPx,
+            area.getWidth(), kStripResizeGrabPx);
+        g.setColour (juce::Colour (0xff2a2a36));
+        g.fillRect (handleR);
+        g.setColour (juce::Colour (0xff4a4a58));
+        g.fillRect (handleR.getX() + handleR.getWidth() / 2 - 18,
+                     handleR.getY() + 1, 36, 2);
+    }
+
     g.setColour (kGridLine);
     g.drawHorizontalLine (area.getY(),
                             (float) area.getX(), (float) area.getRight());
@@ -487,40 +695,81 @@ void PianoRollComponent::paintVelocityStrip (juce::Graphics& g, juce::Rectangle<
     juce::Graphics::ScopedSaveState saved (g);
     g.reduceClipRegion (area);
 
-    // Floor + ceiling baselines so the strip reads as a "level meter" -
-    // 0 / 64 / 127 lines act as soft reference rules behind the bars.
+    // Reference rules at 0 / 64 / 127 - read as a soft "level-meter" backdrop
+    // behind the lollipops. The 64-line is brightest; the 0/127 are subtle.
     const float ax = (float) area.getX();
     const float ay = (float) area.getY();
     const float aw = (float) area.getWidth();
     const float ah = (float) area.getHeight();
-    g.setColour (kKeyOctaveLine.withAlpha (0.10f));
+    g.setColour (kKeyOctaveLine.withAlpha (0.18f));
     g.drawHorizontalLine ((int) (ay + ah * 0.5f), ax, ax + aw);
+    g.setColour (kKeyOctaveLine.withAlpha (0.08f));
+    g.drawHorizontalLine ((int) (ay + ah * 0.25f), ax, ax + aw);
+    g.drawHorizontalLine ((int) (ay + ah * 0.75f), ax, ax + aw);
 
-    constexpr float kBarWidth = 4.0f;
-    const float baseY = ay + ah - 2.0f;
-    const float topY  = ay + 4.0f;
+    // Velocity legend on the left edge - "127" / "64" / "0". Subtle so
+    // it doesn't compete with the bars. Drawn inside the keyboard's
+    // margin so it doesn't overlap the first bar.
+    g.setFont (juce::Font (juce::FontOptions (9.5f, juce::Font::plain)));
+    g.setColour (juce::Colour (0xff556070));
+    g.drawText ("127", (int) ax + 3, (int) ay + 2, 30, 11,
+                 juce::Justification::centredLeft, false);
+    g.drawText ("64",  (int) ax + 3, (int) (ay + ah * 0.5f - 5), 30, 11,
+                 juce::Justification::centredLeft, false);
+    g.drawText ("0",   (int) ax + 3, (int) (ay + ah - 12), 30, 11,
+                 juce::Justification::centredLeft, false);
+
+    constexpr float kStemWidth   = 2.0f;
+    constexpr float kCircleR     = 5.5f;   // outer radius of the lollipop head
+    const float baseY = ay + ah - 3.0f;    // baseline (velocity 0)
+    const float topY  = ay + kCircleR + 2.0f;
     const float span  = baseY - topY;
 
     for (int i = 0; i < (int) r->notes.size(); ++i)
     {
         const auto& n = r->notes[(size_t) i];
         const int nx = xForTick (n.startTick);
-        if (nx < area.getX() - 4 || nx > area.getRight() + 4) continue;
+        if (nx < area.getX() - 8 || nx > area.getRight() + 8) continue;
 
-        const float frac = juce::jlimit (0.0f, 1.0f, (float) n.velocity / 127.0f);
-        const float top  = baseY - span * frac;
-        const auto bar = juce::Rectangle<float> ((float) nx - kBarWidth * 0.5f,
-                                                    top,
-                                                    kBarWidth,
-                                                    baseY - top);
+        const float frac   = juce::jlimit (0.0f, 1.0f, (float) n.velocity / 127.0f);
+        const float headCY = baseY - span * frac;
 
         const bool selected = isNoteSelected (i);
-        const auto barColour = selected ? kNoteSelected
+        const auto baseCol  = selected ? kNoteSelected
                                           : colourForNote (n).withMultipliedBrightness (1.05f);
-        g.setColour (barColour);
-        g.fillRoundedRectangle (bar, 1.0f);
-        g.setColour (kNoteEdge.withAlpha (0.6f));
-        g.drawRoundedRectangle (bar, 1.0f, 0.5f);
+
+        // Stem: thin vertical bar from baseline to the head's centre.
+        const auto stem = juce::Rectangle<float> ((float) nx - kStemWidth * 0.5f,
+                                                     headCY,
+                                                     kStemWidth,
+                                                     baseY - headCY);
+        g.setColour (baseCol.withAlpha (0.85f));
+        g.fillRect (stem);
+
+        // Head: filled disc with a subtle outer ring. Reads as a knob
+        // the user can grab - matches the user's "lollipop" mental model.
+        const auto head = juce::Rectangle<float> ((float) nx - kCircleR,
+                                                     headCY - kCircleR,
+                                                     kCircleR * 2.0f,
+                                                     kCircleR * 2.0f);
+        g.setColour (baseCol);
+        g.fillEllipse (head);
+        g.setColour (juce::Colours::white.withAlpha (selected ? 0.9f : 0.35f));
+        g.drawEllipse (head, selected ? 1.4f : 0.9f);
+
+        // Velocity readout near the head when selected - lets the user
+        // see exact values during fine tweaks. Skipped for unselected
+        // notes so the lane stays readable in dense regions.
+        if (selected)
+        {
+            g.setFont (juce::Font (juce::FontOptions (10.0f, juce::Font::bold)));
+            g.setColour (juce::Colours::white.withAlpha (0.92f));
+            const auto text = juce::String (n.velocity);
+            const int tw = g.getCurrentFont().getStringWidth (text) + 6;
+            g.drawText (text,
+                         (int) ((float) nx + kCircleR + 3.0f), (int) headCY - 7,
+                         tw, 14, juce::Justification::centredLeft, false);
+        }
     }
 }
 
@@ -1139,6 +1388,57 @@ void PianoRollComponent::showScalePopup()
         });
 }
 
+void PianoRollComponent::showColorModePopup()
+{
+    juce::PopupMenu m;
+    m.addItem (1, "Pitch",    true, colorMode == ColorMode::Pitch);
+    m.addItem (2, "Velocity", true, colorMode == ColorMode::Velocity);
+    m.addItem (3, "Channel",  true, colorMode == ColorMode::Channel);
+    juce::Component::SafePointer<PianoRollComponent> safe (this);
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this),
+        [safe] (int chosen)
+        {
+            auto* self = safe.getComponent();
+            if (self == nullptr || chosen <= 0) return;
+            self->colorMode = chosen == 1 ? ColorMode::Pitch
+                              : chosen == 2 ? ColorMode::Velocity
+                                             : ColorMode::Channel;
+            self->repaint();
+        });
+}
+
+void PianoRollComponent::showCcControllerPopup()
+{
+    juce::PopupMenu m;
+    // Common CCs surfaced as named entries; the rest behind a numeric
+    // submenu so the chip doubles as a full controller picker.
+    struct Named { int cc; const char* name; };
+    static const Named common[] = {
+        { 1,  "1 - Mod Wheel"   }, { 7,  "7 - Volume"     },
+        { 11, "11 - Expression" }, { 64, "64 - Sustain"   },
+        { 71, "71 - Resonance"  }, { 74, "74 - Filter"    },
+        { 91, "91 - Reverb"     }, { 93, "93 - Chorus"    },
+    };
+    for (const auto& c : common)
+        m.addItem (c.cc + 1, c.name, true, activeCcController == c.cc);
+
+    juce::PopupMenu numeric;
+    for (int cc = 0; cc < 128; ++cc)
+        numeric.addItem (cc + 1, juce::String (cc), true, activeCcController == cc);
+    m.addSeparator();
+    m.addSubMenu ("All controllers (0-127)", numeric);
+
+    juce::Component::SafePointer<PianoRollComponent> safe (this);
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this),
+        [safe] (int chosen)
+        {
+            auto* self = safe.getComponent();
+            if (self == nullptr || chosen <= 0) return;
+            self->activeCcController = juce::jlimit (0, 127, chosen - 1);
+            self->repaint();
+        });
+}
+
 juce::Colour PianoRollComponent::colourForNote (const MidiNote& n) const noexcept
 {
     const float velFactor = juce::jlimit (0.0f, 1.0f, (float) n.velocity / 127.0f);
@@ -1169,6 +1469,21 @@ void PianoRollComponent::paintCcStrip (juce::Graphics& g, juce::Rectangle<int> a
 {
     g.setColour (juce::Colour (0xff0e0e14));
     g.fillRect (area);
+
+    // Resize handle just above the CC lane's top edge - sits at the
+    // boundary between velocity strip and cc strip. Drag to adjust
+    // the cc lane's height.
+    {
+        const auto handleR = juce::Rectangle<int> (
+            area.getX(), area.getY() - kStripResizeGrabPx,
+            area.getWidth(), kStripResizeGrabPx);
+        g.setColour (juce::Colour (0xff242430));
+        g.fillRect (handleR);
+        g.setColour (juce::Colour (0xff424252));
+        g.fillRect (handleR.getX() + handleR.getWidth() / 2 - 18,
+                     handleR.getY() + 1, 36, 2);
+    }
+
     g.setColour (kGridLine);
     g.drawHorizontalLine (area.getY(), (float) area.getX(), (float) area.getRight());
 
@@ -1253,17 +1568,34 @@ int PianoRollComponent::hitTestVelocityBar (int x, juce::Rectangle<int> stripAre
 {
     const auto* r = region();
     if (r == nullptr) return -1;
-    constexpr int kHitSlopPx = 4;   // bar is ~4 px wide; same in either side
-    // Walk newest-first so an overlapping bar prefers the most-recent
-    // note (matches the painter's draw order).
+    if (x < stripArea.getX() || x > stripArea.getRight()) return -1;
+
+    // Column-based hit test - the user clicks anywhere in a note's
+    // horizontal span and the lollipop for that note responds. Walk
+    // newest-first so an overlap prefers the most-recently-added note,
+    // matching the paint order.
+    for (int i = (int) r->notes.size() - 1; i >= 0; --i)
+    {
+        const auto& n = r->notes[(size_t) i];
+        const int x0 = xForTick (n.startTick);
+        const int x1 = xForTick (n.startTick + n.lengthInTicks);
+        if (x >= x0 && x <= x1) return i;
+    }
+
+    // Fallback: nearest lollipop head within a generous window. Lets
+    // the user click slightly past a short note's tail and still hit
+    // its head.
+    constexpr int kFallbackPx = 18;
+    int bestIdx = -1;
+    int bestDist = kFallbackPx + 1;
     for (int i = (int) r->notes.size() - 1; i >= 0; --i)
     {
         const auto& n = r->notes[(size_t) i];
         const int nx = xForTick (n.startTick);
-        if (std::abs (x - nx) <= kHitSlopPx
-            && x >= stripArea.getX() && x <= stripArea.getRight()) return i;
+        const int d = std::abs (x - nx);
+        if (d < bestDist) { bestDist = d; bestIdx = i; }
     }
-    return -1;
+    return bestIdx;
 }
 
 // Snap a tick to the nearest grid step. Pure helper so create / move /
@@ -1329,14 +1661,40 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
 
     const bool extendSelection = e.mods.isShiftDown() || e.mods.isCommandDown();
 
-    // Bottom-strip layout: CC lane at the very bottom, velocity lane
-    // above it. Compute both rects inline so they match paint().
+    // Bottom-strip layout: status bar at the very bottom, CC lane
+    // above it, velocity lane above the CC lane. Compute the rects
+    // inline so they match paint().
+    const int  ccBottom    = getHeight() - kStatusBarH;
     const auto ccArea = juce::Rectangle<int> (
-        kKeyboardWidth, getHeight() - kCcStripH,
-        getWidth() - kKeyboardWidth, kCcStripH);
+        kKeyboardWidth, ccBottom - ccStripH,
+        getWidth() - kKeyboardWidth, ccStripH);
     const auto velocityArea = juce::Rectangle<int> (
-        kKeyboardWidth, ccArea.getY() - kVelocityStripH,
-        getWidth() - kKeyboardWidth, kVelocityStripH);
+        kKeyboardWidth, ccArea.getY() - velocityStripH,
+        getWidth() - kKeyboardWidth, velocityStripH);
+
+    // Resize-handle gestures take priority over the lane interiors -
+    // the handle is the kStripResizeGrabPx-tall strip immediately
+    // above each lane's top edge. Drag-up grows the lane; drag-down
+    // shrinks it. Clamped in mouseDrag so the grid always keeps a
+    // sensible minimum height.
+    if (e.x >= velocityArea.getX() && e.x <= velocityArea.getRight()
+        && e.y >= velocityArea.getY() - kStripResizeGrabPx
+        && e.y <  velocityArea.getY())
+    {
+        dragMode          = DragMode::ResizeVelocityStrip;
+        resizeStartStripH = velocityStripH;
+        resizeStartMouseY = e.y;
+        return;
+    }
+    if (e.x >= ccArea.getX() && e.x <= ccArea.getRight()
+        && e.y >= ccArea.getY() - kStripResizeGrabPx
+        && e.y <  ccArea.getY())
+    {
+        dragMode          = DragMode::ResizeCcStrip;
+        resizeStartStripH = ccStripH;
+        resizeStartMouseY = e.y;
+        return;
+    }
 
     // CC lane click: edit existing bar, or create a new CC event at
     // the clicked tick + value. Drag-y updates the value continuously.
@@ -1416,6 +1774,7 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
         dragOriginNoteNum = n.noteNumber;
         dragNoteStartTick = n.startTick;
         dragNoteLenTicks  = n.lengthInTicks;
+        editCursorTick    = n.startTick;   // anchor the cursor at the clicked note
         // Alt-modified click on a note body promotes Move ->
         // EditNoteVelocity. Drag-vertical adjusts velocity instead
         // of moving the note. Mirrors the tape-strip Alt-on-region
@@ -1435,6 +1794,14 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
     //   - Otherwise: create a new note (existing pencil-on-default).
     if (e.x < kKeyboardWidth || e.y < kToolbarHeight + kHeaderHeight) return;
 
+    // Drop the edit cursor at the snapped click tick, regardless of
+    // which sub-path runs next (box-select, note-create, or just an
+    // anchor click). Step-record + future click-to-place actions key
+    // off this position.
+    editCursorTick = juce::jlimit<juce::int64> (0,
+        juce::jmax ((juce::int64) 0, r->lengthInTicks),
+        snapTick (tickForX (e.x), snapTicks));
+
     if (extendSelection)
     {
         rubberBand = juce::Rectangle<int> (e.x, e.y, 0, 0);
@@ -1453,9 +1820,20 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
     n.velocity = 100;
     const auto rawStart = juce::jlimit<juce::int64> (0,
         juce::jmax ((juce::int64) 0, r->lengthInTicks - 1), tickForX (e.x));
+    // noteEntryMode adjusts the effective snap step for note-creation
+    // only - move / resize keep using `snapTicks` directly. Free skips
+    // snap entirely; Triplet / Dotted reshape the step.
+    juce::int64 createSnap = snapTicks;
+    switch (noteEntryMode)
+    {
+        case NoteEntryMode::Free:    createSnap = 0; break;
+        case NoteEntryMode::Triplet: createSnap = (snapTicks * 2) / 3; break;
+        case NoteEntryMode::Dotted:  createSnap = (snapTicks * 3) / 2; break;
+        case NoteEntryMode::Grid:    break;
+    }
     n.startTick = juce::jlimit<juce::int64> (0,
         juce::jmax ((juce::int64) 0, r->lengthInTicks - 1),
-        snapTick (rawStart, snapTicks));
+        snapTick (rawStart, createSnap));
     n.lengthInTicks = juce::jmin ((juce::int64) kMidiTicksPerQuarter,
                                                   r->lengthInTicks - n.startTick);
     if (n.lengthInTicks <= 0) return;
@@ -1493,13 +1871,43 @@ void PianoRollComponent::mouseDrag (const juce::MouseEvent& e)
     {
         if (draggedCcIdx < 0 || draggedCcIdx >= (int) r->ccs.size()) return;
         const auto ccArea = juce::Rectangle<int> (
-            kKeyboardWidth, getHeight() - kCcStripH,
-            getWidth() - kKeyboardWidth, kCcStripH);
+            kKeyboardWidth, getHeight() - kStatusBarH - ccStripH,
+            getWidth() - kKeyboardWidth, ccStripH);
         const float frac = juce::jlimit (0.0f, 1.0f,
             1.0f - ((float) (e.y - ccArea.getY())
                       / (float) juce::jmax (1, ccArea.getHeight())));
         r->ccs[(size_t) draggedCcIdx].value =
             juce::jlimit (0, 127, (int) std::round (frac * 127.0f));
+        repaint();
+        return;
+    }
+
+    if (dragMode == DragMode::ResizeVelocityStrip
+        || dragMode == DragMode::ResizeCcStrip)
+    {
+        // Drag UP = grow this strip (cursor moves to a smaller y). The
+        // grid area shrinks correspondingly. Clamp so the grid retains
+        // a sensible minimum height even with both strips at max.
+        const int delta = resizeStartMouseY - e.y;
+        const int topBandH = kToolbarHeight + kHeaderHeight;
+        constexpr int kMinGridH = 80;
+
+        if (dragMode == DragMode::ResizeVelocityStrip)
+        {
+            const int maxAllowed = juce::jmax (kVelocityStripHMin,
+                getHeight() - topBandH - ccStripH - kStatusBarH - kMinGridH);
+            velocityStripH = juce::jlimit (kVelocityStripHMin,
+                juce::jmin (kVelocityStripHMax, maxAllowed),
+                resizeStartStripH + delta);
+        }
+        else
+        {
+            const int maxAllowed = juce::jmax (kCcStripHMin,
+                getHeight() - topBandH - velocityStripH - kStatusBarH - kMinGridH);
+            ccStripH = juce::jlimit (kCcStripHMin,
+                juce::jmin (kCcStripHMax, maxAllowed),
+                resizeStartStripH + delta);
+        }
         repaint();
         return;
     }
@@ -1522,8 +1930,8 @@ void PianoRollComponent::mouseDrag (const juce::MouseEvent& e)
     else if (dragMode == DragMode::EditVelocity)
     {
         const auto velocityArea = juce::Rectangle<int> (
-            kKeyboardWidth, getHeight() - kVelocityStripH,
-            getWidth() - kKeyboardWidth, kVelocityStripH);
+            kKeyboardWidth, getHeight() - kStatusBarH - ccStripH - velocityStripH,
+            getWidth() - kKeyboardWidth, velocityStripH);
         const float frac = juce::jlimit (0.0f, 1.0f,
             1.0f - ((float) (e.y - velocityArea.getY())
                       / (float) juce::jmax (1, velocityArea.getHeight())));
@@ -1566,6 +1974,24 @@ void PianoRollComponent::mouseDrag (const juce::MouseEvent& e)
 
 void PianoRollComponent::mouseMove (const juce::MouseEvent& e)
 {
+    // Resize-handle hover feedback for the velocity / cc lane top edges.
+    // The handle is the kStripResizeGrabPx-tall strip above each lane.
+    const int ccTop  = getHeight() - kStatusBarH - ccStripH;
+    const int velTop = ccTop - velocityStripH;
+    if (e.x >= kKeyboardWidth)
+    {
+        if (e.y >= velTop - kStripResizeGrabPx && e.y < velTop)
+        {
+            setMouseCursor (juce::MouseCursor::UpDownResizeCursor);
+            return;
+        }
+        if (e.y >= ccTop - kStripResizeGrabPx && e.y < ccTop)
+        {
+            setMouseCursor (juce::MouseCursor::UpDownResizeCursor);
+            return;
+        }
+    }
+
     // Cursor feedback so the user can tell when Alt-on-note will do
     // something different. Without this, the only signal is the
     // resulting drag - too late.
@@ -1771,6 +2197,39 @@ bool PianoRollComponent::keyPressed (const juce::KeyPress& k)
 void PianoRollComponent::mouseWheelMove (const juce::MouseEvent& e,
                                           const juce::MouseWheelDetails& w)
 {
+    // Wheel inside the velocity / cc strip = zoom that strip vertically.
+    // Wheel-up grows, wheel-down shrinks. Same min/max envelope as the
+    // drag-resize gesture so both gestures land in the same valid range.
+    const int ccTop  = getHeight() - kStatusBarH - ccStripH;
+    const int velTop = ccTop - velocityStripH;
+    if (e.x >= kKeyboardWidth)
+    {
+        const int topBandH = kToolbarHeight + kHeaderHeight;
+        constexpr int kMinGridH = 80;
+        const int delta = (int) std::round (w.deltaY * 32.0f);  // 1 click ~ 32 px
+
+        if (e.y >= velTop && e.y < ccTop)
+        {
+            const int maxAllowed = juce::jmax (kVelocityStripHMin,
+                getHeight() - topBandH - ccStripH - kStatusBarH - kMinGridH);
+            velocityStripH = juce::jlimit (kVelocityStripHMin,
+                juce::jmin (kVelocityStripHMax, maxAllowed),
+                velocityStripH + delta);
+            repaint();
+            return;
+        }
+        if (e.y >= ccTop && e.y < ccTop + ccStripH)
+        {
+            const int maxAllowed = juce::jmax (kCcStripHMin,
+                getHeight() - topBandH - velocityStripH - kStatusBarH - kMinGridH);
+            ccStripH = juce::jlimit (kCcStripHMin,
+                juce::jmin (kCcStripHMax, maxAllowed),
+                ccStripH + delta);
+            repaint();
+            return;
+        }
+    }
+
     if (e.mods.isCommandDown() || e.mods.isCtrlDown())
     {
         // Horizontal zoom anchored on the cursor's tick: capture the tick
@@ -1801,8 +2260,236 @@ void PianoRollComponent::mouseWheelMove (const juce::MouseEvent& e,
     // Vertical scroll. wheel deltaY > 0 = scroll up (show higher notes).
     const int delta = (int) (-w.deltaY * 60.0f);
     const int maxScroll = juce::jmax (0,
-        kFullGridHeight - (getHeight() - kToolbarHeight - kHeaderHeight - kVelocityStripH - kCcStripH));
+        kFullGridHeight - (getHeight() - kToolbarHeight - kHeaderHeight
+                              - velocityStripH - ccStripH - kStatusBarH));
     scrollY = juce::jlimit (0, maxScroll, scrollY + delta);
+    repaint();
+}
+
+// ── Top icon-row buttons ──────────────────────────────────────────────
+PianoRollComponent::IconButton::IconButton (const juce::String& name, Glyph g)
+    : juce::Button (name), glyph (g)
+{
+    setClickingTogglesState (false);
+}
+
+void PianoRollComponent::IconButton::paintButton (juce::Graphics& g,
+                                                    bool isMouseOver, bool isButtonDown)
+{
+    const auto bounds = getLocalBounds().toFloat().reduced (2.0f);
+    auto disc = juce::Colour (0xff262630);
+    if (isButtonDown)      disc = disc.brighter (0.14f);
+    else if (isMouseOver)  disc = disc.brighter (0.08f);
+    g.setColour (disc);
+    g.fillEllipse (bounds);
+    g.setColour (juce::Colour (0xff3a3a44));
+    g.drawEllipse (bounds, isButtonDown ? 2.0f : 1.4f);
+
+    const auto centre = bounds.getCentre();
+    const float r = bounds.getWidth() * 0.30f;   // glyph extent
+    g.setColour (juce::Colour (0xffd0d0d0));
+
+    auto strokeArrowhead = [&] (juce::Point<float> tip, juce::Point<float> from,
+                                  float size)
+    {
+        // Small open arrowhead pointing toward `tip` from `from`.
+        const auto dir = (tip - from);
+        const auto len = juce::jmax (0.001f, dir.getDistanceFromOrigin());
+        const auto u   = dir / len;
+        const auto perp = juce::Point<float> (-u.y, u.x);
+        const auto a = tip - u * size + perp * size * 0.6f;
+        const auto b = tip - u * size - perp * size * 0.6f;
+        juce::Path p;
+        p.startNewSubPath (a);
+        p.lineTo (tip);
+        p.lineTo (b);
+        g.strokePath (p, juce::PathStrokeType (1.6f));
+    };
+
+    switch (glyph)
+    {
+        case Glyph::Undo:
+        case Glyph::Redo:
+        {
+            // Curved arrow forming about 250 deg of a circle, with an
+            // arrowhead at the open end. Mirror horizontally for Redo.
+            const float radius = r * 0.95f;
+            juce::Path arc;
+            arc.addCentredArc (centre.x, centre.y, radius, radius,
+                                  0.0f,
+                                  juce::MathConstants<float>::pi * 0.30f,
+                                  juce::MathConstants<float>::pi * 1.85f,
+                                  true);
+            if (glyph == Glyph::Redo)
+            {
+                juce::AffineTransform mirror;
+                mirror = juce::AffineTransform::scale (-1.0f, 1.0f, centre.x, centre.y);
+                arc.applyTransform (mirror);
+            }
+            g.strokePath (arc, juce::PathStrokeType (1.6f));
+            // Arrowhead at the start of the arc (top-left for Undo).
+            const float startAng = juce::MathConstants<float>::pi * 0.30f;
+            juce::Point<float> start (centre.x + std::sin (startAng) * radius,
+                                          centre.y - std::cos (startAng) * radius);
+            if (glyph == Glyph::Redo) start = juce::Point<float> (2 * centre.x - start.x, start.y);
+            const auto inwards = juce::Point<float> (centre.x, centre.y) - start;
+            strokeArrowhead (start, start + inwards * 0.001f, 4.0f);
+            break;
+        }
+        case Glyph::Split:
+        {
+            // Vertical bar with a small gap and arrows pointing apart.
+            const float h = r * 1.6f;
+            g.fillRect (juce::Rectangle<float> (centre.x - 0.8f,
+                                                   centre.y - h * 0.5f, 1.6f, h));
+            // Two arrows, one to each side, just above the centre line.
+            juce::Path l, ar;
+            l.startNewSubPath (centre.x - r * 0.95f, centre.y);
+            l.lineTo (centre.x - 2.0f, centre.y);
+            ar.startNewSubPath (centre.x + 2.0f, centre.y);
+            ar.lineTo (centre.x + r * 0.95f, centre.y);
+            g.strokePath (l,  juce::PathStrokeType (1.4f));
+            g.strokePath (ar, juce::PathStrokeType (1.4f));
+            strokeArrowhead ({ centre.x - r * 0.95f, centre.y },
+                                { centre.x - 2.0f,         centre.y }, 3.5f);
+            strokeArrowhead ({ centre.x + r * 0.95f, centre.y },
+                                { centre.x + 2.0f,         centre.y }, 3.5f);
+            break;
+        }
+        case Glyph::Glue:
+        {
+            // Two small rectangles touching, with a short arrow under
+            // them pointing inward to suggest "joining".
+            const float w = r * 0.7f;
+            const float h = r * 0.6f;
+            g.fillRect (juce::Rectangle<float> (centre.x - w - 0.5f, centre.y - h * 0.5f - 1.0f, w, h));
+            g.fillRect (juce::Rectangle<float> (centre.x        + 0.5f, centre.y - h * 0.5f - 1.0f, w, h));
+            // Underline showing they merge.
+            g.fillRect (juce::Rectangle<float> (centre.x - w - 0.5f, centre.y + h * 0.5f + 1.0f,
+                                                   w * 2.0f + 1.0f, 1.5f));
+            break;
+        }
+        case Glyph::Quantize:
+        {
+            // Three short vertical lines (grid) + a tiny arrow snapping
+            // an offset note onto the grid.
+            const float yTop = centre.y - r * 0.9f;
+            const float yBot = centre.y + r * 0.5f;
+            for (int i = -1; i <= 1; ++i)
+            {
+                const float x = centre.x + (float) i * r * 0.65f;
+                g.drawLine (x, yTop, x, yBot, 1.2f);
+            }
+            // Note glyph below, snapping right.
+            g.fillRect (juce::Rectangle<float> (centre.x - r * 0.55f,
+                                                   yBot + 1.5f, r * 0.55f, 3.0f));
+            strokeArrowhead ({ centre.x + r * 0.05f, yBot + 3.0f },
+                                { centre.x - r * 0.10f, yBot + 3.0f }, 3.0f);
+            break;
+        }
+        case Glyph::Properties:
+        {
+            // Simplified gear: outer ring + 6 short ticks.
+            g.drawEllipse (centre.x - r * 0.55f, centre.y - r * 0.55f,
+                              r * 1.10f, r * 1.10f, 1.4f);
+            for (int i = 0; i < 6; ++i)
+            {
+                const float ang = juce::MathConstants<float>::twoPi * (float) i / 6.0f;
+                const float x0 = centre.x + std::cos (ang) * r * 0.65f;
+                const float y0 = centre.y + std::sin (ang) * r * 0.65f;
+                const float x1 = centre.x + std::cos (ang) * r * 0.95f;
+                const float y1 = centre.y + std::sin (ang) * r * 0.95f;
+                g.drawLine (x0, y0, x1, y1, 1.4f);
+            }
+            // Inner dot.
+            g.fillEllipse (centre.x - 1.5f, centre.y - 1.5f, 3.0f, 3.0f);
+            break;
+        }
+        case Glyph::ZoomFit:
+        {
+            // Square brackets pointing inward: [ . ]
+            const float w = r * 0.95f;
+            const float h = r * 1.10f;
+            const float bracketLen = h * 0.9f;
+            const float armLen     = r * 0.45f;
+            // Left bracket
+            g.drawLine (centre.x - w, centre.y - bracketLen * 0.5f,
+                          centre.x - w, centre.y + bracketLen * 0.5f, 1.4f);
+            g.drawLine (centre.x - w, centre.y - bracketLen * 0.5f,
+                          centre.x - w + armLen, centre.y - bracketLen * 0.5f, 1.4f);
+            g.drawLine (centre.x - w, centre.y + bracketLen * 0.5f,
+                          centre.x - w + armLen, centre.y + bracketLen * 0.5f, 1.4f);
+            // Right bracket
+            g.drawLine (centre.x + w, centre.y - bracketLen * 0.5f,
+                          centre.x + w, centre.y + bracketLen * 0.5f, 1.4f);
+            g.drawLine (centre.x + w, centre.y - bracketLen * 0.5f,
+                          centre.x + w - armLen, centre.y - bracketLen * 0.5f, 1.4f);
+            g.drawLine (centre.x + w, centre.y + bracketLen * 0.5f,
+                          centre.x + w - armLen, centre.y + bracketLen * 0.5f, 1.4f);
+            // Centre dot
+            g.fillEllipse (centre.x - 1.5f, centre.y - 1.5f, 3.0f, 3.0f);
+            break;
+        }
+        case Glyph::ToggleCc:
+        {
+            // Three vertical bars of varying heights (CC envelope).
+            const float yBot = centre.y + r * 0.6f;
+            const float xs[3] = { centre.x - r * 0.55f, centre.x, centre.x + r * 0.55f };
+            const float hs[3] = { r * 0.6f, r * 1.05f, r * 0.85f };
+            for (int i = 0; i < 3; ++i)
+                g.fillRect (juce::Rectangle<float> (xs[i] - 0.9f, yBot - hs[i],
+                                                       1.8f, hs[i]));
+            break;
+        }
+    }
+}
+
+void PianoRollComponent::splitSelectedAtCursor()
+{
+    auto* r = region();
+    if (r == nullptr) return;
+    const auto cursor = editCursorTick;
+
+    // Operate on the current selection if any; otherwise consider every
+    // note in the region. Walk newest-first so push_back inside the
+    // loop doesn't disturb the index we're iterating.
+    auto candidate = [&] (int idx)
+    {
+        return ! selectedNotes.empty()
+            ? std::binary_search (selectedNotes.begin(), selectedNotes.end(), idx)
+            : true;
+    };
+
+    const int initialCount = (int) r->notes.size();
+    for (int i = initialCount - 1; i >= 0; --i)
+    {
+        if (! candidate (i)) continue;
+        auto& n = r->notes[(size_t) i];
+        if (cursor <= n.startTick || cursor >= n.startTick + n.lengthInTicks) continue;
+
+        MidiNote tail = n;
+        tail.startTick     = cursor;
+        tail.lengthInTicks = (n.startTick + n.lengthInTicks) - cursor;
+        n.lengthInTicks    = cursor - n.startTick;
+        r->notes.push_back (tail);
+    }
+    repaint();
+}
+
+void PianoRollComponent::zoomFit()
+{
+    const auto* r = region();
+    if (r == nullptr || r->lengthInTicks <= 0) return;
+    const int gridW = juce::jmax (200, getWidth() - kKeyboardWidth - 8);
+    pixelsPerTick = juce::jlimit (0.005f, 1.0f,
+                                       (float) gridW / (float) r->lengthInTicks);
+    scrollX = 0;
+    repaint();
+}
+
+void PianoRollComponent::toggleCcLane()
+{
+    ccStripH = (ccStripH > 0 ? 0 : kCcStripHDefault);
     repaint();
 }
 } // namespace focal

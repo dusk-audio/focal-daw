@@ -83,8 +83,23 @@ public:
     static constexpr int kNoteHeight        = 16;
     static constexpr int kNumKeys           = 128;
     static constexpr int kFullGridHeight    = kNumKeys * kNoteHeight;
-    static constexpr int kVelocityStripH    = 72;   // bottom strip for vel bars
-    static constexpr int kCcStripH          = 72;   // CC lane below velocity
+    // Strip heights are runtime-mutable so the user can drag the top
+    // edge of either lane to resize, or scroll-wheel inside the lane
+    // to zoom the velocity axis. The kDefault values are the initial
+    // sizes; kMin / kMax bound the resize gesture.
+    static constexpr int kVelocityStripHDefault = 110;
+    static constexpr int kVelocityStripHMin     = 56;
+    static constexpr int kVelocityStripHMax     = 320;
+    static constexpr int kCcStripHDefault       = 100;
+    static constexpr int kCcStripHMin           = 48;
+    static constexpr int kCcStripHMax           = 320;
+    static constexpr int kStripResizeGrabPx     = 5;   // hit zone above each strip's top edge
+    // Reaper-style status bar at the very bottom of the modal.
+    // Hosts position / value readouts + grid / notes / color combos
+    // + key-snap toggle + track readout. Child widgets (juce::Label,
+    // ComboBox, ToggleButton) take their own clicks; the band is
+    // never paint-handled directly by mouseDown.
+    static constexpr int kStatusBarH = 30;
 
 private:
     Session& session;
@@ -151,8 +166,23 @@ private:
     // Empty rect = no box-select in flight (paint skips the overlay).
     juce::Rectangle<int> rubberBand;
 
-    enum class DragMode { None, MoveNote, ResizeNote, CreateNote, EditVelocity, BoxSelect, EditCcValue, EditNoteVelocity };
+    enum class DragMode { None, MoveNote, ResizeNote, CreateNote, EditVelocity, BoxSelect,
+                           EditCcValue, EditNoteVelocity,
+                           ResizeVelocityStrip, ResizeCcStrip };
     DragMode dragMode = DragMode::None;
+
+    // Runtime strip heights. Mutated by the resize gesture (drag the
+    // top edge) and the in-strip wheel-zoom. Both are persisted only
+    // in-component; reopening the roll resets to defaults, which is
+    // intentional - lane sizing is editor-state, not session-state.
+    int velocityStripH = kVelocityStripHDefault;
+    int ccStripH       = kCcStripHDefault;
+
+    // mouseDown anchor for the strip-resize drag: the strip height at
+    // gesture start, so mouseDrag can compute a stable delta against
+    // the cursor's vertical motion.
+    int resizeStartStripH = 0;
+    int resizeStartMouseY = 0;
 
     // Active CC controller shown in the CC lane. Starts on CC 1 (mod
     // wheel) - the most-used continuous controller. 'L' cycles through
@@ -179,10 +209,30 @@ private:
     // commercial DAWs.
     enum class ColorMode { Pitch, Velocity, Channel };
     ColorMode colorMode = ColorMode::Pitch;
+
+    // Note-entry-mode multiplier for snapTicks. Grid = use snapTicks
+    // verbatim; Free = ignore snap on note creation only (move /
+    // resize still snap unless snap is also off); Triplet = step *
+    // 2/3 (so 3 notes fit in 2 grid steps); Dotted = step * 3/2.
+    enum class NoteEntryMode { Grid, Free, Triplet, Dotted };
+    NoteEntryMode noteEntryMode = NoteEntryMode::Grid;
+    // Vertical pitch-row snap on note creation. When false, the new
+    // note's pitch is the row pointed at exactly (so a click between
+    // row centres still creates a single note - we still snap to the
+    // nearest row visually since the row IS the noteNumber, but we
+    // honour the click's row without an extra constraint pass).
+    bool keySnap = true;
     juce::int64 dragOriginTick    = 0;
     int         dragOriginNoteNum = 0;
     juce::int64 dragNoteStartTick = 0;
     juce::int64 dragNoteLenTicks  = 0;
+
+    // Edit cursor - the vertical-line marker at the last "anchor"
+    // gesture (grid click / note creation / note move). Step-record
+    // and future click-to-place actions key off this; visually it
+    // matches Reaper's gold playhead so users have an "I am here"
+    // signal independent of the transport.
+    juce::int64 editCursorTick = 0;
 
     // Helpers - all return defensible values when the region pointer is
     // stale (regionIdx out of range), so paint code never branches on it.
@@ -212,6 +262,7 @@ private:
     void paintNotes         (juce::Graphics&, juce::Rectangle<int> area);
     void paintVelocityStrip (juce::Graphics&, juce::Rectangle<int> area);
     void paintCcStrip       (juce::Graphics&, juce::Rectangle<int> area);
+    void paintEditCursor    (juce::Graphics&, juce::Rectangle<int> gridArea);
 
     // Hit-test for CC bars in the CC lane. Returns the index into
     // region->ccs whose tick maps to a screen-x within kHitSlopPx
@@ -300,5 +351,75 @@ private:
     // action. Both run on the message thread inside keyPressed.
     void showQuantizePopup();
     void showScalePopup();
+    // Click-target popups for the toolbar's Color / CC chips. The
+    // hotkeys ('C', 'L') still cycle through the choices; click is
+    // an alternative discoverable surface.
+    void showColorModePopup();
+    void showCcControllerPopup();
+
+    // Reaper-style bottom status-bar children. Real interactive
+    // widgets (not paint-only chips) so JUCE handles dispatch /
+    // hover / focus / accessibility.
+    juce::Label        positionLabel;
+    juce::Label        valueLabel;
+    juce::Label        trackLabel;
+    juce::ComboBox     gridCombo;
+    juce::ComboBox     notesCombo;
+    juce::ComboBox     colorCombo;
+    juce::ToggleButton keySnapToggle;
+
+    // Reaper-style top icon row. Compact (~28 px) circular icon buttons
+    // mirroring TransportIconButton's visual language. Hotkeys still
+    // do the heavy lifting; these are a discoverability surface for
+    // mouse-first editing.
+    class IconButton final : public juce::Button
+    {
+    public:
+        enum class Glyph { Undo, Redo, Split, Glue, Quantize, Properties, ZoomFit, ToggleCc };
+        IconButton (const juce::String& name, Glyph g);
+        void paintButton (juce::Graphics&, bool isMouseOver, bool isButtonDown) override;
+    private:
+        Glyph glyph;
+    };
+    IconButton undoButton       { "Undo",       IconButton::Glyph::Undo };
+    IconButton redoButton       { "Redo",       IconButton::Glyph::Redo };
+    IconButton splitButton      { "Split",      IconButton::Glyph::Split };
+    IconButton glueButton       { "Glue",       IconButton::Glyph::Glue };
+    IconButton quantizeButton   { "Quantize",   IconButton::Glyph::Quantize };
+    IconButton propertiesButton { "Properties", IconButton::Glyph::Properties };
+    IconButton zoomFitButton    { "Zoom fit",   IconButton::Glyph::ZoomFit };
+    IconButton toggleCcButton   { "Toggle CC",  IconButton::Glyph::ToggleCc };
+
+    // Lay the icon row out in the kToolbarHeight band at the top.
+    void layoutIconRow (juce::Rectangle<int> area);
+
+    // New action handlers (icon-only; not currently bound to a hotkey).
+    // splitSelectedAtCursor cuts every selected note that straddles
+    // editCursorTick into two notes at the cursor; if no notes are
+    // selected, splits any note straddling the cursor.
+    void splitSelectedAtCursor();
+    // zoomFit rescales pixelsPerTick so the entire region length fits
+    // the visible grid width.
+    void zoomFit();
+    // toggleCcLane flips ccStripH between 0 (lane hidden) and
+    // kCcStripHDefault (lane shown).
+    void toggleCcLane();
+
+    // Lay the status bar's children out in the kStatusBarH band at
+    // `area`'s y. Called from resized().
+    void layoutStatusBar (juce::Rectangle<int> area);
+
+    // Format a region-local tick as a Reaper-style "bar.beat.tick"
+    // string. Bar / beat are 1-based (so bar 1 = first bar); the
+    // remainder is the offset in ticks from the beat.
+    juce::String formatBarBeat (juce::int64 tick) const;
+
+    // Velocity of the most-recently-selected note, or -1 if no note
+    // is selected. Used by the value readout in the status bar.
+    int activeVelocity() const noexcept;
+
+    // Refresh the position / value / track readouts. Called any time
+    // editCursorTick or selectedNotes mutates.
+    void refreshStatusBarReadouts();
 };
 } // namespace focal

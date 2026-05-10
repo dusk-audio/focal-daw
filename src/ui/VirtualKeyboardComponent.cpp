@@ -142,14 +142,14 @@ void VirtualKeyboardComponent::sendNoteOn (int note, int vel, int chan)
 {
     if (auto* col = engine.getVirtualKeyboardCollector())
         col->addMessageToQueue (juce::MidiMessage::noteOn (chan, note, (juce::uint8) vel));
-    if (onNoteOn) onNoteOn (note, vel);
+    if (onNoteOn) onNoteOn (note, vel, chan);
 }
 
 void VirtualKeyboardComponent::sendNoteOff (int note, int chan)
 {
     if (auto* col = engine.getVirtualKeyboardCollector())
         col->addMessageToQueue (juce::MidiMessage::noteOff (chan, note));
-    if (onNoteOff) onNoteOff (note);
+    if (onNoteOff) onNoteOff (note, chan);
 }
 
 void VirtualKeyboardComponent::releaseAll()

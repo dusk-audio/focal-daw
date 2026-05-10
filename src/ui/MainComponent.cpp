@@ -1842,13 +1842,13 @@ void MainComponent::toggleVirtualKeyboard()
     // modal can't dangle. The roll's stepRecordNoteOn/Off handle
     // the chord-aware playhead-advance logic.
     juce::Component::SafePointer<MainComponent> safeThis (this);
-    body->onNoteOn = [safeThis] (int note, int vel)
+    body->onNoteOn = [safeThis] (int note, int vel, int /*chan*/)
     {
         if (auto* self = safeThis.getComponent())
             if (self->pianoRoll != nullptr)
                 self->pianoRoll->stepRecordNoteOn (note, vel);
     };
-    body->onNoteOff = [safeThis] (int note)
+    body->onNoteOff = [safeThis] (int note, int /*chan*/)
     {
         if (auto* self = safeThis.getComponent())
             if (self->pianoRoll != nullptr)

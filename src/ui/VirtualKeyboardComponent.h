@@ -41,8 +41,8 @@ public:
     // typed note also lands as a MidiNote at the playhead. No-op
     // when no listener is attached, so the synth-only path
     // (default) still works.
-    std::function<void (int noteNumber, int velocity)> onNoteOn;
-    std::function<void (int noteNumber)>               onNoteOff;
+    std::function<void (int noteNumber, int velocity, int channel)> onNoteOn  = [](int, int, int){};
+    std::function<void (int noteNumber, int channel)>               onNoteOff = [](int, int){};
 
 private:
     void timerCallback() override;
