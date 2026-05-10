@@ -8,6 +8,23 @@ namespace focal
 {
 namespace
 {
+#if FOCAL_HAS_OOP_PLUGINS
+// OOP timeout per processBlock round-trip. Generous because the child
+// has to memcpy through SHM, run the plugin, memcpy back. A 100 ms cap
+// is well under the audio-thread starvation point (~250 ms = visible
+// glitch on most kernels) and well over a misbehaving plugin's typical
+// stall.
+constexpr long long kOopProcessTimeoutNs = 100'000'000LL;
+
+// Watchdog budget for OOP plugins. The in-process kBudgetFraction = 0.6
+// is too tight when the IPC round-trip already eats a few hundred
+// microseconds at small buffer sizes. 0.85 leaves headroom for the
+// plugin itself; OOP's hard timeout (kOopProcessTimeoutNs above) is
+// the second line of defence.
+constexpr double kOopBudgetFraction = 0.85;
+#endif
+
+
 // JUCE-hosted plugins often expose more than one bus (main + sidechain on
 // effects, main + aux output on some synths). Our processBlock contract
 // assumes a 2-channel buffer that maps directly to L/R, so any plugin that
@@ -100,6 +117,13 @@ PluginSlot::~PluginSlot()
         ownedInstance->releaseResources();
     if (previousInstance != nullptr)
         previousInstance->releaseResources();
+
+   #if FOCAL_HAS_OOP_PLUGINS
+    currentRemote.store (nullptr, std::memory_order_release);
+    // ~RemotePluginConnection sends SIGTERM/SIGKILL to the child and
+    // unmaps SHM. Safe at process shutdown.
+    ownedRemote.reset();
+   #endif
 }
 
 void PluginSlot::leakInstanceForShutdown()
@@ -109,6 +133,15 @@ void PluginSlot::leakInstanceForShutdown()
         (void) ownedInstance.release();
     if (previousInstance != nullptr)
         (void) previousInstance.release();
+
+   #if FOCAL_HAS_OOP_PLUGINS
+    // OOP plugins live in a separate process — the in-process leak hack
+    // is irrelevant. Cleanly disconnecting kills the child, which
+    // releases its plugin in its own address space (so any plugin-side
+    // dtor crash is confined to the child and ignored).
+    currentRemote.store (nullptr, std::memory_order_release);
+    ownedRemote.reset();
+   #endif
 }
 
 void PluginSlot::prepareToPlay (double sampleRate, int blockSize)
@@ -133,11 +166,44 @@ void PluginSlot::prepareToPlay (double sampleRate, int blockSize)
         ownedInstance->prepareToPlay (sampleRate, preparedBlockSize);
         cachedLatencySamples.store (ownedInstance->getLatencySamples(),
                                       std::memory_order_relaxed);
+        return;
     }
-    else
+
+   #if FOCAL_HAS_OOP_PLUGINS
+    if (ownedRemote != nullptr)
     {
-        cachedLatencySamples.store (0, std::memory_order_relaxed);
+        // Re-prepare the child. Caller (AudioEngine) typically drives this
+        // when sample rate or block size changes; bail to bypass if the
+        // new block size exceeds what the IPC SHM was sized for.
+        if (preparedBlockSize > focal::ipc::kMaxBlock)
+        {
+            std::fprintf (stderr,
+                          "[Focal/PluginSlot] OOP path can't host blockSize=%d "
+                          "(SHM max=%d); slot will be silent until reload.\n",
+                          preparedBlockSize, focal::ipc::kMaxBlock);
+            currentRemote.store (nullptr, std::memory_order_release);
+            cachedLatencySamples.store (0, std::memory_order_relaxed);
+            return;
+        }
+        std::string err;
+        if (! ownedRemote->prepareToPlay (sampleRate, preparedBlockSize, err))
+        {
+            std::fprintf (stderr,
+                          "[Focal/PluginSlot] OOP prepareToPlay failed: %s\n",
+                          err.c_str());
+            currentRemote.store (nullptr, std::memory_order_release);
+            cachedLatencySamples.store (0, std::memory_order_relaxed);
+            return;
+        }
+        // Latency stays whatever loadPlugin reported; OOP doesn't currently
+        // re-query it on prepareToPlay (the child reapplies the existing
+        // setLatencySamples value). Leave cachedLatencySamples as set by
+        // load.
+        return;
     }
+   #endif
+
+    cachedLatencySamples.store (0, std::memory_order_relaxed);
 }
 
 void PluginSlot::releaseResources()
@@ -145,17 +211,48 @@ void PluginSlot::releaseResources()
     currentInstance.store (nullptr, std::memory_order_release);
     if (ownedInstance != nullptr)
         ownedInstance->releaseResources();
+
+   #if FOCAL_HAS_OOP_PLUGINS
+    currentRemote.store (nullptr, std::memory_order_release);
+    if (ownedRemote != nullptr)
+    {
+        std::string err;
+        // release() asks the child to drop its plugin instance but keeps
+        // the SHM + child process alive, so a subsequent load doesn't
+        // pay the fork+exec cost again.
+        (void) ownedRemote->release (err);
+    }
+   #endif
 }
 
 bool PluginSlot::isLoaded() const noexcept
 {
-    return currentInstance.load (std::memory_order_acquire) != nullptr;
+    if (currentInstance.load (std::memory_order_acquire) != nullptr) return true;
+   #if FOCAL_HAS_OOP_PLUGINS
+    if (currentRemote.load (std::memory_order_acquire) != nullptr)   return true;
+   #endif
+    return false;
 }
 
 juce::String PluginSlot::getLoadedName() const
 {
     if (auto* p = currentInstance.load (std::memory_order_acquire))
         return p->getName();
+   #if FOCAL_HAS_OOP_PLUGINS
+    if (currentRemote.load (std::memory_order_acquire) != nullptr)
+    {
+        // Parse the cached description XML for the plugin's display
+        // name. Cheap (a few hundred bytes of XML) and avoids an IPC
+        // round-trip just for a label.
+        if (savedDescriptionXml.isNotEmpty())
+            if (auto xml = juce::XmlDocument::parse (savedDescriptionXml))
+            {
+                juce::PluginDescription desc;
+                if (desc.loadFromXml (*xml))
+                    return desc.name;
+            }
+    }
+   #endif
     return {};
 }
 
@@ -238,6 +335,78 @@ bool PluginSlot::loadFromDescription (const juce::PluginDescription& desc,
     previousInstance = std::move (ownedInstance);
     ownedInstance.reset();
 
+   #if FOCAL_HAS_OOP_PLUGINS
+    // Tear down any prior OOP slot before deciding which path the new
+    // load takes. Mode is per-load: we may end up in-process this time
+    // even if the previous load was OOP (and vice versa).
+    currentRemote.store (nullptr, std::memory_order_release);
+    ownedRemote.reset();
+    savedDescriptionXml.clear();
+
+    const bool tryOop = manager->isOopEnabled()
+                         && preparedBlockSize > 0
+                         && preparedBlockSize <= focal::ipc::kMaxBlock;
+
+    if (tryOop)
+    {
+        const auto hostPath = manager->getHostExecutablePath();
+        if (hostPath.isEmpty() || ! juce::File (hostPath).existsAsFile())
+        {
+            std::fprintf (stderr,
+                          "[Focal/PluginSlot] OOP requested but host binary not found "
+                          "at \"%s\"; falling back to in-process.\n",
+                          hostPath.toRawUTF8());
+        }
+        else
+        {
+            auto remote = std::make_unique<focal::ipc::RemotePluginConnection>();
+            std::string err;
+            if (! remote->connect (hostPath.toStdString(), "--ipc-host", err))
+            {
+                std::fprintf (stderr,
+                              "[Focal/PluginSlot] OOP connect failed (%s); "
+                              "falling back to in-process.\n",
+                              err.c_str());
+            }
+            else
+            {
+                auto descXml = fixedDesc.createXml();
+                const auto descXmlStr = descXml != nullptr
+                    ? descXml->toString (juce::XmlElement::TextFormat().singleLine())
+                    : juce::String();
+                int  numIn = 0, numOut = 0, latency = 0;
+                if (! remote->loadPlugin (descXmlStr.toStdString(),
+                                            preparedSampleRate, preparedBlockSize,
+                                            numIn, numOut, latency, err))
+                {
+                    std::fprintf (stderr,
+                                  "[Focal/PluginSlot] OOP loadPlugin failed (%s); "
+                                  "falling back to in-process.\n",
+                                  err.c_str());
+                }
+                else
+                {
+                    remoteNumIn .store (numIn,  std::memory_order_relaxed);
+                    remoteNumOut.store (numOut, std::memory_order_relaxed);
+                    remoteIsInstrument.store (numIn == 0,
+                                                std::memory_order_relaxed);
+                    cachedLatencySamples.store (latency, std::memory_order_relaxed);
+                    blocksSinceLoad     = 0;
+                    consecutiveOverruns = 0;
+                    autoBypassed.store (false, std::memory_order_relaxed);
+                    savedDescriptionXml = descXmlStr;
+                    ownedRemote = std::move (remote);
+                    currentRemote.store (ownedRemote.get(),
+                                            std::memory_order_release);
+                    return true;
+                }
+            }
+        }
+        // Fall through into the in-process load below — we still want
+        // the user's load to succeed.
+    }
+   #endif
+
     auto fresh = manager->createPluginInstance (fixedDesc, preparedSampleRate,
                                                   preparedBlockSize, errorMessage);
     if (fresh == nullptr)
@@ -287,10 +456,30 @@ void PluginSlot::unload()
         previousInstance->releaseResources();
     previousInstance = std::move (ownedInstance);
     ownedInstance.reset();
+
+   #if FOCAL_HAS_OOP_PLUGINS
+    currentRemote.store (nullptr, std::memory_order_release);
+    ownedRemote.reset();   // SIGTERM/SIGKILL the child + unmap SHM
+    remoteNumIn .store (0, std::memory_order_relaxed);
+    remoteNumOut.store (0, std::memory_order_relaxed);
+    remoteIsInstrument.store (false, std::memory_order_relaxed);
+    savedDescriptionXml.clear();
+   #endif
 }
 
 juce::String PluginSlot::getDescriptionXmlForSave (int parkSleepMs)
 {
+   #if FOCAL_HAS_OOP_PLUGINS
+    if (currentRemote.load (std::memory_order_acquire) != nullptr
+        && savedDescriptionXml.isNotEmpty())
+    {
+        // Saved at load time. The XML is already path-normalized
+        // (PluginManager's caller passed a normalized desc, or
+        // loadFromDescription's normalization ran).
+        return savedDescriptionXml;
+    }
+   #endif
+
     juce::PluginDescription desc;
     bool ok = false;
     // fillInPluginDescription is metadata-only (uid + format + path + name)
@@ -313,6 +502,11 @@ juce::String PluginSlot::getDescriptionXmlForSave (int parkSleepMs)
 
 bool PluginSlot::isLoadedPluginInstrument() const
 {
+   #if FOCAL_HAS_OOP_PLUGINS
+    if (currentRemote.load (std::memory_order_acquire) != nullptr)
+        return remoteIsInstrument.load (std::memory_order_relaxed);
+   #endif
+
     auto* p = currentInstance.load (std::memory_order_acquire);
     if (p == nullptr) return false;
     juce::PluginDescription desc;
@@ -322,6 +516,29 @@ bool PluginSlot::isLoadedPluginInstrument() const
 
 juce::String PluginSlot::getStateBase64ForSave (int parkSleepMs)
 {
+   #if FOCAL_HAS_OOP_PLUGINS
+    if (auto* r = currentRemote.load (std::memory_order_acquire))
+    {
+        // OOP path: the parking + setActive(false) bracket is intrinsic
+        // to the IPC — the child runs the plugin on its own audio worker
+        // and serialises getStateInformation under MessageManagerLock.
+        // No parent-side park needed; the parent just blocks on the
+        // control-plane reply.
+        std::vector<std::uint8_t> blob;
+        std::string err;
+        if (! r->getState (blob, err))
+        {
+            std::fprintf (stderr,
+                          "[Focal/PluginSlot] OOP getState failed: %s\n",
+                          err.c_str());
+            return {};
+        }
+        if (blob.empty()) return {};
+        return juce::MemoryBlock (blob.data(), blob.size()).toBase64Encoding();
+    }
+    juce::ignoreUnused (parkSleepMs);
+   #endif
+
     juce::MemoryBlock mb;
     // Atomic-park alone is NOT sufficient for state capture: it tells the
     // AUDIO thread to skip the plugin, but doesn't tell the PLUGIN that
@@ -392,6 +609,43 @@ bool PluginSlot::restoreFromSavedState (const juce::String& descriptionXml,
 
     normalizeVst3FileOrIdentifier (desc);
 
+    // Try the OOP path first if enabled. On any failure we fall through
+    // to the in-process load below — the user's session restore should
+    // succeed even if the host child can't be spawned for some reason
+    // (e.g. binary not present in a stripped-down build).
+   #if FOCAL_HAS_OOP_PLUGINS
+    if (manager->isOopEnabled()
+        && preparedBlockSize > 0
+        && preparedBlockSize <= focal::ipc::kMaxBlock)
+    {
+        // Use the standard load path, then setState. loadFromDescription
+        // handles parking, swap, and OOP/in-process choice; on success,
+        // currentRemote is non-null when the OOP path took.
+        if (loadFromDescription (desc, errorMessage))
+        {
+            if (auto* r = currentRemote.load (std::memory_order_acquire);
+                r != nullptr && stateBase64.isNotEmpty())
+            {
+                juce::MemoryBlock mb;
+                if (mb.fromBase64Encoding (stateBase64) && mb.getSize() > 0)
+                {
+                    std::string err;
+                    if (! r->setState (static_cast<const std::uint8_t*> (mb.getData()),
+                                         mb.getSize(), err))
+                    {
+                        std::fprintf (stderr,
+                                      "[Focal/PluginSlot] OOP setState failed: %s\n",
+                                      err.c_str());
+                    }
+                }
+            }
+            return true;
+        }
+        // loadFromDescription set errorMessage; fall through to retry
+        // in-process so the user's session still loads.
+    }
+   #endif
+
     // Same swap-load shape as loadFromFile/loadFromDescription, with the
     // same deferred-destruction-via-previousInstance discipline.
     currentInstance.store (nullptr, std::memory_order_release);
@@ -440,9 +694,6 @@ void PluginSlot::processMonoBlock (float* monoData, int numSamples,
         || autoBypassed.load (std::memory_order_relaxed))
         return;
 
-    auto* p = currentInstance.load (std::memory_order_acquire);
-    if (p == nullptr) return;
-
     // Time-budget watchdog. A plugin that consistently overruns the buffer
     // gets auto-bypassed so it can't freeze the audio thread. Two
     // refinements over a naive single-block trip:
@@ -454,12 +705,80 @@ void PluginSlot::processMonoBlock (float* monoData, int numSamples,
     //   • Consecutive-overrun threshold: a single late block (other-thread
     //     preemption, GC, kernel scheduling jitter) shouldn't kill a
     //     plugin. Require kMaxConsecutiveOverruns in a row.
-    constexpr double kBudgetFraction         = 0.6;
     constexpr int    kGraceBlocks            = 16;
     constexpr int    kMaxConsecutiveOverruns = 4;
     const double bufferMs = (preparedSampleRate > 0.0)
                               ? 1000.0 * (double) numSamples / preparedSampleRate
                               : 0.0;
+
+   #if FOCAL_HAS_OOP_PLUGINS
+    if (auto* r = currentRemote.load (std::memory_order_acquire))
+    {
+        const auto rt0 = juce::Time::getHighResolutionTicks();
+        const int rNumIn  = remoteNumIn .load (std::memory_order_relaxed);
+        const int rNumOut = remoteNumOut.load (std::memory_order_relaxed);
+
+        const float* inPtrs[2] = { monoData, nullptr };
+        if (rNumIn >= 2)
+        {
+            // Stereo-in plugin in a mono slot: duplicate mono into both
+            // channels of the scratch and feed both as input pointers.
+            if (numSamples > stereoScratch.getNumSamples()) return;
+            stereoScratch.copyFrom (0, 0, monoData, numSamples);
+            stereoScratch.copyFrom (1, 0, monoData, numSamples);
+            inPtrs[0] = stereoScratch.getReadPointer (0);
+            inPtrs[1] = stereoScratch.getReadPointer (1);
+        }
+        else if (rNumIn == 0)
+        {
+            inPtrs[0] = nullptr;
+        }
+
+        if (! r->processBlockSync (inPtrs, juce::jmax (rNumIn, 0),
+                                       numSamples, midiMessages,
+                                       kOopProcessTimeoutNs))
+        {
+            autoBypassed.store (true, std::memory_order_relaxed);
+            return;
+        }
+
+        if (rNumOut == 1)
+        {
+            std::memcpy (monoData, r->readOutChannel (0),
+                          sizeof (float) * (size_t) numSamples);
+        }
+        else if (rNumOut >= 2)
+        {
+            const float* oL = r->readOutChannel (0);
+            const float* oR = r->readOutChannel (1);
+            for (int i = 0; i < numSamples; ++i)
+                monoData[i] = (oL[i] + oR[i]) * 0.5f;
+        }
+        // rNumOut == 0: plugin produced nothing; leave monoData untouched.
+
+        if (bufferMs > 0.0 && blocksSinceLoad >= kGraceBlocks)
+        {
+            const double elapsedMs = (double) (juce::Time::getHighResolutionTicks() - rt0)
+                                      * secondsPerTick * 1000.0;
+            if (elapsedMs > bufferMs * kOopBudgetFraction)
+            {
+                if (++consecutiveOverruns >= kMaxConsecutiveOverruns)
+                    autoBypassed.store (true, std::memory_order_relaxed);
+            }
+            else
+            {
+                consecutiveOverruns = 0;
+            }
+        }
+        if (blocksSinceLoad < kGraceBlocks) ++blocksSinceLoad;
+        return;
+    }
+   #endif
+
+    auto* p = currentInstance.load (std::memory_order_acquire);
+    if (p == nullptr) return;
+
+    constexpr double kBudgetFraction = 0.6;
     const auto t0 = juce::Time::getHighResolutionTicks();
 
     const int numIn  = p->getTotalNumInputChannels();
@@ -543,15 +862,109 @@ void PluginSlot::processStereoBlock (float* L, float* R, int numSamples,
         || autoBypassed.load (std::memory_order_relaxed))
         return;
 
-    auto* p = currentInstance.load (std::memory_order_acquire);
-    if (p == nullptr) return;
-
-    constexpr double kBudgetFraction         = 0.6;
     constexpr int    kGraceBlocks            = 16;
     constexpr int    kMaxConsecutiveOverruns = 4;
     const double bufferMs = (preparedSampleRate > 0.0)
                               ? 1000.0 * (double) numSamples / preparedSampleRate
                               : 0.0;
+
+   #if FOCAL_HAS_OOP_PLUGINS
+    if (auto* r = currentRemote.load (std::memory_order_acquire))
+    {
+        constexpr double kRemoteBudgetFraction = kOopBudgetFraction;
+        const auto rt0 = juce::Time::getHighResolutionTicks();
+
+        const int rNumIn  = remoteNumIn .load (std::memory_order_relaxed);
+        const int rNumOut = remoteNumOut.load (std::memory_order_relaxed);
+
+        // Build input channel array for the IPC call. The parent's
+        // memcpy loop in RemotePluginConnection only walks the first
+        // rNumIn pointers, so for instruments (rNumIn=0) inChannels is
+        // unused.
+        const float* inPtrs[2] = { L, R };
+        if (rNumIn == 1)
+        {
+            // Mono-in plugin on a stereo bus: average L+R into the
+            // pre-allocated scratch and feed that as the single input
+            // channel.
+            if (numSamples > stereoScratch.getNumSamples()) return;
+            float* mono = stereoScratch.getWritePointer (0);
+            for (int i = 0; i < numSamples; ++i)
+                mono[i] = (L[i] + R[i]) * 0.5f;
+            inPtrs[0] = mono;
+            inPtrs[1] = nullptr;
+        }
+        else if (rNumIn == 0)
+        {
+            inPtrs[0] = nullptr;
+            inPtrs[1] = nullptr;
+        }
+        else if (rNumIn > 2)
+        {
+            // Should not happen - kMaxChans=2 in PluginIpc - but if a
+            // future build raises the cap and this code wasn't updated,
+            // bail rather than read garbage.
+            autoBypassed.store (true, std::memory_order_relaxed);
+            return;
+        }
+
+        if (! r->processBlockSync (inPtrs, juce::jmax (rNumIn, 0),
+                                       numSamples, midiMessages,
+                                       kOopProcessTimeoutNs))
+        {
+            // Either the futex timed out or the connection was already
+            // marked crashed. Engage auto-bypass so the engine sees a
+            // clean silence/pass-through instead of repeating the
+            // timeout every block (the futex cost itself is what we're
+            // avoiding here — re-trying a dead connection still pays
+            // the deadline cost).
+            autoBypassed.store (true, std::memory_order_relaxed);
+            return;
+        }
+
+        // Read output channels from SHM and copy into L/R.
+        if (rNumOut <= 0)
+        {
+            // Plugin produced nothing - pass dry signal through (effect)
+            // or leave silence (instrument was already silent).
+        }
+        else if (rNumOut == 1)
+        {
+            const float* o = r->readOutChannel (0);
+            std::memcpy (L, o, sizeof (float) * (size_t) numSamples);
+            std::memcpy (R, o, sizeof (float) * (size_t) numSamples);
+        }
+        else // rNumOut >= 2
+        {
+            const float* oL = r->readOutChannel (0);
+            const float* oR = r->readOutChannel (1);
+            std::memcpy (L, oL, sizeof (float) * (size_t) numSamples);
+            std::memcpy (R, oR, sizeof (float) * (size_t) numSamples);
+        }
+
+        if (bufferMs > 0.0 && blocksSinceLoad >= kGraceBlocks)
+        {
+            const double elapsedMs = (double) (juce::Time::getHighResolutionTicks() - rt0)
+                                      * secondsPerTick * 1000.0;
+            if (elapsedMs > bufferMs * kRemoteBudgetFraction)
+            {
+                if (++consecutiveOverruns >= kMaxConsecutiveOverruns)
+                    autoBypassed.store (true, std::memory_order_relaxed);
+            }
+            else
+            {
+                consecutiveOverruns = 0;
+            }
+        }
+        if (blocksSinceLoad < kGraceBlocks) ++blocksSinceLoad;
+        return;
+    }
+   #endif
+
+    auto* p = currentInstance.load (std::memory_order_acquire);
+    if (p == nullptr) return;
+
+    constexpr double kBudgetFraction = 0.6;
     const auto t0 = juce::Time::getHighResolutionTicks();
 
     const int numIn  = p->getTotalNumInputChannels();

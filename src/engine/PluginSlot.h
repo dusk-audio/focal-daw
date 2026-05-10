@@ -3,6 +3,11 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <atomic>
 
+#if FOCAL_HAS_OOP_PLUGINS
+ #include "ipc/RemotePluginConnection.h"
+ #include <memory>
+#endif
+
 namespace focal
 {
 class PluginManager;
@@ -270,5 +275,32 @@ private:
     // Per-block scratch buffer for stereo-fallback plugins. Sized at
     // prepareToPlay so the audio thread doesn't allocate. 2-channel.
     juce::AudioBuffer<float> stereoScratch;
+
+   #if FOCAL_HAS_OOP_PLUGINS
+    // Out-of-process plugin state. When `remote` is non-null we route
+    // every audio + state RPC through it instead of `ownedInstance`.
+    // The slot stays in one mode for its lifetime per load: a single
+    // load either lands in-process or out-of-process; switching modes
+    // requires unload + reload. `currentInstance` stays null in OOP
+    // mode (the in-process atomic-park machinery is unused).
+    //
+    // RT-safety: `remote.get()` is read from the audio thread. We mirror
+    // the in-process atomic-pointer pattern with `currentRemote` so the
+    // load can swap-publish without locks.
+    std::unique_ptr<focal::ipc::RemotePluginConnection> ownedRemote;
+    std::atomic<focal::ipc::RemotePluginConnection*>    currentRemote { nullptr };
+
+    // Cached at load time (the LoadPluginReply tells us all three).
+    // Audio thread reads them from the same atomics so no message-thread
+    // queries cross the process boundary on the RT path.
+    std::atomic<int>  remoteNumIn       { 0 };
+    std::atomic<int>  remoteNumOut      { 0 };
+    std::atomic<bool> remoteIsInstrument { false };
+
+    // Persisted plugin identity. Used by getDescriptionXmlForSave (which
+    // can't fillInPluginDescription on a remote instance) and to drive
+    // re-prepare-on-block-size-change. Both are message-thread state.
+    juce::String savedDescriptionXml;
+   #endif
 };
 } // namespace focal

@@ -191,9 +191,13 @@ if(UNIX AND NOT APPLE)
     # output. Linux-only; the IPC uses memfd_create + futex which are
     # Linux-specific. Mac/Windows builds keep using the in-process path
     # (PluginSlot) until the OOP work matures into a portable design.
+    # FOCAL_HAS_OOP_PLUGINS gates every #if branch in PluginSlot that
+    # routes through RemotePluginConnection; defined only here so the
+    # rest of the codebase can rely on a single feature flag.
     target_sources(Focal PRIVATE
         src/engine/ipc/RemotePluginConnection.cpp
         src/engine/ipc/IpcSelfTest.cpp)
+    target_compile_definitions(Focal PRIVATE FOCAL_HAS_OOP_PLUGINS=1)
 
     # focal-plugin-host is a JUCE console app so it can pull in the
     # AudioPluginFormatManager + AudioPluginInstance machinery and

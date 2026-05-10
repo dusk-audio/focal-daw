@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include <juce_audio_basics/juce_audio_basics.h>  // juce::MidiBuffer
+
 namespace focal::ipc
 {
 // Parent-side connection to a focal-plugin-host child process. Owns:
@@ -81,16 +83,29 @@ public:
     // wait up to `timeoutNs` nanoseconds for the reply. On timeout the
     // connection's `crashed` flag is set and the function returns false
     // (caller should engage bypass). On success the audio output buffer
-    // in SHM is filled and ready to read.
+    // in SHM is filled and ready to read, and `midi` has been overwritten
+    // with whatever the plugin emitted (matching JUCE's processBlock
+    // contract — input MIDI is consumed, output MIDI replaces it).
     //
     // Audio data is `numIn` channel pointers each `numSamples` long;
     // they're memcpy'd into the SHM input region. After successful
     // return, the caller can read from `audioOutChannel(...)` for
     // `numOut` channels.
     //
-    // RT-safe: only memcpy + futex syscalls, no allocation.
+    // MIDI is serialised in the same wire format the focal-plugin-host
+    // child uses: each event is `[int sample][uint16 len][bytes]`, total
+    // capped at PluginIpc::kMidiBytes (16 KB). Events that don't fit are
+    // dropped — same behaviour as the child's serialiser.
+    //
+    // RT-safe: only memcpy + futex syscalls, no allocation. The output
+    // MIDI buffer is rebuilt via clear() + addEvent() into the caller's
+    // `midi`; juce::MidiBuffer::clear is RT-safe and addEvent only
+    // allocates when capacity is exceeded — the engine pre-sizes per-
+    // track scratch buffers so this stays allocation-free in practice.
     bool processBlockSync (const float* const* inChannels, int numIn,
-                            int numSamples, long long timeoutNs) noexcept;
+                            int numSamples,
+                            juce::MidiBuffer& midi,
+                            long long timeoutNs) noexcept;
 
     // Read the i'th output channel from SHM. Valid pointer for the life
     // of the connection. Audio thread calls this after processBlockSync

@@ -37,6 +37,26 @@ public:
     juce::AudioPluginFormatManager& getFormatManager() noexcept { return formatManager; }
     juce::KnownPluginList&          getKnownPluginList() noexcept { return knownPluginList; }
 
+    // Out-of-process plugin hosting toggle. Off by default. When on,
+    // PluginSlot::loadFromDescription forks the focal-plugin-host child
+    // and routes processBlock / state I/O through RemotePluginConnection
+    // instead of holding the AudioPluginInstance in-process. Off-platform
+    // (Mac / Windows) the flag is harmless — PluginSlot's #if branches
+    // compile out and we always take the in-process path.
+    //
+    // Read by PluginSlot at load time only; flipping mid-session affects
+    // the next load, not currently-loaded plugins. Set via UI (later
+    // phase) or the FOCAL_USE_OOP_PLUGINS env var on app startup.
+    void setOopEnabled (bool enable) noexcept { oopEnabled = enable; }
+    bool isOopEnabled() const noexcept       { return oopEnabled; }
+
+    // Path to the focal-plugin-host child binary. Computed lazily from
+    // the running Focal executable's own location: the binary lives at
+    // `<bundle dir>/focal-plugin-host` on Linux (CMake's
+    // RUNTIME_OUTPUT_DIRECTORY = $<TARGET_FILE_DIR:Focal>). Returns an
+    // empty string when OOP is unavailable on this platform.
+    juce::String getHostExecutablePath() const;
+
     // Message-thread only. Reads knownPluginList; would race a concurrent
     // scan or createPluginInstance.
     //
@@ -106,8 +126,19 @@ public:
 private:
     juce::AudioPluginFormatManager formatManager;
     juce::KnownPluginList          knownPluginList;
+    bool                           oopEnabled { false };
 
     void loadCache();
     void saveCache() const;
 };
+
+inline juce::String PluginManager::getHostExecutablePath() const
+{
+   #if FOCAL_HAS_OOP_PLUGINS
+    auto exe = juce::File::getSpecialLocation (juce::File::currentExecutableFile);
+    return exe.getParentDirectory().getChildFile ("focal-plugin-host").getFullPathName();
+   #else
+    return {};
+   #endif
+}
 } // namespace focal

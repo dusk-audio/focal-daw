@@ -1,4 +1,5 @@
 #include "MainComponent.h"
+#include <cstdlib>  // std::getenv (FOCAL_USE_OOP_PLUGINS)
 #include "AudioSettingsPanel.h"
 #include "AuxView.h"
 #include "BounceDialog.h"
@@ -113,6 +114,21 @@ private:
 MainComponent::MainComponent()
 {
     juce::LookAndFeel::setDefaultLookAndFeel (&lookAndFeel);
+
+   #if FOCAL_HAS_OOP_PLUGINS
+    // FOCAL_USE_OOP_PLUGINS=1 routes new plugin loads through the
+    // focal-plugin-host child process. Read once at startup; flipping
+    // mid-session would require reloading every plugin to pick up the
+    // new mode. Off by default while the OOP path is still maturing.
+    if (auto* env = std::getenv ("FOCAL_USE_OOP_PLUGINS");
+        env != nullptr && *env != 0 && *env != '0')
+    {
+        engine.getPluginManager().setOopEnabled (true);
+        std::fprintf (stdout,
+                      "[Focal] Out-of-process plugin hosting enabled "
+                      "(FOCAL_USE_OOP_PLUGINS=1).\n");
+    }
+   #endif
 
     // Default to a session under ~/Music/Focal/Untitled. The user can change
     // this later via a session-management UI; for the recorder MVP this is

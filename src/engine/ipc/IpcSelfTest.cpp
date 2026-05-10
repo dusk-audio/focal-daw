@@ -46,6 +46,7 @@ int runIpcSelfTest (const std::string& hostExecutablePath,
 
     int verifyFails = 0;
     constexpr long long kTimeoutNs = 100'000'000LL;  // 100 ms - generous
+    juce::MidiBuffer emptyMidi;
 
     for (int it = 0; it < iterations; ++it)
     {
@@ -58,7 +59,7 @@ int runIpcSelfTest (const std::string& hostExecutablePath,
         }
 
         const auto t0 = steady_clock::now();
-        if (! conn.processBlockSync (in, 2, numSamples, kTimeoutNs))
+        if (! conn.processBlockSync (in, 2, numSamples, emptyMidi, kTimeoutNs))
         {
             std::fprintf (stderr, "FAIL: processBlockSync at iter %d\n", it);
             return 2;
@@ -209,6 +210,7 @@ int runIpcHostTest (const std::string& hostExecutablePath,
 
     bool anyDifference = false;
     constexpr long long kTimeoutNs = 1'000'000'000LL;  // 1 s - plugins take time to warm up
+    juce::MidiBuffer emptyMidi;
 
     for (int it = 0; it < iterations; ++it)
     {
@@ -222,7 +224,7 @@ int runIpcHostTest (const std::string& hostExecutablePath,
         }
 
         const auto t0 = steady_clock::now();
-        if (! conn.processBlockSync (in, juce::jmax (numIn, 1), numSamples, kTimeoutNs))
+        if (! conn.processBlockSync (in, juce::jmax (numIn, 1), numSamples, emptyMidi, kTimeoutNs))
         {
             std::fprintf (stderr, "FAIL: processBlockSync at iter %d\n", it);
             return 14;

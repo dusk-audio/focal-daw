@@ -258,6 +258,7 @@ bool RemotePluginConnection::connect (const std::string& hostExecutablePath,
 
 bool RemotePluginConnection::processBlockSync (const float* const* inChannels,
                                                  int numIn, int numSamples,
+                                                 juce::MidiBuffer& midi,
                                                  long long timeoutNs) noexcept
 {
     if (mappedShm == nullptr || crashed.load (std::memory_order_acquire))
@@ -276,16 +277,66 @@ bool RemotePluginConnection::processBlockSync (const float* const* inChannels,
                          (std::size_t) numSamples * sizeof (float));
     }
 
+    // Serialise input MIDI to SHM. Wire format mirrors PluginHostMain's
+    // child-side reader: each event is native-endian
+    //   [int sample(4)][uint16 len(2)][bytes(len)]
+    // Events that don't fit get dropped — same behaviour as the child's
+    // serialiser when a plugin emits a flood of events.
+    {
+        std::uint8_t* out = midiIn (mappedShm);
+        std::uint32_t written = 0;
+        for (const auto meta : midi)
+        {
+            const auto m = meta.getMessage();
+            const int len = m.getRawDataSize();
+            if (len <= 0) continue;
+            if (written + 4 + 2 + (std::uint32_t) len > kMidiBytes) break;
+            const int sample = meta.samplePosition;
+            std::memcpy (out + written, &sample, 4);             written += 4;
+            const std::uint16_t l16 = (std::uint16_t) len;
+            std::memcpy (out + written, &l16, 2);                written += 2;
+            std::memcpy (out + written, m.getRawData(),
+                         (std::size_t) len);                      written += (std::uint32_t) len;
+        }
+        hdr->midiInBytes = written;
+    }
+
     hdr->numSamples  = (std::uint32_t) numSamples;
     hdr->numInChans  = (std::uint32_t) numIn;
     hdr->numOutChans = (std::uint32_t) numIn;   // stub: same as input
-    hdr->midiInBytes = 0;
     hdr->midiOutBytes = 0;
 
     // Bump cmdSeq + wake the child.
     const std::uint32_t mySeq = ++localSeq;
     hdr->cmdSeq.store (mySeq, std::memory_order_release);
     futexWakeOne (&hdr->cmdSeq);
+
+    // Replace caller's MIDI buffer with whatever the plugin emitted.
+    // Mirror of the child's serialiser; parses the same wire format.
+    // RT-safe assuming `midi` was pre-sized at engine prepare-time so
+    // addEvent reuses existing capacity.
+    auto deserialiseMidiOut = [&]
+    {
+        midi.clear();
+        const std::uint32_t midiOutBytes = hdr->midiOutBytes;
+        if (midiOutBytes == 0 || midiOutBytes > kMidiBytes) return;
+        const std::uint8_t* base = midiOut (mappedShm);
+        std::uint32_t off = 0;
+        std::uint8_t evBuf[256];
+        while (off + 6 <= midiOutBytes)
+        {
+            int sample = 0;
+            std::memcpy (&sample, base + off, 4); off += 4;
+            std::uint16_t l16 = 0;
+            std::memcpy (&l16, base + off, 2); off += 2;
+            const int eventLen = (int) l16;
+            if (eventLen <= 0 || eventLen > (int) sizeof (evBuf)) break;
+            if (off + (std::uint32_t) eventLen > midiOutBytes)   break;
+            std::memcpy (evBuf, base + off, (std::size_t) eventLen);
+            off += (std::uint32_t) eventLen;
+            midi.addEvent (juce::MidiMessage (evBuf, eventLen), sample);
+        }
+    };
 
     // Bounded spin first - typical block finishes in a few microseconds,
     // and a syscall pair (~600 ns) per block is wasteful at 64-sample
@@ -295,6 +346,7 @@ bool RemotePluginConnection::processBlockSync (const float* const* inChannels,
     {
         if (hdr->replySeq.load (std::memory_order_acquire) == mySeq)
         {
+            deserialiseMidiOut();
             roundTrips.fetch_add (1, std::memory_order_relaxed);
             return true;
         }
@@ -321,6 +373,7 @@ bool RemotePluginConnection::processBlockSync (const float* const* inChannels,
         }
     }
 
+    deserialiseMidiOut();
     roundTrips.fetch_add (1, std::memory_order_relaxed);
     return true;
 }
