@@ -33,6 +33,21 @@ target_link_libraries(focal-tests PRIVATE
     juce::juce_recommended_config_flags
     juce::juce_recommended_warning_flags)
 
+# IPC round-trip regression — Linux only because the IPC uses
+# memfd_create + futex (no macOS / Windows port yet). The test spawns
+# the focal-plugin-host child in --ipc-stub mode, so we hard-depend on
+# that target being built first. FOCAL_PLUGIN_HOST_PATH is resolved via
+# a generator expression so it points to wherever CMake actually puts
+# the binary in the current build configuration.
+if (UNIX AND NOT APPLE)
+    target_sources(focal-tests PRIVATE
+        ipc_stub_round_trip.cpp
+        ${CMAKE_SOURCE_DIR}/src/engine/ipc/RemotePluginConnection.cpp)
+    target_compile_definitions(focal-tests PRIVATE
+        FOCAL_PLUGIN_HOST_PATH="$<TARGET_FILE:focal-plugin-host>")
+    add_dependencies(focal-tests focal-plugin-host)
+endif()
+
 list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
 include(Catch)
 catch_discover_tests(focal-tests)
