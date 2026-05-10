@@ -464,6 +464,32 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
         if (hoveredMarkerIdx >= 0)
         {
             const auto& mk = session.getMarkers()[(size_t) hoveredMarkerIdx];
+            m.addItem ("Rename \"" + mk.name + "\"...",
+                        [safeThis = juce::Component::SafePointer<TapeStrip> (this),
+                         hoveredMarkerIdx]
+                        {
+                            if (safeThis == nullptr) return;
+                            const auto& m2 = safeThis->session.getMarkers();
+                            if (hoveredMarkerIdx < 0 || hoveredMarkerIdx >= (int) m2.size()) return;
+                            auto* aw = new juce::AlertWindow ("Rename marker",
+                                                                  "New name:",
+                                                                  juce::AlertWindow::NoIcon);
+                            aw->addTextEditor ("name", m2[(size_t) hoveredMarkerIdx].name);
+                            aw->addButton ("Rename", 1, juce::KeyPress (juce::KeyPress::returnKey));
+                            aw->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+                            aw->enterModalState (true,
+                                juce::ModalCallbackFunction::create (
+                                    [safeThis, hoveredMarkerIdx, aw] (int result)
+                                    {
+                                        std::unique_ptr<juce::AlertWindow> guard (aw);
+                                        if (result != 1 || safeThis == nullptr) return;
+                                        const auto newName = aw->getTextEditorContents ("name").trim();
+                                        if (newName.isEmpty()) return;
+                                        safeThis->session.renameMarker (hoveredMarkerIdx, newName);
+                                        safeThis->repaint();
+                                    }),
+                                false);
+                        });
             m.addItem ("Delete \"" + mk.name + "\"",
                         [safeThis = juce::Component::SafePointer<TapeStrip> (this),
                          hoveredMarkerIdx]
@@ -815,8 +841,31 @@ void TapeStrip::mouseDrag (const juce::MouseEvent& e)
             && markerDrag.index >= 0
             && markerDrag.index < (int) session.getMarkers().size())
         {
-            session.getMarkers()[(size_t) markerDrag.index].timelineSamples =
-                juce::jmax ((juce::int64) 0, cur);
+            // Snap-to-beat when session.snapToGrid is on. Same model
+            // as the audio + MIDI region drags above: round the
+            // delta against origin so the marker lands on a beat
+            // boundary, not the absolute target. Mid-beat origins
+            // therefore stay mid-beat on small drags and re-align
+            // only on bigger movements.
+            juce::int64 newPos = juce::jmax ((juce::int64) 0, cur);
+            if (session.snapToGrid)
+            {
+                const double sr  = engine.getCurrentSampleRate();
+                const float  bpm = session.tempoBpm.load();
+                if (sr > 0.0)
+                {
+                    const juce::int64 step = (bpm > 0.0f)
+                        ? (juce::int64) (sr * 60.0 / (double) bpm)
+                        : (juce::int64) sr;
+                    if (step > 0)
+                    {
+                        juce::int64 delta = cur - markerDrag.mouseDownSample;
+                        delta = ((delta + (delta >= 0 ? step / 2 : -step / 2)) / step) * step;
+                        newPos = juce::jmax ((juce::int64) 0, markerDrag.originSample + delta);
+                    }
+                }
+            }
+            session.getMarkers()[(size_t) markerDrag.index].timelineSamples = newPos;
             repaint();
         }
         return;
