@@ -228,6 +228,15 @@ if(UNIX AND NOT APPLE)
         juce::juce_audio_basics
         juce::juce_events
         juce::juce_core
+        # Phase 4 editor embedding: createEditorIfNeeded returns a
+        # juce::AudioProcessorEditor (which derives from Component);
+        # hosting it in a borderless DocumentWindow to expose its native
+        # X11 Window ID over IPC needs gui_basics + graphics. Linked
+        # explicitly rather than relying on transitive resolution from
+        # audio_processors so an upstream JUCE refactor doesn't silently
+        # drop them.
+        juce::juce_gui_basics
+        juce::juce_graphics
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags)
     target_include_directories(focal-plugin-host PRIVATE src)

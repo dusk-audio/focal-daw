@@ -91,6 +91,28 @@ struct PrepareToPlayPayload
     std::uint32_t reserved;
 };
 
+// ShowEditor reply. windowId is a host-OS native window handle (X11 Window
+// on Linux, packed into 64 bits so the wire format doesn't depend on the
+// X11 unsigned-long width). Width/height are the editor's preferred size
+// reported via getWidth()/getHeight() after createEditorIfNeeded.
+struct ShowEditorReply
+{
+    std::uint64_t windowId;
+    std::int32_t  width;
+    std::int32_t  height;
+    std::uint32_t reserved;
+};
+
+// ResizeEditor request payload. Sent parent→child when the user resizes
+// the embedding window; the child resizes its native editor wrapper to
+// match so the plugin's GUI gets a JUCE resized() callback.
+struct ResizeEditorPayload
+{
+    std::int32_t  width;
+    std::int32_t  height;
+    std::uint64_t reserved;
+};
+
 // Cache-line aligned so the parent's `cmdSeq` write doesn't false-share
 // with the child's `replySeq` write. 64 bytes covers all live fields with
 // room to grow without breaking the layout.

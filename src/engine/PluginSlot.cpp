@@ -188,6 +188,66 @@ void PluginSlot::clearAutoBypass() noexcept
    #endif
 }
 
+bool PluginSlot::showRemoteEditor (std::uint64_t& windowIdOut,
+                                     int& widthOut, int& heightOut)
+{
+    windowIdOut = 0; widthOut = 0; heightOut = 0;
+   #if FOCAL_HAS_OOP_PLUGINS
+    auto* r = ownedRemote.get();
+    if (r == nullptr) return false;
+    std::string err;
+    if (! r->showEditor (windowIdOut, widthOut, heightOut, err))
+    {
+        std::fprintf (stderr,
+                      "[Focal/PluginSlot] OOP showEditor failed: %s\n",
+                      err.c_str());
+        return false;
+    }
+    return true;
+   #else
+    return false;
+   #endif
+}
+
+bool PluginSlot::hideRemoteEditor()
+{
+   #if FOCAL_HAS_OOP_PLUGINS
+    auto* r = ownedRemote.get();
+    if (r == nullptr) return false;
+    std::string err;
+    if (! r->hideEditor (err))
+    {
+        std::fprintf (stderr,
+                      "[Focal/PluginSlot] OOP hideEditor failed: %s\n",
+                      err.c_str());
+        return false;
+    }
+    return true;
+   #else
+    return false;
+   #endif
+}
+
+bool PluginSlot::resizeRemoteEditor (int width, int height)
+{
+   #if FOCAL_HAS_OOP_PLUGINS
+    auto* r = ownedRemote.get();
+    if (r == nullptr) return false;
+    std::string err;
+    if (! r->resizeEditor (width, height, err))
+    {
+        std::fprintf (stderr,
+                      "[Focal/PluginSlot] OOP resizeEditor failed: %s\n",
+                      err.c_str());
+        return false;
+    }
+    return true;
+   #else
+    juce::ignoreUnused (width, height);
+    return false;
+   #endif
+}
+
 void PluginSlot::prepareToPlay (double sampleRate, int blockSize)
 {
     preparedSampleRate = sampleRate;

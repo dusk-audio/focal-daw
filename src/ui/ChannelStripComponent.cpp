@@ -1264,8 +1264,16 @@ void ChannelStripComponent::togglePluginEditor()
 class ChannelStripComponent::PluginEditorWindow final : public juce::DocumentWindow
 {
 public:
+    // Body is taken as a juce::Component& rather than the more specific
+    // AudioProcessorEditor& so this same wrapper can host either:
+    //  - in-process: the plugin's own AudioProcessorEditor (which IS a
+    //    Component);
+    //  - OOP (Linux+FOCAL_HAS_OOP_PLUGINS): a juce::XEmbedComponent
+    //    wrapping the X11 Window the focal-plugin-host child reported.
+    // The implementation only relies on Component-level API
+    // (getWidth/getHeight/setSize/setContentNonOwned).
     PluginEditorWindow (const juce::String& title,
-                        juce::AudioProcessorEditor& editor,
+                        juce::Component& editor,
                         std::function<void()> onCloseButton)
         : juce::DocumentWindow (([&]
                                   {
@@ -1298,10 +1306,19 @@ public:
         const int eh = juce::jmax (200, editor.getHeight());
         editor.setSize (ew, eh);
 
+        // isResizable() lives on AudioProcessorEditor, not Component.
+        // The OOP path passes an XEmbedComponent (Component, no
+        // isResizable) so query through a dynamic_cast — diagnostic
+        // prints a -1 for the OOP/non-APE case.
+        const int isResz = [&]() -> int
+        {
+            if (auto* ape = dynamic_cast<juce::AudioProcessorEditor*> (&editor))
+                return ape->isResizable() ? 1 : 0;
+            return -1;
+        }();
         std::fprintf (stderr,
                       "[Focal/PluginEditor] Opening \"%s\" editor: editor=%dx%d resizable=%d\n",
-                      title.toRawUTF8(), ew, eh,
-                      (int) editor.isResizable());
+                      title.toRawUTF8(), ew, eh, isResz);
 
         // Size the WINDOW first (so its X11 peer is allocated at the
         // right geometry), then map it. We deliberately do NOT call
@@ -1375,6 +1392,48 @@ void ChannelStripComponent::openPluginEditor()
 {
     if (isPluginEditorOpen()) return;
 
+   #if JUCE_LINUX && FOCAL_HAS_OOP_PLUGINS
+    if (pluginSlot.isRemote())
+    {
+        // OOP path: ask the child to show the editor + report its X11
+        // Window ID; embed via JUCE's XEmbedComponent. The child owns
+        // the editor's lifecycle; we just host its native window.
+        std::uint64_t windowId = 0;
+        int w = 0, h = 0;
+        if (! pluginSlot.showRemoteEditor (windowId, w, h)) return;
+        if (windowId == 0) return;
+
+        if (remoteEditorEmbed == nullptr)
+        {
+            // XEmbedComponent's allowEmbedding ctor: takes a Window
+            // (unsigned long) and adopts it as the foreign client.
+            // wantsKeyboardFocus = true so plugin GUIs receive key
+            // events; allowForeignWidgetToResizeComponent = false so
+            // the parent (PluginEditorWindow) controls sizing.
+            remoteEditorEmbed = std::make_unique<juce::XEmbedComponent> (
+                (unsigned long) windowId,
+                /*wantsKeyboardFocus*/ true,
+                /*allowForeignWidgetToResizeComponent*/ false);
+            remoteEditorEmbed->setSize (juce::jmax (200, w),
+                                          juce::jmax (200, h));
+        }
+
+        juce::Component::SafePointer<ChannelStripComponent> safe (this);
+        pluginEditorWindow = std::make_unique<PluginEditorWindow> (
+            pluginSlot.getLoadedName(),
+            *remoteEditorEmbed,
+            [safe]
+            {
+                juce::MessageManager::callAsync ([safe]
+                {
+                    if (auto* self = safe.getComponent())
+                        self->closePluginEditor();
+                });
+            });
+        return;
+    }
+   #endif
+
     auto* instance = pluginSlot.getInstance();
     if (instance == nullptr || ! instance->hasEditor()) return;
 
@@ -1428,6 +1487,21 @@ void ChannelStripComponent::closePluginEditor()
         if (auto* self = safe.getComponent())
             self->pluginEditorWindow.reset();
     });
+
+   #if JUCE_LINUX && FOCAL_HAS_OOP_PLUGINS
+    if (pluginSlot.isRemote())
+    {
+        // Tell the child to drop its toplevel so the X11 client window
+        // is fully unmapped before our XEmbedComponent's destructor
+        // runs (when the deferred reset above fires). Removed on the
+        // child side, the XEmbed reparent dance becomes a no-op and
+        // we avoid a stale Window reference in the foreign-client
+        // bookkeeping.
+        pluginSlot.hideRemoteEditor();
+        // XEmbedComponent stays cached so reopen reuses it; only drop
+        // it on full unload.
+    }
+   #endif
 }
 
 void ChannelStripComponent::dropPluginEditor()
@@ -1451,6 +1525,15 @@ void ChannelStripComponent::dropPluginEditor()
     focal::platform::requestFocusOnMainWaylandSurface();
     pluginEditor.reset();
     pluginEditorOwner = nullptr;
+
+   #if JUCE_LINUX && FOCAL_HAS_OOP_PLUGINS
+    // Drop the OOP-side embed too. The XEmbedComponent's destructor
+    // tells the foreign X11 client to detach; the child has already
+    // been told to hide the editor by closePluginEditor above (or by
+    // unloadPluginSlot which calls dropPluginEditor before
+    // pluginSlot.unload). Either way the X client is safe to release.
+    remoteEditorEmbed.reset();
+   #endif
 }
 
 void ChannelStripComponent::openEqEditorPopup()

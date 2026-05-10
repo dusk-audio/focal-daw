@@ -48,6 +48,7 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_events/juce_events.h>
+#include <juce_gui_basics/juce_gui_basics.h>
 
 namespace
 {
@@ -241,6 +242,16 @@ struct HostState
     int    currentBlockSize  = 0;
 
     std::atomic<bool> shouldQuit { false };
+
+    // Editor embedding (Phase 4). The plugin's editor lives in this
+    // process; the parent embeds our native X11 window via XEmbed.
+    // editorWindow is a borderless toplevel that wraps the plugin's
+    // AudioProcessorEditor so it has its own native peer; editor is
+    // a non-owning pointer (the wrapper window owns the Component).
+    // Both are message-thread-only; the socket-reader thread acquires
+    // MessageManagerLock before touching them.
+    std::unique_ptr<juce::DocumentWindow>     editorWindow;
+    juce::AudioProcessorEditor*               editor { nullptr };
 };
 
 // Build a juce::PluginDescription from a string holding the XML emitted
@@ -371,6 +382,107 @@ std::uint32_t handleSetState (HostState& host,
         host.ownedInstance->setStateInformation (
             static_cast<const char*> (host.shm) + kStateOffset, (int) sz);
     }
+    return 0;
+}
+
+std::uint32_t handleShowEditor (HostState& host,
+                                  std::vector<std::uint8_t>& replyOut)
+{
+    if (host.ownedInstance == nullptr) return 1;
+
+    ShowEditorReply reply {};
+    {
+        const juce::MessageManagerLock mml;
+
+        // Lazily create the editor + its borderless wrapper window. The
+        // wrapper is sized to the editor's preferred size; the parent's
+        // XEmbedComponent will resize-on-mount to whatever space it has.
+        if (host.editor == nullptr)
+        {
+            host.editor = host.ownedInstance->createEditorIfNeeded();
+            if (host.editor == nullptr) return 2;  // plugin has no editor
+        }
+
+        if (host.editorWindow == nullptr)
+        {
+            // Borderless DocumentWindow so the plugin's GUI is unencumbered
+            // by host chrome - the parent's PluginEditorWindow already
+            // provides a frame + close button. Native peer required so we
+            // have an X11 Window ID to embed.
+            auto win = std::make_unique<juce::DocumentWindow> (
+                "focal-plugin-host editor",
+                juce::Colours::black,
+                juce::DocumentWindow::closeButton);
+            win->setUsingNativeTitleBar (false);
+            win->setTitleBarHeight (0);
+            win->setOpaque (true);
+            win->setContentNonOwned (host.editor, true);
+            // Match the editor's preferred size so a JUCE-default
+            // resized() inside the plugin populates against real bounds.
+            const int w = host.editor->getWidth()  > 0 ? host.editor->getWidth()  : 480;
+            const int h = host.editor->getHeight() > 0 ? host.editor->getHeight() : 360;
+            win->centreWithSize (w, h);
+            // setVisible(true) realizes the native peer so getNativeHandle
+            // is non-null. Toplevel needs to be addToDesktop'd; centre+
+            // setVisible does that internally.
+            win->setVisible (true);
+            host.editorWindow = std::move (win);
+        }
+        else
+        {
+            host.editorWindow->setVisible (true);
+        }
+
+        if (auto* peer = host.editorWindow->getPeer())
+        {
+            auto* nativeHandle = peer->getNativeHandle();
+            // On Linux, getNativeHandle returns an X11 Window cast to
+            // void*. Window is `unsigned long`, which is 64-bit on
+            // x86_64 Linux; pack into uint64_t for wire transport.
+            reply.windowId = (std::uint64_t) (std::uintptr_t) nativeHandle;
+        }
+        reply.width  = host.editorWindow->getWidth();
+        reply.height = host.editorWindow->getHeight();
+        reply.reserved = 0;
+    }
+
+    if (reply.windowId == 0) return 3;  // peer wasn't ready
+
+    replyOut.resize (sizeof (reply));
+    std::memcpy (replyOut.data(), &reply, sizeof (reply));
+    return 0;
+}
+
+std::uint32_t handleHideEditor (HostState& host)
+{
+    const juce::MessageManagerLock mml;
+    if (host.editorWindow != nullptr)
+    {
+        // Detach the editor from the window BEFORE destroying the window.
+        // setContentNonOwned was called earlier; clearing it explicitly
+        // ensures the editor isn't dragged through ~DocumentWindow's
+        // child-component teardown (some plugins react badly to that).
+        host.editorWindow->clearContentComponent();
+        host.editorWindow.reset();
+    }
+    // Keep host.editor alive — the plugin owns its editor's lifecycle
+    // through the AudioPluginInstance; we just stop hosting it. A
+    // subsequent ShowEditor re-attaches the same editor to a fresh
+    // wrapper window (cheaper than re-creating the editor itself,
+    // which can be slow for GUI-heavy plugins).
+    return 0;
+}
+
+std::uint32_t handleResizeEditor (HostState& host,
+                                    const std::vector<std::uint8_t>& payload)
+{
+    if (payload.size() != sizeof (ResizeEditorPayload)) return 1;
+    ResizeEditorPayload p {};
+    std::memcpy (&p, payload.data(), sizeof (p));
+    const juce::MessageManagerLock mml;
+    if (host.editorWindow == nullptr) return 2;
+    host.editorWindow->setSize (juce::jmax (1, (int) p.width),
+                                  juce::jmax (1, (int) p.height));
     return 0;
 }
 
@@ -576,6 +688,9 @@ int runIpcHost() noexcept
                 case OpCode::Release:        status = handleRelease (host); break;
                 case OpCode::GetState:       status = handleGetState (host, reply); break;
                 case OpCode::SetState:       status = handleSetState (host, payload); break;
+                case OpCode::ShowEditor:     status = handleShowEditor (host, reply); break;
+                case OpCode::HideEditor:     status = handleHideEditor (host); break;
+                case OpCode::ResizeEditor:   status = handleResizeEditor (host, payload); break;
                 default:                     status = 99; break;
             }
 

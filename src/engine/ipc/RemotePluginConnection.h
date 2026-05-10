@@ -79,6 +79,26 @@ public:
     bool setState (const std::uint8_t* data, std::size_t size,
                     std::string& errorOut);
 
+    // Editor RPCs (Phase 4). The child wraps the plugin's editor in its
+    // own borderless toplevel and reports the native window ID; the
+    // parent embeds that window via XEmbed.
+    //
+    // showEditor: tell the child to create / show the plugin's editor
+    // and report its native window ID + initial size. windowIdOut is
+    // a host-OS native handle (X11 Window on Linux, cast through
+    // std::uint64_t for portability).
+    bool showEditor (std::uint64_t& windowIdOut, int& widthOut, int& heightOut,
+                      std::string& errorOut);
+
+    // hideEditor: tell the child to drop the editor toplevel (and its
+    // peer). Idempotent; calling on a hidden editor is a no-op success.
+    bool hideEditor (std::string& errorOut);
+
+    // resizeEditor: parent's embedding window changed size; resize the
+    // child's editor wrapper to match so the plugin sees a resized()
+    // callback. Width/height are the inner content size in points.
+    bool resizeEditor (int width, int height, std::string& errorOut);
+
     // Send the audio + MIDI buffers in shared memory, signal the child,
     // wait up to `timeoutNs` nanoseconds for the reply. On timeout the
     // connection's `crashed` flag is set and the function returns false

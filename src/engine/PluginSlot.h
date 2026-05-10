@@ -159,6 +159,28 @@ public:
        #endif
     }
 
+    // True when this slot's plugin currently runs out-of-process. The
+    // UI uses this to branch its plugin-editor flow: in-process slots
+    // get the existing AudioProcessorEditor path; OOP slots use
+    // showRemoteEditor to fetch a native window ID for XEmbed embedding.
+    bool isRemote() const noexcept
+    {
+       #if FOCAL_HAS_OOP_PLUGINS
+        return currentRemote.load (std::memory_order_acquire) != nullptr;
+       #else
+        return false;
+       #endif
+    }
+
+    // Editor RPC pass-throughs (OOP only — no-op + return false on
+    // other platforms / in-process slots). The UI calls these to bridge
+    // the editor across the process boundary; on success, windowIdOut
+    // is a host-OS native window handle (X11 Window on Linux, packed
+    // as uint64_t).
+    bool showRemoteEditor (std::uint64_t& windowIdOut, int& widthOut, int& heightOut);
+    bool hideRemoteEditor();
+    bool resizeRemoteEditor (int width, int height);
+
     // Plugin instance access for Stage 3 editor window. Returns nullptr if
     // no plugin loaded. Caller MUST be on the message thread; the audio
     // thread may swap the instance out between calls.

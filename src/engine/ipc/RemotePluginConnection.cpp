@@ -565,6 +565,79 @@ bool RemotePluginConnection::setState (const std::uint8_t* data, std::size_t siz
     return true;
 }
 
+bool RemotePluginConnection::showEditor (std::uint64_t& windowIdOut,
+                                            int& widthOut, int& heightOut,
+                                            std::string& errorOut)
+{
+    windowIdOut = 0; widthOut = 0; heightOut = 0;
+    if (socketFd < 0) { errorOut = "not connected"; return false; }
+    if (! sendControl (socketFd, OpCode::ShowEditor, nullptr, 0))
+    {
+        errorOut = std::string ("ShowEditor write failed: ") + std::strerror (errno);
+        return false;
+    }
+    ControlMsgHeader hdr {};
+    std::vector<std::uint8_t> reply;
+    if (! recvControl (socketFd, hdr, reply))
+    {
+        errorOut = std::string ("ShowEditor read failed: ") + std::strerror (errno);
+        return false;
+    }
+    if (hdr.status != 0) { errorOut = "ShowEditor status != 0"; return false; }
+    if (reply.size() != sizeof (ShowEditorReply))
+    {
+        errorOut = "ShowEditor reply size mismatch";
+        return false;
+    }
+    ShowEditorReply r {};
+    std::memcpy (&r, reply.data(), sizeof (r));
+    windowIdOut = r.windowId;
+    widthOut    = (int) r.width;
+    heightOut   = (int) r.height;
+    return true;
+}
+
+bool RemotePluginConnection::hideEditor (std::string& errorOut)
+{
+    if (socketFd < 0) { errorOut = "not connected"; return false; }
+    if (! sendControl (socketFd, OpCode::HideEditor, nullptr, 0))
+    {
+        errorOut = std::string ("HideEditor write failed: ") + std::strerror (errno);
+        return false;
+    }
+    ControlMsgHeader hdr {};
+    std::vector<std::uint8_t> reply;
+    if (! recvControl (socketFd, hdr, reply))
+    {
+        errorOut = std::string ("HideEditor read failed: ") + std::strerror (errno);
+        return false;
+    }
+    if (hdr.status != 0) { errorOut = "HideEditor status != 0"; return false; }
+    return true;
+}
+
+bool RemotePluginConnection::resizeEditor (int width, int height, std::string& errorOut)
+{
+    if (socketFd < 0) { errorOut = "not connected"; return false; }
+    ResizeEditorPayload p {};
+    p.width  = (std::int32_t) width;
+    p.height = (std::int32_t) height;
+    if (! sendControl (socketFd, OpCode::ResizeEditor, &p, sizeof (p)))
+    {
+        errorOut = std::string ("ResizeEditor write failed: ") + std::strerror (errno);
+        return false;
+    }
+    ControlMsgHeader hdr {};
+    std::vector<std::uint8_t> reply;
+    if (! recvControl (socketFd, hdr, reply))
+    {
+        errorOut = std::string ("ResizeEditor read failed: ") + std::strerror (errno);
+        return false;
+    }
+    if (hdr.status != 0) { errorOut = "ResizeEditor status != 0"; return false; }
+    return true;
+}
+
 bool RemotePluginConnection::pollReaper() noexcept
 {
     if (childPid <= 0) return false;

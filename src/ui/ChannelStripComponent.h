@@ -271,6 +271,17 @@ private:
     std::unique_ptr<juce::AudioProcessorEditor> pluginEditor;
     juce::AudioProcessor* pluginEditorOwner = nullptr;
 
+   #if JUCE_LINUX && FOCAL_HAS_OOP_PLUGINS
+    // OOP-mode editor embedding. The plugin's editor lives in the
+    // focal-plugin-host child; we wrap its X11 Window ID in a JUCE
+    // XEmbedComponent and feed THAT into PluginEditorWindow as the
+    // body. Lifetime mirrors `pluginEditor` (in-process counterpart):
+    // built lazily on first open, kept across close/reopen cycles so
+    // the child's GUI resources aren't torn down per close, dropped
+    // when the slot is unloaded.
+    std::unique_ptr<juce::XEmbedComponent> remoteEditorEmbed;
+   #endif
+
     bool isPluginEditorOpen() const noexcept;
 
 public:

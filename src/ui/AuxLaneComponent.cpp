@@ -213,6 +213,14 @@ void AuxLaneComponent::toggleEditorForSlot (int slotIdx)
     }
     else
     {
+        // TODO(focal/oop): OOP-loaded aux plugins don't yet have editor
+        // support — this branch only handles in-process editors via
+        // createEditorIfNeeded. ChannelStripComponent already does the
+        // OOP+XEmbed dance; the same pattern needs porting here, but
+        // AuxLane's inline-attach geometry adds an extra wrinkle (the
+        // XEmbedComponent must be parented to AuxLaneComponent for
+        // resized() routing). Until that lands, OOP aux plugins load
+        // and process audio fine but their GUIs are inaccessible.
         if (auto* p = strip.getPluginSlot (slotIdx).getInstance())
         {
             ui.editor.reset (p->createEditorIfNeeded());
@@ -246,8 +254,13 @@ void AuxLaneComponent::attachEditorInline (int slotIdx)
 class AuxLaneComponent::SlotUI::AuxPopoutWindow final : public juce::DocumentWindow
 {
 public:
+    // Body is a juce::Component& (not the more specific AudioProcessor-
+    // Editor&) so future OOP aux plugins can pass an XEmbedComponent
+    // here without changing the wrapper. Today only the in-process
+    // path drives this (toggleEditorForSlot has not been retargeted
+    // for OOP yet — see TODO in toggleEditorForSlot).
     AuxPopoutWindow (const juce::String& title,
-                     juce::AudioProcessorEditor& editor,
+                     juce::Component& editor,
                      std::function<void()> onCloseButton)
         : juce::DocumentWindow (([&]
                                   {
