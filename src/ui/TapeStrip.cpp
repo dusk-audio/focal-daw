@@ -699,10 +699,9 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
         return;
     }
 
-    // MIDI single-click: swallow the event so it doesn't fall through
-    // to the rubber-band / playhead-seek paths below. Opening the
-    // piano roll moved to mouseDoubleClick for parity with audio
-    // regions (consistent "double-click any region to edit" model).
+    // MIDI single-click: capture move-drag origin. Move-only on the
+    // tape lane; fade / gain / trim happen inside the piano roll.
+    // Double-click opens the editor (handled in mouseDoubleClick).
     {
         for (int t = 0; t < Session::kNumTracks; ++t)
         {
@@ -715,6 +714,11 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
                 const int x0 = xForSample (r.timelineStart);
                 const int x1 = xForSample (r.timelineStart + r.lengthInSamples);
                 if (e.x < x0 || e.x > x1) continue;
+                midiDrag.track             = t;
+                midiDrag.regionIdx         = i;
+                midiDrag.mouseDownSample   = sampleAtX (e.x);
+                midiDrag.origTimelineStart = r.timelineStart;
+                midiDrag.origState         = r;
                 return;
             }
             break;
@@ -748,6 +752,39 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
 
 void TapeStrip::mouseDrag (const juce::MouseEvent& e)
 {
+    // MIDI region move-drag. In-place mutation of timelineStart on
+    // the AtomicSnapshot's mutable copy so the audio thread's
+    // scheduler picks it up without a publish (no reallocation, no
+    // shifting, structural integrity preserved per AtomicSnapshot's
+    // contract). mouseUp finalises through MidiRegionEditAction.
+    if (midiDrag.active())
+    {
+        auto& v = session.track (midiDrag.track).midiRegions.currentMutable();
+        if (midiDrag.regionIdx < 0 || midiDrag.regionIdx >= (int) v.size()) return;
+
+        juce::int64 deltaSamples = sampleAtX (e.x) - midiDrag.mouseDownSample;
+        // Snap-to-beat - same model as the audio drag below.
+        if (session.snapToGrid)
+        {
+            const double sr  = engine.getCurrentSampleRate();
+            const float  bpm = session.tempoBpm.load();
+            if (sr > 0.0)
+            {
+                const juce::int64 step = (bpm > 0.0f)
+                    ? (juce::int64) (sr * 60.0 / (double) bpm)
+                    : (juce::int64) sr;
+                if (step > 0)
+                    deltaSamples = ((deltaSamples + (deltaSamples >= 0 ? step / 2 : -step / 2))
+                                       / step) * step;
+            }
+        }
+        const auto newStart = juce::jmax<juce::int64> (
+            0, midiDrag.origTimelineStart + deltaSamples);
+        v[(size_t) midiDrag.regionIdx].timelineStart = newStart;
+        repaint();
+        return;
+    }
+
     // Rubber-band drag - update the screen-space rectangle from the
     // mouseDown origin to the current point. mouseUp finalises the
     // selection.
@@ -994,6 +1031,33 @@ void TapeStrip::mouseDrag (const juce::MouseEvent& e)
 
 void TapeStrip::mouseUp (const juce::MouseEvent& e)
 {
+    // MIDI region drag finalise. If the cursor moved at all from the
+    // origin, submit a MidiRegionEditAction (before/after) to the
+    // engine's UndoManager so Cmd+Z reverts. mouseDrag has already
+    // mutated the live region; here we roll it back to the captured
+    // origState and let perform() re-apply afterState through the
+    // action so the recorded transaction is the canonical one.
+    if (midiDrag.active())
+    {
+        auto& v = session.track (midiDrag.track).midiRegions.currentMutable();
+        if (midiDrag.regionIdx >= 0 && midiDrag.regionIdx < (int) v.size())
+        {
+            const auto afterState = v[(size_t) midiDrag.regionIdx];
+            if (afterState.timelineStart != midiDrag.origState.timelineStart)
+            {
+                v[(size_t) midiDrag.regionIdx] = midiDrag.origState;
+                auto& um = engine.getUndoManager();
+                um.beginNewTransaction ("Move MIDI region");
+                um.perform (new MidiRegionEditAction (
+                    session, engine, midiDrag.track, midiDrag.regionIdx,
+                    midiDrag.origState, afterState));
+            }
+        }
+        midiDrag.clear();
+        repaint();
+        return;
+    }
+
     // Rubber-band finalisation. Walk every audio region; any whose
     // painted rect intersects the box gets added to additional-
     // Selections. We don't replace the existing selection - the

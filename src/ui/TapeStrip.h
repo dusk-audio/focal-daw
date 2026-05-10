@@ -207,6 +207,25 @@ private:
     };
     ActiveDrag drag;
 
+    // In-flight MIDI region drag. Single-click on a MIDI region body
+    // captures origState + origTimelineStart; mouseDrag moves the
+    // region by the cursor delta (snap-to-beat when session.snapToGrid
+    // is on); mouseUp finalises through MidiRegionEditAction so Cmd+Z
+    // reverts. Audio regions go through the bigger `drag` machinery
+    // above which carries fade / gain / trim state; MIDI is move-only
+    // for now (trim is via piano roll edge handles).
+    struct MidiActiveDrag
+    {
+        int track     = -1;
+        int regionIdx = -1;
+        juce::int64 mouseDownSample   = 0;
+        juce::int64 origTimelineStart = 0;
+        MidiRegion  origState;
+        bool active() const noexcept { return track >= 0 && regionIdx >= 0; }
+        void clear() { track = -1; regionIdx = -1; }
+    };
+    MidiActiveDrag midiDrag;
+
     // In-flight ruler selection. Click+drag on the ruler defines a
     // candidate range that's painted as a neutral highlight. On mouseUp
     // we offer a menu ("Set loop here" / "Set punch in/out here") so the

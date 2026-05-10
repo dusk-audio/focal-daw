@@ -106,6 +106,33 @@ private:
     int         insertedAt = -1;
 };
 
+// Replaces a single MidiRegion's fields with new values. Mirror of
+// RegionEditAction for the MIDI side. Used for tape-lane drag-move
+// of MIDI regions and any future MIDI-region edits that benefit
+// from full before/after capture (trim, label, colour, etc.). The
+// notes / ccs vectors come along for free in the snapshot, which is
+// what makes this safe even if a recording committed new notes
+// between the drag start and finalise.
+class MidiRegionEditAction final : public juce::UndoableAction
+{
+public:
+    MidiRegionEditAction (Session& session, AudioEngine& engine,
+                            int trackIdx, int regionIdx,
+                            const MidiRegion& before, const MidiRegion& after);
+
+    bool perform() override;
+    bool undo()    override;
+    int  getSizeInUnits() override { return 1; }
+
+private:
+    Session& session;
+    AudioEngine& engine;
+    int trackIdx;
+    int regionIdx;
+    MidiRegion beforeState;
+    MidiRegion afterState;
+};
+
 // Removes a region; undo re-inserts it at its original index.
 class DeleteRegionAction final : public juce::UndoableAction
 {

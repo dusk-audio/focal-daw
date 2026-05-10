@@ -46,6 +46,35 @@ bool RegionEditAction::undo()
     return true;
 }
 
+// ── MidiRegionEditAction ──────────────────────────────────────────────────
+
+MidiRegionEditAction::MidiRegionEditAction (Session& s, AudioEngine& e,
+                                                int t, int idx,
+                                                const MidiRegion& b, const MidiRegion& a)
+    : session (s), engine (e), trackIdx (t), regionIdx (idx),
+      beforeState (b), afterState (a)
+{}
+
+bool MidiRegionEditAction::perform()
+{
+    if (trackIdx < 0 || trackIdx >= Session::kNumTracks) return false;
+    auto& v = session.track (trackIdx).midiRegions.currentMutable();
+    if (regionIdx < 0 || regionIdx >= (int) v.size()) return false;
+    v[(size_t) regionIdx] = afterState;
+    rebuildPlaybackIfStopped (engine);
+    return true;
+}
+
+bool MidiRegionEditAction::undo()
+{
+    if (trackIdx < 0 || trackIdx >= Session::kNumTracks) return false;
+    auto& v = session.track (trackIdx).midiRegions.currentMutable();
+    if (regionIdx < 0 || regionIdx >= (int) v.size()) return false;
+    v[(size_t) regionIdx] = beforeState;
+    rebuildPlaybackIfStopped (engine);
+    return true;
+}
+
 // ── SplitRegionAction ─────────────────────────────────────────────────────
 
 SplitRegionAction::SplitRegionAction (Session& s, AudioEngine& e,
