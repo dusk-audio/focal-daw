@@ -109,6 +109,88 @@ private:
     juce::TextButton dontSaveButton { "Don't Save" };
     juce::TextButton cancelButton  { "Cancel" };
 };
+
+// Autosave recovery prompt. Replaces juce::AlertWindow::showAsync which
+// rendered the native question-mark dialog and didn't match the rest
+// of the app's modal styling. Same three actions: Recover (load the
+// newer autosave), Load (load the saved session, autosave is discarded
+// by the next manual save), Cancel (bail out of the load entirely).
+class AutosaveRecoveryDialog final : public juce::Component
+{
+public:
+    AutosaveRecoveryDialog (const juce::File& sessionDir,
+                              const juce::Time& autosaveTime,
+                              const juce::Time& savedTime)
+    {
+        titleLabel.setText ("Recover from autosave?", juce::dontSendNotification);
+        titleLabel.setFont (juce::Font (juce::FontOptions (18.0f, juce::Font::bold)));
+        titleLabel.setColour (juce::Label::textColourId, juce::Colour (0xffe8e8e8));
+        addAndMakeVisible (titleLabel);
+
+        bodyLabel.setText (
+            "An autosave file is newer than the saved session at\n"
+            + sessionDir.getFullPathName()
+            + "\n\nAutosave:  " + autosaveTime.toString (true, true)
+            + "\nSaved:        " + savedTime    .toString (true, true)
+            + "\n\nFocal probably exited unexpectedly. "
+              "Recover the newer autosave, or load the saved session and "
+              "discard it?",
+            juce::dontSendNotification);
+        bodyLabel.setFont (juce::Font (juce::FontOptions (13.0f)));
+        bodyLabel.setColour (juce::Label::textColourId, juce::Colour (0xffc0c0c8));
+        bodyLabel.setJustificationType (juce::Justification::topLeft);
+        bodyLabel.setMinimumHorizontalScale (1.0f);
+        addAndMakeVisible (bodyLabel);
+
+        recoverButton .setColour (juce::TextButton::buttonColourId,  juce::Colour (0xff4a7c9e));
+        recoverButton .setColour (juce::TextButton::textColourOffId, juce::Colours::white);
+        loadButton    .setColour (juce::TextButton::buttonColourId,  juce::Colour (0xff2a2a30));
+        loadButton    .setColour (juce::TextButton::textColourOffId, juce::Colour (0xffe0e0e0));
+        cancelButton  .setColour (juce::TextButton::buttonColourId,  juce::Colour (0xff2a2a30));
+        cancelButton  .setColour (juce::TextButton::textColourOffId, juce::Colour (0xffe0e0e0));
+
+        recoverButton.onClick = [this] { if (onRecover) onRecover(); };
+        loadButton   .onClick = [this] { if (onLoad)    onLoad();    };
+        cancelButton .onClick = [this] { if (onCancel)  onCancel();  };
+
+        addAndMakeVisible (recoverButton);
+        addAndMakeVisible (loadButton);
+        addAndMakeVisible (cancelButton);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.fillAll (juce::Colour (0xff1a1a20));
+        g.setColour (juce::Colour (0xff2a2a32));
+        g.drawRoundedRectangle (getLocalBounds().toFloat().reduced (0.5f), 6.0f, 1.0f);
+    }
+
+    void resized() override
+    {
+        auto area = getLocalBounds().reduced (24);
+        titleLabel.setBounds (area.removeFromTop (28));
+        area.removeFromTop (10);
+        bodyLabel.setBounds (area.removeFromTop (140));
+
+        auto buttonRow = area.removeFromBottom (36);
+        recoverButton.setBounds (buttonRow.removeFromRight (160));
+        buttonRow.removeFromRight (8);
+        loadButton   .setBounds (buttonRow.removeFromRight (170));
+        buttonRow.removeFromRight (8);
+        cancelButton .setBounds (buttonRow.removeFromRight (90));
+    }
+
+    std::function<void()> onRecover;
+    std::function<void()> onLoad;
+    std::function<void()> onCancel;
+
+private:
+    juce::Label      titleLabel;
+    juce::Label      bodyLabel;
+    juce::TextButton recoverButton { "Recover autosave" };
+    juce::TextButton loadButton    { "Load saved session" };
+    juce::TextButton cancelButton  { "Cancel" };
+};
 } // namespace
 
 MainComponent::MainComponent()
@@ -201,11 +283,12 @@ MainComponent::MainComponent()
     // the menu bar - see getMenuForIndex() and menuItemSelected() below.
 
     statusLabel.setJustificationType (juce::Justification::centredLeft);
-    statusLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
-    statusLabel.setText (juce::CharPointer_UTF8 (
-                             "Focal \xe2\x80\x94 Phase 1a (mixer, no recording, no plugin hosting). "
-                             "Faders / pan / mute / solo / sends / HPF / EQ / Comp are live."),
-                         juce::dontSendNotification);
+    // Dim grey + smaller font so the top bar's session-name readout
+    // doesn't compete with the menu bar / system meters for visual
+    // priority. Full path attached as tooltip via setStatusForPath.
+    statusLabel.setColour (juce::Label::textColourId, juce::Colour (0xff909094));
+    statusLabel.setFont (juce::Font (juce::FontOptions (11.5f)));
+    setStatusForPath ("Session", session.getSessionDirectory());
     addAndMakeVisible (statusLabel);
 
     systemStatusBar = std::make_unique<SystemStatusBar> (engine);
@@ -639,6 +722,22 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     return false;
 }
 
+void MainComponent::setStatusForPath (const juce::String& prefix,
+                                          const juce::File& path,
+                                          bool isAutosave)
+{
+    // Prefer the session-dir name (which the user picked) over the
+    // session.json filename (always literal "session.json"). Falls
+    // back to the file's own name when path == a non-session file
+    // (e.g. error states pointing at a missing dir).
+    auto display = path.getParentDirectory().getFileName();
+    if (display.isEmpty()) display = path.getFileName();
+    juce::String text = prefix + ": " + display;
+    if (isAutosave) text += "  (autosave)";
+    statusLabel.setText (text, juce::dontSendNotification);
+    statusLabel.setTooltip (path.getFullPathName());
+}
+
 void MainComponent::resized()
 {
     auto area = getLocalBounds().reduced (8);
@@ -996,10 +1095,26 @@ bool MainComponent::saveSessionTo (const juce::File& dir)
         // A successful manual save makes the autosave stale - drop it so the
         // recovery prompt doesn't fire on the next clean load.
         deleteAutosaveFor (dir);
-        statusLabel.setText ("Saved: " + target.getFullPathName(), juce::dontSendNotification);
+        setStatusForPath ("Saved", target);
         return true;
     }
-    statusLabel.setText ("Save failed at " + target.getFullPathName(), juce::dontSendNotification);
+    setStatusForPath ("Save failed", target);
+    // Status-label-only feedback is too easy to miss on a critical
+    // operation. Pop a modal so the user knows the session WASN'T
+    // saved and can act before losing more work.
+    juce::AlertWindow::showAsync (
+        juce::MessageBoxOptions()
+            .withIconType (juce::MessageBoxIconType::WarningIcon)
+            .withTitle ("Save failed")
+            .withMessage ("Focal could not write the session file:\n\n    "
+                            + target.getFullPathName() + "\n\n"
+                            "Common causes: disk full, missing write "
+                            "permission, or the parent folder was moved "
+                            "since the session was opened. The session "
+                            "is unchanged in memory; try Save As to a "
+                            "different location.")
+            .withButton ("OK"),
+        nullptr);
     return false;
 }
 
@@ -1360,8 +1475,7 @@ bool MainComponent::loadSessionFromJson (const juce::File& sessionJson)
 {
     if (! sessionJson.existsAsFile())
     {
-        statusLabel.setText ("No session at " + sessionJson.getFullPathName(),
-                             juce::dontSendNotification);
+        setStatusForPath ("No session at", sessionJson);
         return false;
     }
 
@@ -1376,30 +1490,37 @@ bool MainComponent::loadSessionFromJson (const juce::File& sessionJson)
         const auto autosave = getAutosaveFileFor (dir);
         juce::Component::SafePointer<MainComponent> safe (this);
 
-        juce::AlertWindow::showAsync (
-            juce::MessageBoxOptions()
-                .withIconType (juce::MessageBoxIconType::QuestionIcon)
-                .withTitle ("Recover from autosave?")
-                .withMessage (
-                    "An autosave file is newer than the saved session at\n"
-                    + dir.getFullPathName()
-                    + "\n\nAutosave: "  + autosave  .getLastModificationTime().toString (true, true)
-                    + "\nSaved:    "    + sessionJson.getLastModificationTime().toString (true, true)
-                    + "\n\nFocal probably exited unexpectedly. "
-                      "Recover the newer autosave, or load the saved session and discard it?")
-                .withButton ("Recover autosave")
-                .withButton ("Load saved session")
-                .withButton ("Cancel"),
-            [safe, sessionJson, dir, autosave] (int choice)
+        auto body = std::make_unique<AutosaveRecoveryDialog> (
+            dir,
+            autosave  .getLastModificationTime(),
+            sessionJson.getLastModificationTime());
+        body->setSize (560, 280);
+
+        auto* raw = body.get();
+        raw->onRecover = [safe, sessionJson, dir, autosave]
+        {
+            if (auto* self = safe.getComponent())
             {
-                auto* self = safe.getComponent();
-                if (self == nullptr) return;
-                // MessageBoxOptions returns 1 for the first button, 2 for second,
-                // 3 for third. 0 means dismissed without a choice.
-                if (choice == 0 || choice == 3) return;
-                const auto src = (choice == 1) ? autosave : sessionJson;
-                self->finishLoadingSessionFrom (src, dir);
-            });
+                self->recoveryModal.close();
+                self->finishLoadingSessionFrom (autosave, dir);
+            }
+        };
+        raw->onLoad = [safe, sessionJson, dir]
+        {
+            if (auto* self = safe.getComponent())
+            {
+                self->recoveryModal.close();
+                self->finishLoadingSessionFrom (sessionJson, dir);
+            }
+        };
+        raw->onCancel = [safe]
+        {
+            if (auto* self = safe.getComponent())
+                self->recoveryModal.close();
+        };
+
+        recoveryModal.show (*this, std::move (body),
+                              [safe] { if (auto* self = safe.getComponent()) self->recoveryModal.close(); });
         return true;
     }
 
@@ -1414,8 +1535,7 @@ bool MainComponent::finishLoadingSessionFrom (const juce::File& sourceJson,
 
     if (! SessionSerializer::load (session, sourceJson))
     {
-        statusLabel.setText ("Load failed: " + sourceJson.getFullPathName(),
-                             juce::dontSendNotification);
+        setStatusForPath ("Load failed", sourceJson);
         return false;
     }
     const auto tAfterParse = juce::Time::getMillisecondCounterHiRes();
@@ -1428,7 +1548,44 @@ bool MainComponent::finishLoadingSessionFrom (const juce::File& sourceJson,
     // After deserialisation, the Track::pluginDescriptionXml /
     // pluginStateBase64 fields are populated; ask the engine to
     // re-instantiate each track's plugin from those.
+    // Drop the prior session's undo stack BEFORE consuming plugin
+    // state. Without this, hitting Cmd+Z right after a session load
+    // would replay edits from the OLD session against the NEW one's
+    // region indices - either a no-op or a use-after-free on the
+    // referenced AudioRegion. Belt-and-suspenders: also resets redo.
+    engine.getUndoManager().clearUndoHistory();
+
     engine.consumePluginStateAfterLoad();
+    // Surface any plugin restore failures as a single summary dialog so
+    // the user doesn't think a saved-with-Diva mix is intact when Diva
+    // failed to instantiate. Deferred via callAsync so the load path
+    // can finish drawing the freshly-loaded session before the modal
+    // pops on top.
+    {
+        const auto& failures = engine.getLastPluginLoadFailures();
+        if (! failures.empty())
+        {
+            juce::String body =
+                "These plugins from the saved session could not be loaded "
+                "and were left empty:\n\n";
+            for (const auto& f : failures)
+                body += "    " + f.location + "  -  " + f.pluginName + "\n";
+            body += "\nCheck that the plugins are still installed for the "
+                    "right format (VST3 / LV2) and that this binary can "
+                    "find them, then reload the session.";
+            juce::MessageManager::callAsync (
+                [body = std::move (body)]
+                {
+                    juce::AlertWindow::showAsync (
+                        juce::MessageBoxOptions()
+                            .withIconType (juce::MessageBoxIconType::WarningIcon)
+                            .withTitle ("Missing plugins")
+                            .withMessage (body)
+                            .withButton ("OK"),
+                        nullptr);
+                });
+        }
+    }
     const auto tAfterPlugins = juce::Time::getMillisecondCounterHiRes();
     engine.consumeTransportStateAfterLoad();
 
@@ -1454,8 +1611,8 @@ bool MainComponent::finishLoadingSessionFrom (const juce::File& sourceJson,
     const auto tAfterConsole = juce::Time::getMillisecondCounterHiRes();
 
     RecentSessions::add (dir);
-    statusLabel.setText ("Loaded: " + sourceJson.getFullPathName(),
-                         juce::dontSendNotification);
+    setStatusForPath ("Loaded", sourceJson,
+                         /*isAutosave*/ sourceJson.getFileName().endsWithIgnoreCase (".autosave"));
 
     std::fprintf (stderr,
                   "[Focal/Load] %s: parse=%dms plugins=%dms midiOuts=%dms console=%dms total=%dms\n",
@@ -1545,6 +1702,7 @@ enum MenuItemId
     // so future additions don't collide.
     kMenuFileTemplateBase = 1200,
     kMenuSettingsAudio = 2001,
+    kMenuSettingsAbout = 2002,
 };
 }
 
@@ -1585,6 +1743,8 @@ juce::PopupMenu MainComponent::getMenuForIndex (int topLevelMenuIndex,
     else if (topLevelMenuIndex == 1)   // Settings
     {
         menu.addItem (kMenuSettingsAudio, "Audio settings...");
+        menu.addSeparator();
+        menu.addItem (kMenuSettingsAbout, "About Focal");
     }
     return menu;
 }
@@ -1617,6 +1777,25 @@ void MainComponent::menuItemSelected (int menuItemID, int /*topLevelMenuIndex*/)
                 app->systemRequestedQuit();
             break;
         case kMenuSettingsAudio: openAudioSettings();   break;
+        case kMenuSettingsAbout:
+        {
+            // Pull the version string from the JUCE_APPLICATION_VERSION_STRING
+            // compile define (wired through CMakeLists from PROJECT_VERSION).
+            // Always matches what's in Info.plist so a bug report's reported
+            // version can be cross-checked.
+            const auto body =
+                juce::String ("Focal ") + JUCE_APPLICATION_VERSION_STRING + "\n\n"
+                "Portastudio-style DAW.\n"
+                "Built " __DATE__ " " __TIME__;
+            juce::AlertWindow::showAsync (
+                juce::MessageBoxOptions()
+                    .withIconType (juce::MessageBoxIconType::InfoIcon)
+                    .withTitle ("About Focal")
+                    .withMessage (body)
+                    .withButton ("OK"),
+                nullptr);
+            break;
+        }
         default:
             // Template menu items live in [kMenuFileTemplateBase, +kCount).
             if (menuItemID >= kMenuFileTemplateBase
@@ -1767,6 +1946,13 @@ void MainComponent::openPianoRoll (int trackIdx, int regionIdx)
 
     pianoRoll->setBounds (rollBounds);
     pianoRoll->onCloseRequested = [this] { closePianoRoll(); };
+    pianoRoll->onNavigateToRegion = [this] (int t, int newIdx)
+    {
+        // Close + reopen on the new region. Same-track only; the
+        // editor already validated the bounds before calling.
+        closePianoRoll();
+        openPianoRoll (t, newIdx);
+    };
     addAndMakeVisible (pianoRoll.get());
     pianoRoll->grabKeyboardFocus();
 }
@@ -1813,6 +1999,11 @@ void MainComponent::openAudioEditor (int trackIdx, int regionIdx)
 
     audioEditor->setBounds (editorBounds);
     audioEditor->onCloseRequested = [this] { closeAudioEditor(); };
+    audioEditor->onNavigateToRegion = [this] (int t, int newIdx)
+    {
+        closeAudioEditor();
+        openAudioEditor (t, newIdx);
+    };
     addAndMakeVisible (audioEditor.get());
     audioEditor->grabKeyboardFocus();
 }

@@ -827,6 +827,7 @@ bool SessionSerializer::save (const Session& s, const juce::File& target)
     tport->setProperty ("metronome_enabled", s.metronomeEnabled.load());
     tport->setProperty ("metronome_vol_db",  s.metronomeVolDb.load());
     tport->setProperty ("count_in_enabled",  s.countInEnabled.load());
+    tport->setProperty ("time_display_mode", s.timeDisplayMode.load());
     // Tascam-style transport-cluster state. The last-record point is
     // what the FFWD-while-stopped tap (= TO LAST REC) snaps to.
     tport->setProperty ("last_record_point",  (juce::int64) s.lastRecordPointSamples.load());
@@ -992,6 +993,7 @@ bool SessionSerializer::load (Session& s, const juce::File& source)
         if (tport.hasProperty ("metronome_enabled")) s.metronomeEnabled.store ((bool)   tport["metronome_enabled"]);
         if (tport.hasProperty ("metronome_vol_db"))  s.metronomeVolDb.store   ((float) (double) tport["metronome_vol_db"]);
         if (tport.hasProperty ("count_in_enabled"))  s.countInEnabled.store   ((bool)   tport["count_in_enabled"]);
+        if (tport.hasProperty ("time_display_mode")) s.timeDisplayMode.store  ((int)    tport["time_display_mode"]);
         // jumpback_seconds was a previous-version Session field powering
         // the standalone "« 5s" jumpback button; the button has been
         // removed in favor of the DP-24SD-style multi-action REW. We

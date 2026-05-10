@@ -122,8 +122,9 @@ PluginSlot::~PluginSlot()
     reaperTimer.stopTimer();
     currentRemote.store (nullptr, std::memory_order_release);
     // ~RemotePluginConnection sends SIGTERM/SIGKILL to the child and
-    // unmaps SHM. Safe at process shutdown.
+    // unmaps SHM. Safe at process shutdown - audio thread is detached.
     ownedRemote.reset();
+    previousRemote.reset();
    #endif
 }
 
@@ -143,6 +144,7 @@ void PluginSlot::leakInstanceForShutdown()
     reaperTimer.stopTimer();
     currentRemote.store (nullptr, std::memory_order_release);
     ownedRemote.reset();
+    previousRemote.reset();
    #endif
 }
 
@@ -179,10 +181,14 @@ void PluginSlot::clearAutoBypass() noexcept
     // re-enable a crashed slot, drop the dead connection so the next
     // load (or processBlock attempt) doesn't see a stale carcass. The
     // saved description XML stays so a subsequent restoreFromSavedState
-    // can re-spawn cleanly.
+    // can re-spawn cleanly. Same deferred-destruction shape as the
+    // swap paths: hand off into previousRemote so any audio block
+    // that's still holding a freshly-null'd currentRemote pointer
+    // can complete safely.
     if (remoteCrashed.load (std::memory_order_relaxed))
     {
-        ownedRemote.reset();
+        previousRemote.reset();
+        previousRemote = std::move (ownedRemote);
         remoteCrashed.store (false, std::memory_order_relaxed);
     }
    #endif
@@ -444,9 +450,21 @@ bool PluginSlot::loadFromDescription (const juce::PluginDescription& desc,
     // Tear down any prior OOP slot before deciding which path the new
     // load takes. Mode is per-load: we may end up in-process this time
     // even if the previous load was OOP (and vice versa).
+    //
+    // Deferred-destruction: move the just-deposed ownedRemote into
+    // previousRemote rather than destroying it in place. The audio
+    // thread may have just loaded currentRemote pre-store-nullptr and
+    // be inside processBlockSync right now; tearing the SHM mapping
+    // and child process down underneath that call is the classic
+    // use-after-free shape. previousRemote holds the connection alive
+    // for one more swap cycle; the previousRemote.reset() below
+    // destroys whatever was deposed on the PRIOR swap, by which
+    // point any audio block that started during that swap has long
+    // since completed.
     reaperTimer.stopTimer();
     currentRemote.store (nullptr, std::memory_order_release);
-    ownedRemote.reset();
+    previousRemote.reset();
+    previousRemote = std::move (ownedRemote);
     remoteCrashed.store (false, std::memory_order_relaxed);
     savedDescriptionXml.clear();
 
@@ -567,9 +585,15 @@ void PluginSlot::unload()
     ownedInstance.reset();
 
    #if FOCAL_HAS_OOP_PLUGINS
+    // Same deferred-destruction shape as loadFromDescription: defer the
+    // child-process kill + SHM unmap to the NEXT swap so an in-flight
+    // audio-thread processBlockSync on the just-cleared currentRemote
+    // can complete cleanly. previousRemote.reset() destroys whatever
+    // was deposed on the previous cycle (one full swap ago).
     reaperTimer.stopTimer();
     currentRemote.store (nullptr, std::memory_order_release);
-    ownedRemote.reset();   // SIGTERM/SIGKILL the child + unmap SHM
+    previousRemote.reset();
+    previousRemote = std::move (ownedRemote);
     remoteNumIn .store (0, std::memory_order_relaxed);
     remoteNumOut.store (0, std::memory_order_relaxed);
     remoteIsInstrument.store (false, std::memory_order_relaxed);

@@ -54,6 +54,19 @@ public:
 
     bool isActive() const noexcept { return active.load (std::memory_order_relaxed); }
 
+    // Per-armed-track setup failures from the most recent startRecording
+    // call. Populated when createOutputStream() returns null (disk full /
+    // permission denied / parent dir missing) or when the WAV writer
+    // can't be constructed. Empty when every armed track set up cleanly.
+    // Message-thread only: caller (TransportBar) reads it immediately
+    // after engine.record() returns and surfaces an AlertWindow listing
+    // the affected track numbers so the user doesn't lose a take
+    // thinking it was captured.
+    const std::vector<int>& getLastSetupFailures() const noexcept
+    {
+        return lastSetupFailures;
+    }
+
 private:
     Session& session;
 
@@ -107,6 +120,11 @@ private:
     std::array<std::atomic<int>, Session::kNumTracks> writeMidiBlockCalls {};
 
     std::atomic<bool> active { false };
+
+    // Cleared on each startRecording call, populated when an armed
+    // track's WAV writer can't be set up. Stored on the message
+    // thread only — the audio callback never touches it.
+    std::vector<int> lastSetupFailures;
 
     juce::int64 recordStartSample = 0;
     double      recordSampleRate  = 0.0;

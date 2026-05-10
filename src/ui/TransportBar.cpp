@@ -170,7 +170,12 @@ TransportBar::TransportBar (AudioEngine& engineRef) : engine (engineRef)
 {
     playButton.onClick   = [this] { engine.play();   refreshButtonStates(); };
     stopButton.onClick   = [this] { engine.stop();   refreshButtonStates(); };
-    recordButton.onClick = [this] { engine.record(); refreshButtonStates(); };
+    recordButton.onClick = [this]
+    {
+        engine.record();
+        surfaceRecordSetupFailures();
+        refreshButtonStates();
+    };
 
     playButton  .setTooltip ("Play (Space). Right-click for MIDI Learn.");
     stopButton  .setTooltip ("Stop. Right-click for MIDI Learn.");
@@ -188,9 +193,9 @@ TransportBar::TransportBar (AudioEngine& engineRef) : engine (engineRef)
     //     Stopped -> REW = goto zero, FFWD = goto last record point.
     //     Rolling -> REW = jump to prev marker, FFWD = jump to next marker.
     //   Held: 10x scrub via the timer (drives the playhead while button down).
-    rewButton.setTooltip  ("Rewind: hold = 10\xe2\x9c\x95 scrub. Tap = prev marker (rolling) "
+    rewButton.setTooltip  ("Rewind: hold = 10x scrub. Tap = prev marker (rolling) "
                             "or jump to zero (stopped).");
-    ffwdButton.setTooltip ("Forward: hold = 10\xe2\x9c\x95 scrub. Tap = next marker (rolling) "
+    ffwdButton.setTooltip ("Forward: hold = 10x scrub. Tap = next marker (rolling) "
                             "or jump to last record point (stopped).");
 
     rewButton.onStateChange = [this]
@@ -313,6 +318,36 @@ TransportBar::TransportBar (AudioEngine& engineRef) : engine (engineRef)
         engine.getTransport().setPlayhead (juce::jmax ((juce::int64) 0, target));
     };
     addAndMakeVisible (clockLabel);
+
+    timeFormatToggle.setTooltip ("Flip display between Bars/Beats and mm:ss.ms. "
+                                   "Affects the clock, tape ruler, and editor rulers. "
+                                   "Right-click the clock to flip when this button is hidden.");
+    timeFormatToggle.setColour (juce::TextButton::buttonColourId,  juce::Colour (0xff202024));
+    timeFormatToggle.setColour (juce::TextButton::textColourOffId, juce::Colour (0xff909094));
+    auto flipTimeMode = [this]
+    {
+        auto& mode = engine.getSession().timeDisplayMode;
+        const int cur = mode.load (std::memory_order_relaxed);
+        mode.store (cur == (int) TimeDisplayMode::Bars ? (int) TimeDisplayMode::Time
+                                                          : (int) TimeDisplayMode::Bars,
+                    std::memory_order_relaxed);
+        if (auto* p = getParentComponent()) p->repaint();
+        repaint();
+    };
+    timeFormatToggle.onClick = flipTimeMode;
+    // addChildComponent (not addAndMakeVisible): visibility flips in
+    // resized() based on whether we're in compact mode. Compact mode
+    // hides this button to avoid colliding with the bank-buttons that
+    // MainComponent overlays in the same x-band; right-click on the
+    // clock label is the always-available fallback.
+    addChildComponent (timeFormatToggle);
+
+    // Right-click clock label to flip time-display mode. Works in
+    // every layout including compact-mode where the dedicated button
+    // is hidden. The clock's own onTextChange (number-entry) still
+    // owns left-clicks via setEditable(false, true, false).
+    clockLabel.addMouseListener (this, false);
+    flipTimeModeOnClock = std::move (flipTimeMode);
 
     hintLabel.setJustificationType (juce::Justification::centredLeft);
     hintLabel.setColour (juce::Label::textColourId, juce::Colour (0xff8090a0));
@@ -528,13 +563,23 @@ void TransportBar::timerCallback()
         if (learnTarget >= 0)
         {
             clockLabel.setColour (juce::Label::textColourId, juce::Colour (0xffffd060));
-            clockLabel.setText ("MIDI LEARN\xe2\x80\xa6", juce::dontSendNotification);
+            clockLabel.setText ("MIDI LEARN...", juce::dontSendNotification);
         }
         else
         {
             clockLabel.setColour (juce::Label::textColourId, juce::Colour (0xffe0e0e0));
-            clockLabel.setText (juce::String::formatted ("%02d:%02d.%03d", mins, secs, millis),
+            const auto mode = (TimeDisplayMode) engine.getSession()
+                                                   .timeDisplayMode.load (std::memory_order_relaxed);
+            const float bpm = engine.getSession().tempoBpm.load (std::memory_order_relaxed);
+            const int   bpb = engine.getSession().beatsPerBar.load (std::memory_order_relaxed);
+            clockLabel.setText (formatSamplePosition (playhead,
+                                                        engine.getCurrentSampleRate(),
+                                                        bpm, bpb, mode),
                                  juce::dontSendNotification);
+            // Toggle label shows the format the user will see NEXT click —
+            // matches the convention used by Reaper / Pro Tools secondary
+            // time-scale buttons.
+            timeFormatToggle.setButtonText (mode == TimeDisplayMode::Bars ? "TIME" : "BARS");
         }
     }
 
@@ -576,7 +621,7 @@ void TransportBar::timerCallback()
         {
             case PendingTransportAction::Play:   engine.play();   break;
             case PendingTransportAction::Stop:   engine.stop();   break;
-            case PendingTransportAction::Record: engine.record(); break;
+            case PendingTransportAction::Record: engine.record(); surfaceRecordSetupFailures(); break;
             case PendingTransportAction::Toggle:
                 if (engine.getTransport().isStopped()) engine.play();
                 else                                    engine.stop();
@@ -615,6 +660,34 @@ void TransportBar::timerCallback()
             s.midiLearnPending.store (-1, std::memory_order_relaxed);
         }
     }
+}
+
+void TransportBar::surfaceRecordSetupFailures()
+{
+    const auto& failed = engine.getRecordManager().getLastSetupFailures();
+    if (failed.empty()) return;
+
+    juce::String trackList;
+    for (size_t i = 0; i < failed.size(); ++i)
+    {
+        if (i > 0) trackList += ", ";
+        trackList += juce::String (failed[i] + 1);
+    }
+    const juce::String body =
+        "These armed tracks could not start recording:\n\n"
+        "    Tracks " + trackList + "\n\n"
+        "Common causes: disk full, missing write permission on the "
+        "session's audio folder, or a corrupted audio directory. The "
+        "other armed tracks are recording normally; the listed tracks "
+        "are NOT capturing audio. Stop the transport and check the "
+        "session folder before continuing.";
+    juce::AlertWindow::showAsync (
+        juce::MessageBoxOptions()
+            .withIconType (juce::MessageBoxIconType::WarningIcon)
+            .withTitle ("Recording setup failed")
+            .withMessage (body)
+            .withButton ("OK"),
+        nullptr);
 }
 
 void TransportBar::refreshButtonStates()
@@ -715,6 +788,15 @@ void TransportBar::resized()
     // gains ~20 px back so the bank-button overlay (positioned by
     // MainComponent in the same x-range) has more room before colliding.
     clockLabel.setBounds (area.removeFromLeft (compact ? 110 : 130));
+    // Time/Bars toggle directly to the right of the clock. Hidden in
+    // compact mode because the bank-button overlay claims this x-band
+    // at narrow widths; right-click on clockLabel is the fallback.
+    timeFormatToggle.setVisible (! compact);
+    if (! compact)
+    {
+        area.removeFromLeft (4);
+        timeFormatToggle.setBounds (area.removeFromLeft (44).reduced (1, 4));
+    }
 
     // TAPE toggle on the right edge of the bar; chevron-only in compact.
     tapeToggle.setBounds (area.removeFromRight (compact ? 32 : 84).reduced (1));
@@ -752,6 +834,14 @@ void TransportBar::mouseDown (const juce::MouseEvent& e)
     if (e.eventComponent == &punchButton && e.mods.isPopupMenu())
     {
         showPunchSettingsMenu();
+        return;
+    }
+    // Right-click on clock flips the time-display mode. Always
+    // available — including in compact mode where the dedicated
+    // timeFormatToggle button is hidden to avoid bank-button collision.
+    if (e.eventComponent == &clockLabel && e.mods.isPopupMenu())
+    {
+        if (flipTimeModeOnClock) flipTimeModeOnClock();
         return;
     }
     // Right-click on the transport buttons opens the MIDI Learn menu.

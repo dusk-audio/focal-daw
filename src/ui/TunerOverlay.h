@@ -86,7 +86,7 @@ public:
         const bool hasSignal = currentHz_ > 0.0f;
 
         // Big note name
-        const auto& noteName = (hasSignal ? noteNameOf (currentNearest_) : juce::String ("—"));
+        const auto& noteName = (hasSignal ? noteNameOf (currentNearest_) : juce::String ("-"));
         const auto octaveStr = (hasSignal ? juce::String (octaveOf (currentNearest_)) : juce::String());
         g.setFont (juce::Font (juce::FontOptions (96.0f).withStyle ("Bold")));
         g.setColour (hasSignal ? juce::Colour (0xfff0f0f0) : juce::Colour (0xff606060));

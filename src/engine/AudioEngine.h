@@ -207,6 +207,22 @@ public:
     void publishPluginStateForSave (bool audioCallbackDetached = false);
     void consumePluginStateAfterLoad();
 
+    // Failures captured during the most recent consumePluginStateAfterLoad
+    // call. Each entry has a human-readable location ("Track 3",
+    // "Aux 1 / slot 1") and the plugin name parsed from the saved
+    // description XML. Empty when every slot restored cleanly. Caller
+    // (MainComponent's load path) surfaces this as a single summary
+    // AlertWindow rather than one popup per failure.
+    struct PluginLoadFailure
+    {
+        juce::String location;
+        juce::String pluginName;
+    };
+    const std::vector<PluginLoadFailure>& getLastPluginLoadFailures() const noexcept
+    {
+        return lastPluginLoadFailures;
+    }
+
     // Suspend every loaded plugin (track + aux + master tape) by calling
     // releaseResources on each instance. Used by the shutdown path to
     // flip every plugin's IComponent::setActive(false) BEFORE the engine
@@ -282,6 +298,9 @@ private:
     // simple owned object initialized later.
     std::unique_ptr<FocalPlayHead> playHead;
     RecordManager   recordManager   { session };
+
+    // Populated by consumePluginStateAfterLoad. Message-thread only.
+    std::vector<PluginLoadFailure> lastPluginLoadFailures;
     PlaybackEngine  playbackEngine  { session };
     PluginManager   pluginManager;  // shared across all per-channel PluginSlots
     juce::UndoManager undoManager;  // region edits + any future undoable mutation

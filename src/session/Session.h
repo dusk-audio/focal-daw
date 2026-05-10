@@ -280,6 +280,49 @@ inline juce::int64 ticksToSamples (juce::int64 ticks,
             / ((double) bpm * (double) kMidiTicksPerQuarter));
 }
 
+// Time-display modes. Stored as int in Session::timeDisplayMode so it
+// can be a plain atomic; cast at use sites. Match the order with the
+// transport-bar's toggle button (Bars first since it's the default).
+enum class TimeDisplayMode : int { Bars = 0, Time = 1 };
+
+// Shared sample-position formatter. Every surface that displays a
+// playhead / cursor position routes through this so flipping
+// Session::timeDisplayMode swaps the whole app's representation
+// atomically. Bars mode emits "bar.beat.tick" (1-based bar/beat,
+// tick in 0..ticksPerBeat-1, zero-padded to 3 digits). Time mode
+// emits "mm:ss.mmm" (zero-padded minutes, seconds, milliseconds).
+inline juce::String formatSamplePosition (juce::int64 samples,
+                                            double sampleRate,
+                                            float bpm,
+                                            int beatsPerBar,
+                                            TimeDisplayMode mode) noexcept
+{
+    if (samples < 0) samples = 0;
+    if (mode == TimeDisplayMode::Time)
+    {
+        if (sampleRate <= 0.0) return juce::String ("00:00.000");
+        const double totalSec = (double) samples / sampleRate;
+        const int mins   = (int) (totalSec / 60.0);
+        const int secs   = (int) totalSec % 60;
+        const int millis = (int) std::round ((totalSec - std::floor (totalSec)) * 1000.0);
+        return juce::String::formatted ("%02d:%02d.%03d", mins, secs,
+                                          millis >= 1000 ? 999 : millis);
+    }
+    // Bars / Beats / Tick.
+    if (sampleRate <= 0.0 || bpm <= 0.0f || beatsPerBar <= 0)
+        return juce::String ("1.1.000");
+    const double samplesPerBeat = sampleRate * 60.0 / (double) bpm;
+    const double samplesPerBar  = samplesPerBeat * (double) beatsPerBar;
+    const int bar  = (int) ((double) samples / samplesPerBar);
+    const double remBar = (double) samples - (double) bar * samplesPerBar;
+    const int beat = (int) (remBar / samplesPerBeat);
+    const double remBeat = remBar - (double) beat * samplesPerBeat;
+    const int tick = (int) (remBeat * (double) kMidiTicksPerQuarter / samplesPerBeat);
+    return juce::String (bar + 1) + "."
+         + juce::String (beat + 1) + "."
+         + juce::String (tick).paddedLeft ('0', 3);
+}
+
 // One MIDI note in tick time, anchored relative to its containing region's
 // start. Off events are folded into `lengthInTicks` so the model never has
 // dangling note-on / note-off bookkeeping. Negative or zero length is the
@@ -854,6 +897,13 @@ public:
     std::atomic<int>   beatUnit          { 4 };
     std::atomic<bool>  metronomeEnabled  { false };
     std::atomic<float> metronomeVolDb    { -12.0f };
+
+    // Time display mode: 0 = Bars / Beats / Tick (musical, default),
+    // 1 = mm:ss.ms (wall-clock time). One mode applies to every
+    // surface that shows a position — transport clock, TapeStrip
+    // ruler, region editor rulers, status-bar readouts — so the
+    // user sees one coherent representation throughout the app.
+    std::atomic<int>   timeDisplayMode   { 0 };
 
     // Count-in (pre-roll). When true, hitting Record shifts the playhead
     // backwards by one bar so the metronome ticks for one bar before

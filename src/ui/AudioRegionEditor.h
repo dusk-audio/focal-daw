@@ -28,7 +28,8 @@ class AudioEngine;
 // indices on every access; a stale view paints nothing rather than
 // crashing.
 class AudioRegionEditor final : public juce::Component,
-                                  private juce::ChangeListener
+                                  private juce::ChangeListener,
+                                  private juce::Timer
 {
 public:
     AudioRegionEditor (Session& session, AudioEngine& engine,
@@ -38,6 +39,11 @@ public:
     // Esc-to-close hook. The host (MainComponent) sets this so the
     // user can dismiss the overlay without reaching for the mouse.
     std::function<void()> onCloseRequested;
+
+    // Cmd+]/Cmd+[ in-place region swap. The host re-opens the editor
+    // on the requested (track, region) so editor state (zoom, scroll,
+    // edit cursor) resets to fit the new region.
+    std::function<void(int trackIdx, int newRegionIdx)> onNavigateToRegion;
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -76,19 +82,33 @@ private:
     std::unique_ptr<juce::AudioThumbnail> thumb;
     juce::File loadedFile;
 
-    // pixelsPerSample maps sample position in the slice to x-pixels
-    // in the waveform area. Recomputed in resized() to fit the
-    // entire slice; mouseWheelMove (Cmd+wheel) zooms cursor-anchored.
-    float pixelsPerSample = 0.0f;
-    juce::int64 scrollSamples = 0;
-    juce::int64 editCursorSample = 0;   // absolute file sample, [sourceOffset, sourceOffset+length)
+    // Neighborhood view: the editor is anchored to a FIXED timeline
+    // range captured at open time (or after Cmd+]/Cmd+[ navigation).
+    // After splits the anchor stays put, so the waveform doesn't
+    // shift/zoom and the new slices show up in the same on-screen
+    // place. pixelsPerSample + scrollSamples now scale TIMELINE
+    // samples (not file samples) within this range.
+    juce::int64 anchorTimelineStart  = 0;
+    juce::int64 anchorTimelineLength = 0;
+    float pixelsPerSample = 0.0f;        // timeline samples -> pixels
+    juce::int64 scrollSamples = 0;       // timeline-sample offset within the anchor range
+    juce::int64 editCursorSample = 0;    // absolute file sample inside the focused slice
 
     // Drag state. Mirrors TapeStrip's pattern in [src/ui/TapeStrip.cpp]:
     // mouseDown captures `regionAtDragStart` so mouseUp can submit a
     // RegionEditAction(before=regionAtDragStart, after=current). MoveCursor
     // is not undoable; the rest are.
-    enum class DragMode { None, FadeIn, FadeOut, Gain, TrimStart, TrimEnd, MoveCursor };
+    // MoveRegion (Phase 2) drags a slice's timelineStart so the user
+    // can reposition a chunk after splitting it out.
+    enum class DragMode { None, FadeIn, FadeOut, Gain, TrimStart, TrimEnd, MoveCursor, Range, MoveRegion };
     DragMode dragMode = DragMode::None;
+    juce::int64 dragOriginTimelineSample = 0;  // anchor for MoveRegion drag
+    // Range selection on the waveform - inclusive [start, end) in
+    // absolute file samples. Active when end > start; range ops
+    // (Split / Delete chunk / Fade-fit) operate on this band.
+    juce::int64 rangeStartSample = 0;
+    juce::int64 rangeEndSample   = 0;
+    bool        rangeActive      = false;
     AudioRegion regionAtDragStart;        // before-state for RegionEditAction
     juce::int64 dragOriginSample  = 0;    // edit-cursor anchor for relative drags
     int         dragOriginMouseY  = 0;    // for the gain drag (vertical)
@@ -106,8 +126,37 @@ private:
 
     // Right-click context menu (split / reset gain / reset fades / mute /
     // lock / colour / label). All actions submitted through the engine's
-    // UndoManager so Cmd+Z reverts.
-    void showContextMenu();
+    // UndoManager so Cmd+Z reverts. screenPos anchors the popup at the
+    // click location (mouseDown forwards it from the MouseEvent).
+    void showContextMenu (juce::Point<int> screenPos);
+
+    // Properties button → real region inspector popup (rename / colour /
+    // mute / lock / delete). Replaces the old behaviour where the button
+    // aliased into showContextMenu(). Right-click still routes there;
+    // this is a parallel mouse surface.
+    void showRegionPropertiesPopup();
+
+    // Cmd+]/Cmd+[ helpers. nextRegionIndex returns the storage index of
+    // the neighbouring region by timelineStart (delta = +1 → later,
+    // -1 → earlier). -1 means "no neighbour in that direction" — the
+    // caller no-ops at boundaries (no wrap).
+    int  nextRegionIndex (int delta) const;
+    void navigateRegion  (int delta);
+
+    // 30 Hz playhead poll. Reads engine.transport().getPlayhead() and
+    // repaints just the strip the playhead crossed since last tick.
+    // Inherited from juce::Timer.
+    void timerCallback() override;
+
+    // Last x-pixel where the transport playhead was painted, or -1 if
+    // it wasn't visible. Used to drive narrow repaint regions instead
+    // of a full-component invalidate at 30 Hz.
+    int lastPlayheadX = -1;
+    // Map current transport sample to a wave-area x-pixel, or -1 if the
+    // playhead is outside the open region's bounds. Caller passes the
+    // current waveArea since paint and timer compute it identically.
+    int  transportPlayheadX (juce::Rectangle<int> waveArea) const;
+    void paintTransportPlayhead (juce::Graphics&, juce::Rectangle<int> waveArea);
 
     // Reaper-style top icon row. Compact circular buttons mirroring
     // TransportIconButton / PianoRollComponent::IconButton aesthetic.
@@ -135,6 +184,15 @@ private:
     juce::Label        gainLabel;
     juce::Label        fadeLabel;
     juce::Label        infoLabel;
+    // "T1/3" style readout next to the TakeCycle toolbar button so
+    // the user can see how many takes are stacked and which one is
+    // live without cycling blind. Painted by the existing toolbar
+    // band; positioned in layoutIconRow.
+    juce::Label        takeReadout;
+    // Region label / source file name at the top-left of the modal,
+    // above the bar ruler. Drives "what am I editing?" identification
+    // without forcing the user to close the modal to check the timeline.
+    juce::Label        titleLabel;
     juce::ToggleButton muteToggle;
     juce::ToggleButton lockToggle;
 
@@ -150,7 +208,6 @@ private:
     void reverseRegion();
     void cycleTake();
     void zoomFit();
-    void showPropertiesPopup();
     void splitAtCursor();
 
     void rebuildThumbIfNeeded();
@@ -162,14 +219,29 @@ private:
     void paintFadeEnvelopes (juce::Graphics&, juce::Rectangle<int> area);
     void paintEditCursor    (juce::Graphics&, juce::Rectangle<int> area);
 
-    // Sample <-> pixel mapping. `area` is the waveform band's screen
-    // rect. Samples are absolute file-sample positions (the slice
-    // starts at sourceOffset, ends at sourceOffset + lengthInSamples).
+    // Coordinate mapping. The editor operates in TIMELINE samples
+    // anchored on [anchorTimelineStart, anchorTimelineStart + length).
+    //  • xForTimelineSample / timelineSampleForX are the primitives.
+    //  • xForSample / sampleForX wrap them in file-sample form
+    //    (file sample → timeline sample via the focused region's
+    //    sourceOffset → timelineStart mapping) so existing callers
+    //    (fade discs, trim strips, edit cursor) keep working.
+    int         xForTimelineSample (juce::int64 timelineSample,
+                                      juce::Rectangle<int> area) const;
+    juce::int64 timelineSampleForX (int x, juce::Rectangle<int> area) const;
     int  xForSample (juce::int64 absSample, juce::Rectangle<int> area) const;
     juce::int64 sampleForX (int x, juce::Rectangle<int> area) const;
 
-    // Recompute pixelsPerSample so the slice exactly fills `area`.
+    // Snapshot the focused region's bounds into anchorTimeline* +
+    // recompute pixelsPerSample so the anchor range fills the wave
+    // area. Called once on ctor / nav; splits do NOT re-call this.
     void zoomFitToArea (juce::Rectangle<int> area);
+
+    // Hit-test the slice under x. Returns the regionIdx of the
+    // intersected region, or -1 if x falls in a gap. Used by
+    // mouseDown to swap focus when the user clicks a non-focused
+    // slice rendered by the neighborhood-view paint pass.
+    int regionIndexAtX (int x, juce::Rectangle<int> area) const;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioRegionEditor)
 };

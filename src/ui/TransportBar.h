@@ -71,6 +71,14 @@ private:
     void timerCallback() override;
     void refreshButtonStates();
 
+    // After engine.record() returns, RecordManager populates
+    // getLastSetupFailures() with the indices of armed tracks whose
+    // WAV writer couldn't be set up (disk full, permission denied,
+    // missing audio dir, format error). This surfaces those failures
+    // as an AlertWindow listing affected tracks so the user doesn't
+    // think a silently-dropped take was captured.
+    void surfaceRecordSetupFailures();
+
     AudioEngine& engine;
     TransportIconButton stopButton   { "Stop",     TransportIconButton::Icon::Stop,
                                         juce::Colour (0xffd0d0d0) };
@@ -127,6 +135,16 @@ private:
 
     juce::TextButton tapeToggle    { juce::CharPointer_UTF8 ("\xe2\x96\xbe SUMMARY") };  // "▾ SUMMARY" - toggles the arrangement/summary view
     juce::Label      clockLabel;
+    // Flips session.timeDisplayMode between Bars/Beats and mm:ss.ms.
+    // The toggle's label always shows the FORMAT THE USER WILL SEE
+    // NEXT (so a user looking at bars sees "TIME" on the button).
+    // Hidden in compact mode to avoid colliding with MainComponent's
+    // bank-button overlay; right-click on clockLabel is the always-
+    // available fallback.
+    juce::TextButton timeFormatToggle { "TIME" };
+    // Action stored so the clock's right-click handler can fire the
+    // same code path as the button's onClick.
+    std::function<void()> flipTimeModeOnClock;
     juce::Label      hintLabel;
 
 public:

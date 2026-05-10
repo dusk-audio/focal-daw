@@ -153,6 +153,28 @@ private:
     bool        haveRemoved = false;
 };
 
+// MIDI counterpart to DeleteRegionAction. Mutates through the
+// AtomicSnapshot's currentMutable() since midiRegions is a swap-load
+// vector; same race profile every other piano-roll edit accepts.
+class DeleteMidiRegionAction final : public juce::UndoableAction
+{
+public:
+    DeleteMidiRegionAction (Session& session, AudioEngine& engine,
+                              int trackIdx, int regionIdx);
+
+    bool perform() override;
+    bool undo()    override;
+    int  getSizeInUnits() override { return 1; }
+
+private:
+    Session& session;
+    AudioEngine& engine;
+    int trackIdx;
+    int regionIdx;
+    MidiRegion removed;
+    bool       haveRemoved = false;
+};
+
 // Clones a source track's full per-strip state onto a destination slot:
 // name, colour, mode, channel-strip params (fader/pan/EQ/comp/sends),
 // recording surface settings, regions, MIDI regions, plugin instance

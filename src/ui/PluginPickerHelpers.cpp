@@ -29,7 +29,7 @@ void runScanModal (PluginManager& manager)
     // follow-up once the picker is in active use across surfaces.
     auto* dialog = new juce::AlertWindow ("Scanning plugins",
                                             "Looking through VST3 / LV2 install "
-                                            "locations… this can take a few "
+                                            "locations... this can take a few "
                                             "seconds the first time.",
                                             juce::MessageBoxIconType::NoIcon);
     dialog->setUsingNativeTitleBar (true);

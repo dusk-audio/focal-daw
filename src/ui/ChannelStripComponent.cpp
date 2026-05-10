@@ -124,8 +124,7 @@ ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
     nameLabel.setColour (juce::Label::textColourId, juce::Colours::white);
     nameLabel.setFont (juce::Font (juce::FontOptions (13.0f, juce::Font::bold)));
     nameLabel.setEditable (false, true, false);  // single-click no, double-click YES, no submit-on-empty
-    nameLabel.setTooltip (juce::CharPointer_UTF8 (
-        "Double-click to rename · right-click for colour"));
+    nameLabel.setTooltip ("Double-click to rename, right-click for colour");
     nameLabel.onTextChange = [this]
     {
         auto txt = nameLabel.getText().trim();
@@ -616,8 +615,7 @@ ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
     phaseButton.setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xff70c0d0));
     phaseButton.setToggleState (track.strip.phaseInvert.load (std::memory_order_relaxed),
                                  juce::dontSendNotification);
-    phaseButton.setTooltip (juce::CharPointer_UTF8 (
-        "Polarity invert (Ø) - flips the input signal's polarity"));
+    phaseButton.setTooltip ("Polarity invert - flips the input signal's polarity");
     phaseButton.onClick = [this]
     {
         track.strip.phaseInvert.store (phaseButton.getToggleState(), std::memory_order_relaxed);

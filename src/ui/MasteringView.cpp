@@ -286,12 +286,12 @@ MasteringView::MasteringView (Session& s, AudioEngine& e)
     targetCaption.setFont (juce::Font (juce::FontOptions (10.0f, juce::Font::bold)));
     addAndMakeVisible (targetCaption);
 
-    masteringTargetCombo.setTooltip (juce::CharPointer_UTF8 (
+    masteringTargetCombo.setTooltip (
         "Streaming / broadcast loudness target. When set, "
-        "the I-LUFS cell glows green inside ±0.5 LU of the "
-        "target, yellow inside ±2 LU, red beyond - and the "
+        "the I-LUFS cell glows green inside +/-0.5 LU of the "
+        "target, yellow inside +/-2 LU, red beyond - and the "
         "TP cell glows red if the true peak exceeds the "
-        "platform's ceiling."));
+        "platform's ceiling.");
     for (int i = 0; i < kNumMasteringTargets; ++i)
     {
         const auto& t = kMasteringTargets[i];

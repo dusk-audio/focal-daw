@@ -1583,8 +1583,8 @@ void TapeStrip::showRegionContextMenu (const RegionHit& hit, juce::Point<int> sc
     // users rename one at a time.
     const auto currentLabel = region.label;
     const juce::String renameLabel = currentLabel.isEmpty()
-        ? juce::String ("Add label\xe2\x80\xa6")           // "Add label..."
-        : juce::String ("Rename label\xe2\x80\xa6");        // "Rename label..."
+        ? juce::String ("Add label...")
+        : juce::String ("Rename label...");
     m.addItem (renameLabel,
                 [safeThis = juce::Component::SafePointer<TapeStrip> (this),
                  hitCopy = hit, currentLabel]
@@ -1805,8 +1805,8 @@ void TapeStrip::showMidiRegionContextMenu (int trackIdx, int regionIdx,
     // edits already accept.
     const auto currentLabel = region.label;
     const juce::String renameLabel = currentLabel.isEmpty()
-        ? juce::String ("Add label\xe2\x80\xa6")
-        : juce::String ("Rename label\xe2\x80\xa6");
+        ? juce::String ("Add label...")
+        : juce::String ("Rename label...");
     m.addItem (renameLabel,
                 [safeThis = juce::Component::SafePointer<TapeStrip> (this),
                  trackIdx, regionIdx, currentLabel]
@@ -1931,30 +1931,57 @@ void TapeStrip::paint (juce::Graphics& g)
     const double sr = engine.getCurrentSampleRate();
     if (px > 0.0 && sr > 0.0)
     {
-        // Draw second / 5-second / 30-second tick marks depending on zoom.
-        double tickEverySec = 1.0;
-        if (px < 6.0)       tickEverySec = 30.0;
-        else if (px < 16.0) tickEverySec = 10.0;
-        else if (px < 40.0) tickEverySec = 5.0;
-        else                tickEverySec = 1.0;
-
         g.setColour (juce::Colour (0xff707074));
         g.setFont (juce::Font (juce::FontOptions (juce::Font::getDefaultMonospacedFontName(),
                                                     9.5f, juce::Font::plain)));
 
-        const double endSec = (double) col.getWidth() / px;
-        for (double sec = 0.0; sec <= endSec; sec += tickEverySec)
+        const auto mode = (TimeDisplayMode) session.timeDisplayMode.load (std::memory_order_relaxed);
+        if (mode == TimeDisplayMode::Bars)
         {
-            const int x = col.getX() + (int) (sec * px);
-            // Tick marks span only the upper "tick band" so they don't
-            // visually clash with marker flags + loop/punch pills below.
-            g.drawVerticalLine (x, (float) ruler.getY() + 6.0f,
-                                  (float) ruler.getY() + (float) kRulerTickBandH);
-            const int mins = (int) (sec / 60.0);
-            const int secs = (int) sec % 60;
-            const auto timeLabel = juce::String::formatted ("%d:%02d", mins, secs);
-            g.drawText (timeLabel, x + 3, ruler.getY(), 60, kRulerTickBandH - 1,
-                         juce::Justification::centredLeft, false);
+            // Bar grid - tick every bar (or 2/4/8 bars at low zoom).
+            const float bpm = session.tempoBpm.load (std::memory_order_relaxed);
+            const int   bpb = juce::jmax (1, session.beatsPerBar.load (std::memory_order_relaxed));
+            const double secsPerBar = (bpm > 0.0f) ? (double) bpb * 60.0 / (double) bpm : 2.0;
+            const double pxPerBar = px * secsPerBar;
+            int barStep = 1;
+            if      (pxPerBar < 8.0)  barStep = 16;
+            else if (pxPerBar < 16.0) barStep = 8;
+            else if (pxPerBar < 32.0) barStep = 4;
+            else if (pxPerBar < 64.0) barStep = 2;
+
+            const double endSec = (double) col.getWidth() / px;
+            const int lastBar = (int) std::ceil (endSec / secsPerBar);
+            for (int bar = 0; bar <= lastBar; bar += barStep)
+            {
+                const int x = col.getX() + (int) ((double) bar * secsPerBar * px);
+                g.drawVerticalLine (x, (float) ruler.getY() + 6.0f,
+                                      (float) ruler.getY() + (float) kRulerTickBandH);
+                g.drawText (juce::String (bar + 1),
+                             x + 3, ruler.getY(), 60, kRulerTickBandH - 1,
+                             juce::Justification::centredLeft, false);
+            }
+        }
+        else
+        {
+            // Time grid - same cadence the bar used to use, kept as the
+            // exact previous behaviour.
+            double tickEverySec = 1.0;
+            if (px < 6.0)       tickEverySec = 30.0;
+            else if (px < 16.0) tickEverySec = 10.0;
+            else if (px < 40.0) tickEverySec = 5.0;
+
+            const double endSec = (double) col.getWidth() / px;
+            for (double sec = 0.0; sec <= endSec; sec += tickEverySec)
+            {
+                const int x = col.getX() + (int) (sec * px);
+                g.drawVerticalLine (x, (float) ruler.getY() + 6.0f,
+                                      (float) ruler.getY() + (float) kRulerTickBandH);
+                const int mins = (int) (sec / 60.0);
+                const int secs = (int) sec % 60;
+                const auto timeLabel = juce::String::formatted ("%d:%02d", mins, secs);
+                g.drawText (timeLabel, x + 3, ruler.getY(), 60, kRulerTickBandH - 1,
+                             juce::Justification::centredLeft, false);
+            }
         }
     }
 

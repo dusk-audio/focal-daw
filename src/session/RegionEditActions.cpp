@@ -101,6 +101,23 @@ bool SplitRegionAction::perform()
     right.lengthInSamples = orig.lengthInSamples - leftLen;
 
     orig.lengthInSamples  = leftLen;
+
+    // Reaper-style auto-crossfade: ~10 ms fade-out on the left slice
+    // + matching fade-in on the right slice so the split is silent
+    // even at non-zero-crossing cuts. Only added when no existing
+    // fade is in place (don't stomp user-set fades). Both fades sit
+    // within the slice that owns them — playback adds them
+    // independently, so the audible effect at the boundary is a
+    // short equal-power-ish overlap.
+    const double sr = juce::jmax (1.0, engine.getCurrentSampleRate());
+    const auto autoFadeSamples = (juce::int64) std::round (sr * 0.010);
+    if (orig.fadeOutSamples == 0)
+        orig.fadeOutSamples = juce::jmin (autoFadeSamples,
+                                              juce::jmax<juce::int64> (0, orig.lengthInSamples - orig.fadeInSamples));
+    if (right.fadeInSamples == 0)
+        right.fadeInSamples = juce::jmin (autoFadeSamples,
+                                              juce::jmax<juce::int64> (0, right.lengthInSamples - right.fadeOutSamples));
+
     regs.insert (regs.begin() + regionIdx + 1, right);
 
     rebuildPlaybackIfStopped (engine);
@@ -229,6 +246,36 @@ bool DeleteRegionAction::undo()
 
     const int insertAt = juce::jmin (regionIdx, (int) regs.size());
     regs.insert (regs.begin() + insertAt, removed);
+    rebuildPlaybackIfStopped (engine);
+    return true;
+}
+
+// ── DeleteMidiRegionAction ────────────────────────────────────────────────
+
+DeleteMidiRegionAction::DeleteMidiRegionAction (Session& s, AudioEngine& e,
+                                                    int t, int idx)
+    : session (s), engine (e), trackIdx (t), regionIdx (idx)
+{}
+
+bool DeleteMidiRegionAction::perform()
+{
+    if (trackIdx < 0 || trackIdx >= Session::kNumTracks) return false;
+    auto& v = session.track (trackIdx).midiRegions.currentMutable();
+    if (regionIdx < 0 || regionIdx >= (int) v.size()) return false;
+    removed = v[(size_t) regionIdx];
+    haveRemoved = true;
+    v.erase (v.begin() + regionIdx);
+    rebuildPlaybackIfStopped (engine);
+    return true;
+}
+
+bool DeleteMidiRegionAction::undo()
+{
+    if (! haveRemoved) return false;
+    if (trackIdx < 0 || trackIdx >= Session::kNumTracks) return false;
+    auto& v = session.track (trackIdx).midiRegions.currentMutable();
+    const int insertAt = juce::jmin (regionIdx, (int) v.size());
+    v.insert (v.begin() + insertAt, removed);
     rebuildPlaybackIfStopped (engine);
     return true;
 }

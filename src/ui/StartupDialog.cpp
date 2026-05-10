@@ -74,7 +74,7 @@ void StartupDialog::rebuildRecentButtons()
         // Folder name first (most identifying), then the parent path so two
         // sessions called "Mix" in different parents are distinguishable.
         const auto display = dir.getFileName()
-                              + "  \xe2\x80\x94  "
+                              + "  -  "
                               + dir.getParentDirectory().getFullPathName();
         b->setButtonText (display);
         b->setTooltip (dir.getFullPathName());

@@ -326,6 +326,16 @@ private:
     std::unique_ptr<focal::ipc::RemotePluginConnection> ownedRemote;
     std::atomic<focal::ipc::RemotePluginConnection*>    currentRemote { nullptr };
 
+    // Deferred-destruction slot for the IPC connection. Mirrors
+    // `previousInstance` for the in-process path: at swap time we move
+    // the just-deposed ownedRemote here instead of destroying it
+    // immediately, so the audio thread (which may have loaded
+    // currentRemote just before the store-nullptr) still sees valid
+    // SHM + a live child for one more block. The NEXT swap destroys
+    // whatever sits here, by which point any in-flight processBlockSync
+    // has long since returned.
+    std::unique_ptr<focal::ipc::RemotePluginConnection> previousRemote;
+
     // Cached at load time (the LoadPluginReply tells us all three).
     // Audio thread reads them from the same atomics so no message-thread
     // queries cross the process boundary on the RT path.

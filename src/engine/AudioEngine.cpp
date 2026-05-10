@@ -9,6 +9,15 @@ namespace focal
 {
 AudioEngine::AudioEngine (Session& sessionToBindTo) : session (sessionToBindTo)
 {
+    // Cap the undo stack. Each RegionEditAction's getSizeInUnits is 1
+    // (Split = 2, Clone = 4) so 500 covers thousands of typical edits
+    // while bounding memory under a multi-hour edit session — without
+    // this, the stack grows unbounded and the destructor walks the
+    // whole list on app exit. minimumTransactionsToKeep = 50 means
+    // the most recent 50 are always retained even if their total
+    // exceeds 500 units.
+    undoManager.setMaxNumberOfStoredUnits (500, 50);
+
     // Build the playhead now that all the atom addresses (transport,
     // session.tempoBpm, currentSampleRate) are stable. Hosted plugins
     // get this via setPlayHead so tempo-synced features (LFOs, arps,
@@ -633,17 +642,38 @@ void AudioEngine::consumePluginStateAfterLoad()
     // Mirror of publish: read the (just-deserialised) strings on each track
     // and re-instantiate the plugin in the live PluginSlot. Failures log
     // and continue rather than aborting the whole session load - a missing
-    // plugin shouldn't lose the rest of the user's saved state.
+    // plugin shouldn't lose the rest of the user's saved state. Failures
+    // are captured in lastPluginLoadFailures so the UI can surface a
+    // single summary AlertWindow listing every slot that fell back to
+    // empty - silent fallback is the worst case (user thinks the saved
+    // mix is intact but the plugin chain it depended on is gone).
+    lastPluginLoadFailures.clear();
+
+    auto parsePluginName = [] (const juce::String& descXml) -> juce::String
+    {
+        if (descXml.isEmpty()) return {};
+        if (auto xml = juce::XmlDocument::parse (descXml))
+        {
+            juce::PluginDescription desc;
+            if (desc.loadFromXml (*xml)) return desc.name;
+        }
+        return juce::String ("(unknown)");
+    };
+
     for (int t = 0; t < Session::kNumTracks; ++t)
     {
         auto& track = session.track (t);
         auto& slot  = strips[(size_t) t].getPluginSlot();
+        if (track.pluginDescriptionXml.isEmpty()) continue;   // no plugin to restore
         juce::String error;
         if (! slot.restoreFromSavedState (track.pluginDescriptionXml,
                                             track.pluginStateBase64, error))
         {
             DBG ("AudioEngine: failed to restore plugin on track " << (t + 1)
                   << ": " << error);
+            lastPluginLoadFailures.push_back ({
+                "Track " + juce::String (t + 1),
+                parsePluginName (track.pluginDescriptionXml) });
         }
     }
     for (int a = 0; a < Session::kNumAuxLanes; ++a)
@@ -652,12 +682,17 @@ void AudioEngine::consumePluginStateAfterLoad()
         for (int s = 0; s < AuxLaneParams::kMaxLanePlugins; ++s)
         {
             auto& slot = auxLaneStrips[(size_t) a].getPluginSlot (s);
+            const auto& descXml = lane.pluginDescriptionXml[(size_t) s];
+            if (descXml.isEmpty()) continue;
             juce::String error;
-            if (! slot.restoreFromSavedState (lane.pluginDescriptionXml[(size_t) s],
+            if (! slot.restoreFromSavedState (descXml,
                                                 lane.pluginStateBase64[(size_t) s], error))
             {
                 DBG ("AudioEngine: failed to restore plugin on aux lane " << (a + 1)
                       << " slot " << (s + 1) << ": " << error);
+                lastPluginLoadFailures.push_back ({
+                    "Aux " + juce::String (a + 1) + " / slot " + juce::String (s + 1),
+                    parsePluginName (descXml) });
             }
         }
     }
@@ -794,6 +829,20 @@ void AudioEngine::prepareForSelfTest (double sr, int bs)
 
 void AudioEngine::audioDeviceStopped()
 {
+    // Stop any in-flight recording BEFORE clearing the sample rate: the
+    // writer drain in stopRecording depends on recordSampleRate being
+    // non-zero to map sample positions to seconds. Without this, a
+    // device disconnect mid-take leaves recordManager.active = true,
+    // and any audio block that slips in while the device is being torn
+    // down would call writeInputBlock at sr=0 with stale writers - data
+    // corruption shape. Also flips Transport state so the UI's
+    // record button immediately reflects "stopped" rather than the
+    // pre-disconnect "Recording".
+    if (recordManager.isActive())
+        recordManager.stopRecording (transport.getPlayhead());
+    if (transport.getState() == Transport::State::Recording)
+        transport.setState (Transport::State::Stopped);
+
     currentSampleRate.store (0.0, std::memory_order_relaxed);
     currentBlockSize.store  (0,   std::memory_order_relaxed);
     // Reset to the optimistic default so a transient "no device open" state

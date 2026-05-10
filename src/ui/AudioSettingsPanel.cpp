@@ -73,12 +73,12 @@ AudioSettingsPanel::AudioSettingsPanel (juce::AudioDeviceManager& dm,
         oversamplingCombo.setSelectedId ((current == 2 || current == 4) ? current : 1,
                                           juce::dontSendNotification);
     }
-    oversamplingCombo.setTooltip (juce::CharPointer_UTF8 (
-        "Global effect oversampling. 1× is native rate "
-        "(lowest CPU). 2× / 4× engage internal "
+    oversamplingCombo.setTooltip (
+        "Global effect oversampling. 1x is native rate "
+        "(lowest CPU). 2x / 4x engage internal "
         "oversampling on the master + aux bus comps and "
         "the master tape saturation. Per-channel comp "
-        "and EQ stay at native rate regardless."));
+        "and EQ stay at native rate regardless.");
     oversamplingCombo.onChange = [this] { applyOversamplingChange(); };
     addAndMakeVisible (oversamplingCombo);
 
@@ -92,11 +92,11 @@ AudioSettingsPanel::AudioSettingsPanel (juce::AudioDeviceManager& dm,
     uiScaleSlider.setRange (appconfig::kUiScaleMin, appconfig::kUiScaleMax, 0.05);
     uiScaleSlider.setValue (appconfig::getUiScaleOverride(), juce::dontSendNotification);
     uiScaleSlider.setNumDecimalPlacesToDisplay (2);
-    uiScaleSlider.setTextValueSuffix (juce::CharPointer_UTF8 ("×"));
-    uiScaleSlider.setTooltip (juce::CharPointer_UTF8 (
+    uiScaleSlider.setTextValueSuffix ("x");
+    uiScaleSlider.setTooltip (
         "Multiplier applied on top of the OS-reported "
-        "display DPI. 1.00× = follow the OS. Range "
-        "0.50× – 2.00×."));
+        "display DPI. 1.00x = follow the OS. Range "
+        "0.50x to 2.00x.");
 
     // Defer the actual setGlobalScaleFactor call until the user RELEASES
     // the slider (or commits a typed value). Applying mid-drag re-lays out

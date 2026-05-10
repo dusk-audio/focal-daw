@@ -1,4 +1,16 @@
 cmake_minimum_required(VERSION 3.22)
+
+# macOS deployment target. Must be set BEFORE project() so the C/C++
+# compiler probes pick it up and the resulting binary's
+# LC_BUILD_VERSION reflects it (Gatekeeper rejects apps with no
+# LSMinimumSystemVersion or with a target older than the running OS
+# claims). 11.0 (Big Sur) covers every Mac released since 2013 with
+# a supported macOS upgrade path, matches the JUCE 8 minimum, and
+# avoids the Catalina notarization headaches.
+if(APPLE AND NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "macOS deployment target")
+endif()
+
 project(Focal VERSION 0.0.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -74,8 +86,52 @@ juce_add_gui_app(Focal
     VERSION            ${PROJECT_VERSION}
     ${FOCAL_ICON_ARGS}
     NEEDS_WAYLAND      TRUE
+    HARDENED_RUNTIME_ENABLED TRUE
+    HARDENED_RUNTIME_OPTIONS
+        com.apple.security.cs.allow-jit
+        com.apple.security.cs.allow-unsigned-executable-memory
+        com.apple.security.cs.disable-library-validation
+        com.apple.security.device.audio-input
     MICROPHONE_PERMISSION_ENABLED TRUE
     MICROPHONE_PERMISSION_TEXT    "Focal needs microphone access to record audio from your inputs.")
+
+# macOS code signing. Ad-hoc by default (works for local dev launch +
+# satisfies the runtime-loadable plugin requirement that the host be
+# at least ad-hoc signed). For distribution: set
+#   -DFOCAL_CODESIGN_IDENTITY="Developer ID Application: <name> (TEAMID)"
+# at configure time and the post-build step uses that identity instead.
+# Notarization is still a manual step (xcrun notarytool submit + staple)
+# because it needs an Apple ID + app-specific password the build can't
+# safely embed.
+if(APPLE)
+    set(FOCAL_CODESIGN_IDENTITY "-" CACHE STRING "macOS codesign identity. '-' = ad-hoc (default). Override for distribution builds.")
+    # Inject LSMinimumSystemVersion into the bundled Info.plist. JUCE 8
+    # builds the plist from juce_add_gui_app args but doesn't expose this
+    # key directly; without it, Gatekeeper / App Store / older macOS
+    # launchers will reject the bundle or run it under broken
+    # compatibility shims. plutil -replace -string is idempotent (it
+    # overwrites an existing key, or adds it if missing) so reruns
+    # don't accumulate. Must run BEFORE codesign so the modified
+    # Info.plist hashes are sealed into the signature.
+    add_custom_command(TARGET Focal POST_BUILD
+        COMMAND plutil -replace LSMinimumSystemVersion -string
+                "${CMAKE_OSX_DEPLOYMENT_TARGET}"
+                "$<TARGET_BUNDLE_DIR:Focal>/Contents/Info.plist"
+        # Pass --entitlements pointing at JUCE's generated plist so the
+        # allow-jit / allow-unsigned-executable-memory / disable-library-
+        # validation flags stay attached. Without this, the resigning
+        # below STRIPS the entitlements JUCE already applied; hardened
+        # runtime then blocks dlopen / JIT in 3rd-party VSTi plugins
+        # and they fail to load with "Plugin was located, but could
+        # not be opened". --deep dropped too (deprecated; JUCE has
+        # already signed inner Mach-Os).
+        COMMAND codesign --force --options runtime
+                          --entitlements "${CMAKE_CURRENT_BINARY_DIR}/Focal_artefacts/JuceLibraryCode/Focal.entitlements"
+                          --sign "${FOCAL_CODESIGN_IDENTITY}"
+                          "$<TARGET_BUNDLE_DIR:Focal>"
+        COMMENT "patch Info.plist + codesign Focal.app (identity='${FOCAL_CODESIGN_IDENTITY}')"
+        VERBATIM)
+endif()
 
 # Dusk Audio plugins repo — donor for the analog DSP cores (4K EQ filter chain,
 # FET/Opto compressor, Pultec EQ, tape saturation, console saturation, plus the

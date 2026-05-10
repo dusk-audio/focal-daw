@@ -40,12 +40,17 @@ class AudioEngine;
 //   • Drag a note's right edge → resize
 //   • Mouse wheel → vertical scroll across the 128-key range
 //   • Cmd/Ctrl + wheel → horizontal zoom (same as the main timeline)
-class PianoRollComponent final : public juce::Component
+class PianoRollComponent final : public juce::Component,
+                                    private juce::Timer
 {
 public:
     PianoRollComponent (Session& session, AudioEngine& engine,
                           int trackIndex, int regionIndex);
     ~PianoRollComponent() override;
+
+    // Cmd+]/Cmd+[ in-place region swap. The host re-opens the editor
+    // on the requested (track, region). No-op at boundaries (no wrap).
+    std::function<void(int trackIdx, int newRegionIdx)> onNavigateToRegion;
 
     // Step-record entry points. MainComponent wires these to the
     // VirtualKeyboardComponent's onNoteOn / onNoteOff callbacks
@@ -166,17 +171,36 @@ private:
     // Empty rect = no box-select in flight (paint skips the overlay).
     juce::Rectangle<int> rubberBand;
 
+    // App-wide note clipboard. Static so a Cmd+C in one piano-roll
+    // instance is visible to Cmd+V in another (cross-region paste is
+    // the headline use case). Stored startTicks are RELATIVE to the
+    // earliest note's tick, so paste lands the cluster at the target
+    // region's editCursorTick regardless of the source's anchor.
+    static std::vector<MidiNote> sNoteClipboard;
+
     enum class DragMode { None, MoveNote, ResizeNote, CreateNote, EditVelocity, BoxSelect,
                            EditCcValue, EditNoteVelocity,
-                           ResizeVelocityStrip, ResizeCcStrip };
+                           ResizeVelocityStrip, ResizeCcStrip, RangeSelect };
     DragMode dragMode = DragMode::None;
+
+    // Time-range selection driven by drag in the bar/beat ruler. When
+    // active, paints a translucent yellow band over the grid and all
+    // notes whose start falls in [start, end) get added to
+    // selectedNotes automatically. Cleared on Esc or by clicking the
+    // ruler again without dragging.
+    juce::int64 rangeStartTick = 0;
+    juce::int64 rangeEndTick   = 0;
+    bool        rangeActive    = false;
 
     // Runtime strip heights. Mutated by the resize gesture (drag the
     // top edge) and the in-strip wheel-zoom. Both are persisted only
     // in-component; reopening the roll resets to defaults, which is
     // intentional - lane sizing is editor-state, not session-state.
     int velocityStripH = kVelocityStripHDefault;
-    int ccStripH       = kCcStripHDefault;
+    // CC lane starts collapsed. User can reveal it with the Toggle-CC
+    // toolbar button or by dragging the strip's top edge; the default
+    // matches the "don't show what you're not using" portastudio bias.
+    int ccStripH       = 0;
 
     // mouseDown anchor for the strip-resize drag: the strip height at
     // gesture start, so mouseDrag can compute a stable delta against
@@ -321,8 +345,8 @@ private:
     // Right-click context menu on a note. Three submenus: channel,
     // length, velocity. Acts on the current selection (the right-
     // click promotes the clicked note to selected first if it
-    // wasn't already).
-    void showNotePropertiesPopup (int hitNoteIdx);
+    // wasn't already). screenPos anchors the popup at the click.
+    void showNotePropertiesPopup (int hitNoteIdx, juce::Point<int> screenPos);
 
     // Glue every selected same-pitch + contiguous note into one. Two
     // notes are "contiguous" when the second's startTick falls at or
@@ -351,6 +375,22 @@ private:
     // action. Both run on the message thread inside keyPressed.
     void showQuantizePopup();
     void showScalePopup();
+    // Region-level inspector. Rename / colour / mute / lock / delete.
+    // Bound to the toolbar's Properties button; right-click on a note
+    // still routes to showNotePropertiesPopup (note-level).
+    void showRegionPropertiesPopup();
+    // Cmd+]/Cmd+[ navigation helpers. nextRegionIndex returns the
+    // storage index of the neighbouring region by timelineStart, or
+    // -1 at the boundary.
+    int  nextRegionIndex (int delta) const;
+    void navigateRegion  (int delta);
+    // 30 Hz playhead poll, inherited from juce::Timer.
+    void timerCallback() override;
+    // Last x-pixel where the transport playhead was painted; -1 if
+    // it was off-screen. Used for narrow repaint regions.
+    int lastPlayheadX = -1;
+    int  transportPlayheadX (juce::Rectangle<int> gridArea) const;
+    void paintTransportPlayhead (juce::Graphics&, juce::Rectangle<int> gridArea);
     // Click-target popups for the toolbar's Color / CC chips. The
     // hotkeys ('C', 'L') still cycle through the choices; click is
     // an alternative discoverable surface.
@@ -367,6 +407,11 @@ private:
     juce::ComboBox     notesCombo;
     juce::ComboBox     colorCombo;
     juce::ToggleButton keySnapToggle;
+    // Region-level mute / lock - parity with AudioRegionEditor's
+    // status-bar checkboxes. Both submit via MidiRegionEditAction so
+    // Cmd+Z reverts.
+    juce::ToggleButton muteToggle;
+    juce::ToggleButton lockToggle;
 
     // Reaper-style top icon row. Compact (~28 px) circular icon buttons
     // mirroring TransportIconButton's visual language. Hotkeys still

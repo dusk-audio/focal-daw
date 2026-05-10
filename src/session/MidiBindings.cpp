@@ -51,7 +51,7 @@ void showLearnMenu (juce::Component& target,
 
     juce::PopupMenu m;
     m.addSectionHeader (nameForTarget (kind));
-    m.addItem ("MIDI Learn\xe2\x80\xa6", true, false,
+    m.addItem ("MIDI Learn...", true, false,
         [&session, kind, index]
         {
             session.midiLearnPending.store (packLearnTarget (kind, index),

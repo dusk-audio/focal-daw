@@ -109,6 +109,13 @@ private:
 
     FocalLookAndFeel lookAndFeel;
 
+    // App-wide tooltip dispatcher. JUCE only displays setTooltip()
+    // strings when a TooltipWindow exists somewhere in the component
+    // tree; without one, every setTooltip() call is silent. Owning
+    // it here means every child (transport, editors, status bar)
+    // gets tooltips without each one wiring its own.
+    juce::TooltipWindow tooltipWindow { this, 600 };
+
     // Menu bar at the very top. Replaces the prior row of TextButtons
     // (Audio settings... / Save / Save As... / Open... / Mixdown / Bounce...)
     // - the menu bar is much slimmer and reads as a normal app menu.
@@ -146,6 +153,11 @@ private:
     EmbeddedModal mixdownModal;
     EmbeddedModal bounceModal;
     EmbeddedModal quitModal;
+    // Autosave-recovery prompt shown during loadSessionFromJson when an
+    // autosave file is newer than session.json. Replaces the native
+    // juce::AlertWindow that didn't match the rest of the app's modal
+    // styling.
+    EmbeddedModal recoveryModal;
     EmbeddedModal virtualKeyboardModal;
     void toggleVirtualKeyboard();
 
@@ -157,6 +169,19 @@ private:
     // ends in systemRequestedQuit.
     bool engineDetached = false;
     juce::Label statusLabel;
+
+    // Helper for the top-bar status line. Shows a short label
+    // (session-dir name + state suffix like "(autosave)") with the
+    // full path attached as a tooltip. Replaces every direct
+    // statusLabel.setText("Loaded: " + fullPath) call so the top bar
+    // doesn't get dominated by long path strings.
+    //   prefix    - "Loaded", "Saved", "Load failed", etc.
+    //   path      - the sourced file (used for name + tooltip).
+    //   isAutosave - appends "(autosave)" so the user can tell which
+    //                file the load came from.
+    void setStatusForPath (const juce::String& prefix,
+                              const juce::File& path,
+                              bool isAutosave = false);
     std::unique_ptr<ConsoleView> consoleView;
     std::unique_ptr<class TransportBar>     transportBar;
     std::unique_ptr<class TapeStrip>        tapeStrip;

@@ -3,6 +3,24 @@
 
 namespace focal
 {
+namespace
+{
+// Cap on the per-region take history. Each overdub that fully contains
+// an existing region pushes the previous take onto previousTakes; without
+// a bound, repeated punch-recording in the same spot accumulates
+// indefinitely. 20 covers a comfortable session-long retake history;
+// older takes get trimmed from the back (the oldest, least-likely-to-be-
+// recalled entries) when the cap is exceeded.
+constexpr int kMaxTakesPerRegion = 20;
+
+template <typename Region>
+void trimTakeHistory (Region& region) noexcept
+{
+    if ((int) region.previousTakes.size() > kMaxTakesPerRegion)
+        region.previousTakes.resize ((size_t) kMaxTakesPerRegion);
+}
+} // namespace
+
 RecordManager::RecordManager (Session& s) : session (s)
 {
     diskThread.startThread();
@@ -31,6 +49,8 @@ bool RecordManager::startRecording (double sampleRate, juce::int64 startSample)
 
     recordStartSample = startSample;
     recordSampleRate  = sampleRate;
+
+    lastSetupFailures.clear();
 
     // Reset the per-track audio-thread counters before the audio
     // callback can start writing - the counter readout at stopRecording
@@ -71,7 +91,15 @@ bool RecordManager::startRecording (double sampleRate, juce::int64 startSample)
 
         auto* fileStream = outFile.createOutputStream().release();
         if (fileStream == nullptr)
+        {
+            std::fprintf (stderr,
+                          "[Focal/RecordManager] startRecording: track %d "
+                          "createOutputStream failed for \"%s\" - take will be silently "
+                          "dropped without this surface.\n",
+                          t + 1, outFile.getFullPathName().toRawUTF8());
+            lastSetupFailures.push_back (t);
             continue;
+        }
 
         // 24-bit WAV per the spec. Channel count follows the track's mode:
         // 1 for Mono / Midi (MIDI tracks don't audio-record yet), 2 for
@@ -86,6 +114,11 @@ bool RecordManager::startRecording (double sampleRate, juce::int64 startSample)
                                   24, {}, 0));
         if (writer == nullptr)
         {
+            std::fprintf (stderr,
+                          "[Focal/RecordManager] startRecording: track %d "
+                          "createWriterFor failed (format-level error).\n",
+                          t + 1);
+            lastSetupFailures.push_back (t);
             delete fileStream;
             continue;
         }
@@ -268,6 +301,8 @@ void RecordManager::stopRecording (juce::int64 endSample)
                     for (auto& deeper : it->previousTakes)
                         region.previousTakes.push_back (std::move (deeper));
 
+                    trimTakeHistory (region);
+
                     it = mregs.erase (it);
                 }
 
@@ -342,6 +377,8 @@ void RecordManager::stopRecording (juce::int64 endSample)
                 // newly-displaced take goes first, then the older ones.
                 for (auto& deeper : it->previousTakes)
                     region.previousTakes.push_back (std::move (deeper));
+
+                trimTakeHistory (region);
 
                 it = regs.erase (it);
             }
