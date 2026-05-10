@@ -141,8 +141,12 @@ void AuxLaneComponent::refreshSlotControls (int i)
             ui.displayedName = name;
             ui.openOrAddButton.setButtonText (name);
         }
-        // Auto-bypass = loud failure mode; tag it.
-        if (slotRef.wasAutoBypassed())
+        // Auto-bypass / crash = loud failure modes; tag with distinct copy
+        // so the user can tell whether to retry (stalled) vs reload
+        // (crashed; the OOP child died and won't recover by itself).
+        if (slotRef.wasCrashed())
+            ui.openOrAddButton.setButtonText ("! " + name + " (crashed)");
+        else if (slotRef.wasAutoBypassed())
             ui.openOrAddButton.setButtonText ("! " + name + " (stalled)");
         ui.bypassButton.setVisible (true);
         ui.bypassButton.setToggleState (slotRef.isBypassed(), juce::dontSendNotification);

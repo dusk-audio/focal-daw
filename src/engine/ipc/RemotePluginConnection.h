@@ -119,6 +119,21 @@ public:
     // explicit disconnect). Sticky for the life of the connection.
     bool isCrashed() const noexcept { return crashed.load (std::memory_order_acquire); }
 
+    // Non-blocking child-exit check. Calls waitpid(childPid, &status,
+    // WNOHANG); if the child has exited, sets `crashed` and returns
+    // true. Returns false if the child is still alive or the connection
+    // isn't connected. Idempotent — once crashed, returns false on
+    // subsequent calls because childPid has been reaped (set to -1).
+    //
+    // Designed to be called from a low-frequency message-thread timer
+    // (~1 Hz). Catches the case where the child dies while the audio
+    // thread isn't actively running processBlockSync — without this
+    // the slot would still appear loaded until the user resumed
+    // playback and the audio thread's futex deadline tripped.
+    //
+    // Message thread only.
+    bool pollReaper() noexcept;
+
     // Tear down. Idempotent. Sends SIGTERM to the child, waits briefly,
     // then SIGKILL. Unmaps SHM, closes fds.
     void disconnect();

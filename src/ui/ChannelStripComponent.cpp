@@ -1189,7 +1189,9 @@ void ChannelStripComponent::showPluginSlotMenu()
         menu.addSeparator();
         menu.addItem (2002, "Replace plugin...");
         menu.addItem (2003, "Remove plugin");
-        if (pluginSlot.wasAutoBypassed())
+        if (pluginSlot.wasCrashed())
+            menu.addItem (2004, "Re-enable plugin (crashed)");
+        else if (pluginSlot.wasAutoBypassed())
             menu.addItem (2004, "Re-enable plugin (auto-bypassed)");
     }
     else
@@ -2039,7 +2041,9 @@ void ChannelStripComponent::showColourMenu()
         menu.addSeparator();
         menu.addItem (1010, "Replace plugin...");
         menu.addItem (1011, "Remove plugin");
-        if (pluginSlot.wasAutoBypassed())
+        if (pluginSlot.wasCrashed())
+            menu.addItem (1012, "Re-enable plugin (crashed)");
+        else if (pluginSlot.wasAutoBypassed())
             menu.addItem (1012, "Re-enable plugin (auto-bypassed)");
     }
 

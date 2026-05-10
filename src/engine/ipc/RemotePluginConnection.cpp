@@ -565,6 +565,19 @@ bool RemotePluginConnection::setState (const std::uint8_t* data, std::size_t siz
     return true;
 }
 
+bool RemotePluginConnection::pollReaper() noexcept
+{
+    if (childPid <= 0) return false;
+    int status = 0;
+    const pid_t r = waitpid (childPid, &status, WNOHANG);
+    if (r == 0)         return false;            // still alive
+    if (r < 0)          return false;            // ECHILD / error - already reaped elsewhere
+    // r == childPid: child has exited.
+    childPid = -1;
+    crashed.store (true, std::memory_order_release);
+    return true;
+}
+
 void RemotePluginConnection::disconnect()
 {
     if (childPid > 0)

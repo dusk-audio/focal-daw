@@ -143,7 +143,21 @@ public:
     // distinct from manual setBypassed). UI shows this state so the user
     // knows why their plugin stopped affecting audio.
     bool wasAutoBypassed() const noexcept { return autoBypassed.load (std::memory_order_relaxed); }
-    void clearAutoBypass() noexcept { autoBypassed.store (false, std::memory_order_relaxed); }
+    void clearAutoBypass() noexcept;
+
+    // True when the OOP child process has exited (crashed or killed).
+    // Distinct from wasAutoBypassed (which can also fire on CPU
+    // overrun for an in-process plugin). UI uses this to show
+    // "Plugin crashed - reload to recover" copy. Always false on
+    // platforms without OOP support.
+    bool wasCrashed() const noexcept
+    {
+       #if FOCAL_HAS_OOP_PLUGINS
+        return remoteCrashed.load (std::memory_order_relaxed);
+       #else
+        return false;
+       #endif
+    }
 
     // Plugin instance access for Stage 3 editor window. Returns nullptr if
     // no plugin loaded. Caller MUST be on the message thread; the audio
@@ -297,10 +311,33 @@ private:
     std::atomic<int>  remoteNumOut      { 0 };
     std::atomic<bool> remoteIsInstrument { false };
 
+    // Set when the reaper-poll timer sees the child process has exited.
+    // Distinct from autoBypassed (which can also fire on CPU overrun).
+    // Read by the UI to drive a "Plugin crashed" cue.
+    std::atomic<bool> remoteCrashed { false };
+
     // Persisted plugin identity. Used by getDescriptionXmlForSave (which
     // can't fillInPluginDescription on a remote instance) and to drive
     // re-prepare-on-block-size-change. Both are message-thread state.
     juce::String savedDescriptionXml;
+
+    // Polls the connected child process every kReaperPeriodMs ms via
+    // waitpid(WNOHANG). When the child has exited, sets autoBypassed +
+    // remoteCrashed and stops polling (the slot needs an explicit
+    // reload before there's anything to watch again). Started on a
+    // successful OOP load; stopped on unload, releaseResources, or
+    // when the child has been reaped.
+    static constexpr int kReaperPeriodMs = 1000;
+    class ReaperTimer final : public juce::Timer
+    {
+    public:
+        explicit ReaperTimer (PluginSlot& s) : slot (s) {}
+        void timerCallback() override { slot.pollRemoteReaper(); }
+    private:
+        PluginSlot& slot;
+    };
+    ReaperTimer reaperTimer { *this };
+    void pollRemoteReaper();
    #endif
 };
 } // namespace focal

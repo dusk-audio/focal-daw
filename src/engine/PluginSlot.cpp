@@ -119,6 +119,7 @@ PluginSlot::~PluginSlot()
         previousInstance->releaseResources();
 
    #if FOCAL_HAS_OOP_PLUGINS
+    reaperTimer.stopTimer();
     currentRemote.store (nullptr, std::memory_order_release);
     // ~RemotePluginConnection sends SIGTERM/SIGKILL to the child and
     // unmaps SHM. Safe at process shutdown.
@@ -139,8 +140,51 @@ void PluginSlot::leakInstanceForShutdown()
     // is irrelevant. Cleanly disconnecting kills the child, which
     // releases its plugin in its own address space (so any plugin-side
     // dtor crash is confined to the child and ignored).
+    reaperTimer.stopTimer();
     currentRemote.store (nullptr, std::memory_order_release);
     ownedRemote.reset();
+   #endif
+}
+
+#if FOCAL_HAS_OOP_PLUGINS
+void PluginSlot::pollRemoteReaper()
+{
+    auto* r = ownedRemote.get();
+    if (r == nullptr) { reaperTimer.stopTimer(); return; }
+
+    if (r->pollReaper())
+    {
+        // Child has exited. Park the audio path immediately (defense in
+        // depth — the audio thread will set autoBypassed itself on the
+        // next processBlockSync, but proactively bypassing closes the
+        // window where transport-stopped slots silently hold a dead
+        // connection).
+        autoBypassed .store (true, std::memory_order_relaxed);
+        remoteCrashed.store (true, std::memory_order_relaxed);
+        currentRemote.store (nullptr, std::memory_order_release);
+        std::fprintf (stderr,
+                      "[Focal/PluginSlot] OOP child process exited; slot "
+                      "auto-bypassed. Reload the plugin to recover.\n");
+        // Stop polling — child has been reaped, nothing more to watch.
+        reaperTimer.stopTimer();
+    }
+}
+#endif
+
+void PluginSlot::clearAutoBypass() noexcept
+{
+    autoBypassed.store (false, std::memory_order_relaxed);
+   #if FOCAL_HAS_OOP_PLUGINS
+    // Clearing crashed state too: if the user explicitly asks to
+    // re-enable a crashed slot, drop the dead connection so the next
+    // load (or processBlock attempt) doesn't see a stale carcass. The
+    // saved description XML stays so a subsequent restoreFromSavedState
+    // can re-spawn cleanly.
+    if (remoteCrashed.load (std::memory_order_relaxed))
+    {
+        ownedRemote.reset();
+        remoteCrashed.store (false, std::memory_order_relaxed);
+    }
    #endif
 }
 
@@ -213,6 +257,7 @@ void PluginSlot::releaseResources()
         ownedInstance->releaseResources();
 
    #if FOCAL_HAS_OOP_PLUGINS
+    reaperTimer.stopTimer();
     currentRemote.store (nullptr, std::memory_order_release);
     if (ownedRemote != nullptr)
     {
@@ -339,8 +384,10 @@ bool PluginSlot::loadFromDescription (const juce::PluginDescription& desc,
     // Tear down any prior OOP slot before deciding which path the new
     // load takes. Mode is per-load: we may end up in-process this time
     // even if the previous load was OOP (and vice versa).
+    reaperTimer.stopTimer();
     currentRemote.store (nullptr, std::memory_order_release);
     ownedRemote.reset();
+    remoteCrashed.store (false, std::memory_order_relaxed);
     savedDescriptionXml.clear();
 
     const bool tryOop = manager->isOopEnabled()
@@ -393,11 +440,13 @@ bool PluginSlot::loadFromDescription (const juce::PluginDescription& desc,
                     cachedLatencySamples.store (latency, std::memory_order_relaxed);
                     blocksSinceLoad     = 0;
                     consecutiveOverruns = 0;
-                    autoBypassed.store (false, std::memory_order_relaxed);
+                    autoBypassed .store (false, std::memory_order_relaxed);
+                    remoteCrashed.store (false, std::memory_order_relaxed);
                     savedDescriptionXml = descXmlStr;
                     ownedRemote = std::move (remote);
                     currentRemote.store (ownedRemote.get(),
                                             std::memory_order_release);
+                    reaperTimer.startTimer (kReaperPeriodMs);
                     return true;
                 }
             }
@@ -458,11 +507,13 @@ void PluginSlot::unload()
     ownedInstance.reset();
 
    #if FOCAL_HAS_OOP_PLUGINS
+    reaperTimer.stopTimer();
     currentRemote.store (nullptr, std::memory_order_release);
     ownedRemote.reset();   // SIGTERM/SIGKILL the child + unmap SHM
     remoteNumIn .store (0, std::memory_order_relaxed);
     remoteNumOut.store (0, std::memory_order_relaxed);
     remoteIsInstrument.store (false, std::memory_order_relaxed);
+    remoteCrashed.store (false, std::memory_order_relaxed);
     savedDescriptionXml.clear();
    #endif
 }
