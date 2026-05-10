@@ -183,6 +183,17 @@ private:
     void openPianoRoll  (int trackIdx, int regionIdx);
     void closePianoRoll();
 
+    // Audio-region editor - sister to the piano roll, opens on double-click
+    // of an audio region in the tape strip. Same DimOverlay + centred-panel
+    // pattern. Mutually exclusive with the piano roll (opening one closes
+    // the other).
+    std::unique_ptr<class DimOverlay>           audioEditorDim;
+    std::unique_ptr<class AudioRegionEditor>    audioEditor;
+    int audioEditorTrackIdx  = -1;
+    int audioEditorRegionIdx = -1;
+    void openAudioEditor  (int trackIdx, int regionIdx);
+    void closeAudioEditor();
+
     // Tuner overlay - same modal pattern as the piano roll. While open,
     // a 30 Hz timer polls Session::tuneLatestHz / tuneLatestLevel into
     // the overlay's setDetected(). The overlay's onDismiss closes the

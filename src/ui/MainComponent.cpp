@@ -4,6 +4,7 @@
 #include "BounceDialog.h"
 #include "DimOverlay.h"
 #include "PianoRollComponent.h"
+#include "AudioRegionEditor.h"
 #include "TunerOverlay.h"
 #include "VirtualKeyboardComponent.h"
 #include "../session/SessionTemplates.h"
@@ -211,7 +212,8 @@ MainComponent::MainComponent()
 
     tapeStrip = std::make_unique<TapeStrip> (session, engine);
     tapeStrip->setVisible (tapeStripExpanded);
-    tapeStrip->onMidiRegionClicked = [this] (int t, int r) { openPianoRoll (t, r); };
+    tapeStrip->onMidiRegionDoubleClicked  = [this] (int t, int r) { openPianoRoll   (t, r); };
+    tapeStrip->onAudioRegionDoubleClicked = [this] (int t, int r) { openAudioEditor (t, r); };
     addAndMakeVisible (tapeStrip.get());
 
     // Sync the transport-bar TAPE toggle with the collapsed default.
@@ -1708,6 +1710,10 @@ void MainComponent::cleanOutUnreferencedFiles()
 
 void MainComponent::openPianoRoll (int trackIdx, int regionIdx)
 {
+    // Mutually exclusive with the audio editor. Opening the piano roll
+    // tears down any open audio editor first.
+    if (audioEditor != nullptr) closeAudioEditor();
+
     // Toggle vs swap. Clicking the SAME region while the roll is already
     // open dismisses it (a second click on a region is naturally read as
     // "I'm done"); clicking a DIFFERENT region tears the current roll
@@ -1752,6 +1758,52 @@ void MainComponent::closePianoRoll()
     pianoRollDim.reset();
     pianoRollTrackIdx  = -1;
     pianoRollRegionIdx = -1;
+    if (tapeStrip != nullptr) tapeStrip->repaint();
+}
+
+void MainComponent::openAudioEditor (int trackIdx, int regionIdx)
+{
+    // Mutual exclusion with the piano roll - opening the audio editor
+    // tears down any open piano roll first.
+    if (pianoRoll != nullptr) closePianoRoll();
+
+    // Toggle vs swap, mirroring openPianoRoll's semantics. Same target
+    // region on a re-double-click closes; a different region swaps.
+    if (audioEditor != nullptr)
+    {
+        const bool sameRegion = (audioEditorTrackIdx == trackIdx
+                                  && audioEditorRegionIdx == regionIdx);
+        closeAudioEditor();
+        if (sameRegion) return;
+    }
+
+    audioEditor = std::make_unique<AudioRegionEditor> (session, engine, trackIdx, regionIdx);
+    audioEditorTrackIdx  = trackIdx;
+    audioEditorRegionIdx = regionIdx;
+    audioEditorDim = std::make_unique<DimOverlay>();
+
+    const auto bounds = getLocalBounds();
+    const int inset = juce::jmax (24, juce::jmin (bounds.getWidth(), bounds.getHeight()) / 16);
+    const auto editorBounds = bounds.reduced (inset);
+
+    audioEditorDim->setBounds (bounds);
+    audioEditorDim->onClick = [this] { closeAudioEditor(); };
+    addAndMakeVisible (audioEditorDim.get());
+
+    audioEditor->setBounds (editorBounds);
+    audioEditor->onCloseRequested = [this] { closeAudioEditor(); };
+    addAndMakeVisible (audioEditor.get());
+    audioEditor->grabKeyboardFocus();
+}
+
+void MainComponent::closeAudioEditor()
+{
+    if (audioEditor    != nullptr) removeChildComponent (audioEditor.get());
+    if (audioEditorDim != nullptr) removeChildComponent (audioEditorDim.get());
+    audioEditor.reset();
+    audioEditorDim.reset();
+    audioEditorTrackIdx  = -1;
+    audioEditorRegionIdx = -1;
     if (tapeStrip != nullptr) tapeStrip->repaint();
 }
 

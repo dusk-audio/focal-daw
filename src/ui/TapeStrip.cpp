@@ -699,10 +699,10 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
         return;
     }
 
-    // MIDI region hit-test - audio regions and MIDI regions never coexist
-    // on a single track (mode is exclusive), but we run this AFTER the
-    // audio test so the existing flow stays untouched. Click on a MIDI
-    // region body fires the host callback to spawn the piano-roll editor.
+    // MIDI single-click: swallow the event so it doesn't fall through
+    // to the rubber-band / playhead-seek paths below. Opening the
+    // piano roll moved to mouseDoubleClick for parity with audio
+    // regions (consistent "double-click any region to edit" model).
     {
         for (int t = 0; t < Session::kNumTracks; ++t)
         {
@@ -715,7 +715,6 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
                 const int x0 = xForSample (r.timelineStart);
                 const int x1 = xForSample (r.timelineStart + r.lengthInSamples);
                 if (e.x < x0 || e.x > x1) continue;
-                if (onMidiRegionClicked) onMidiRegionClicked (t, i);
                 return;
             }
             break;
@@ -1260,8 +1259,41 @@ void TapeStrip::mouseDoubleClick (const juce::MouseEvent& e)
     }
     if (trackIdx < 0) return;
 
-    // Only MIDI-mode tracks can host MIDI regions. Audio tracks need
-    // a recorded WAV; doubling on those is currently a no-op.
+    // Audio-region hit: open the AudioRegionEditor modal. Walk newest-
+    // first so overlaid regions prefer the most-recently-added (matches
+    // the painter's draw order).
+    {
+        const auto& ar = session.track (trackIdx).regions;
+        for (int i = (int) ar.size() - 1; i >= 0; --i)
+        {
+            const auto& r = ar[(size_t) i];
+            const int x0 = xForSample (r.timelineStart);
+            const int x1 = xForSample (r.timelineStart + r.lengthInSamples);
+            if (e.x < x0 || e.x > x1) continue;
+            if (onAudioRegionDoubleClicked) onAudioRegionDoubleClicked (trackIdx, i);
+            return;
+        }
+    }
+
+    // MIDI-region hit: open the PianoRollComponent modal. Same gesture
+    // shape as audio so users only have to remember one rule
+    // ("double-click any region to edit it").
+    {
+        const auto& mr = session.track (trackIdx).midiRegions.current();
+        for (int i = (int) mr.size() - 1; i >= 0; --i)
+        {
+            const auto& r = mr[(size_t) i];
+            const int x0 = xForSample (r.timelineStart);
+            const int x1 = xForSample (r.timelineStart + r.lengthInSamples);
+            if (e.x < x0 || e.x > x1) continue;
+            if (onMidiRegionDoubleClicked) onMidiRegionDoubleClicked (trackIdx, i);
+            return;
+        }
+    }
+
+    // Only MIDI-mode tracks can host the create-region-on-empty-grid
+    // gesture. Audio tracks with no region under the cursor fall
+    // through to here and are no-op.
     if (session.track (trackIdx).mode.load (std::memory_order_relaxed)
         != (int) Track::Mode::Midi)
         return;
@@ -1323,8 +1355,8 @@ void TapeStrip::mouseDoubleClick (const juce::MouseEvent& e)
 
     repaint();
     const int newRegionIdx = actionRaw->getInsertedIndex();
-    if (onMidiRegionClicked && newRegionIdx >= 0)
-        onMidiRegionClicked (trackIdx, newRegionIdx);
+    if (onMidiRegionDoubleClicked && newRegionIdx >= 0)
+        onMidiRegionDoubleClicked (trackIdx, newRegionIdx);
 }
 
 void TapeStrip::mouseMove (const juce::MouseEvent& e)

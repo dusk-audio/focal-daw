@@ -71,11 +71,14 @@ public:
     // signed - negative values move the region earlier.
     bool nudgeSelectedRegion (juce::int64 deltaSamples);
 
-    // Click-to-edit hook for MIDI regions. Fired when the user clicks the
-    // body of a MidiRegion in the timeline. The host (MainComponent) is
-    // expected to spawn the piano-roll overlay; this strip stays focused
-    // on layout / drawing and doesn't own the editor.
-    std::function<void (int trackIdx, int regionIdx)> onMidiRegionClicked;
+    // Double-click hooks. Single-click is reserved for direct
+    // manipulation (move / trim / fade / gain on audio; future drag
+    // for MIDI). Double-click opens the dedicated editor modal:
+    // PianoRollComponent for MIDI, AudioRegionEditor for audio. Both
+    // share the same gesture so users can rely on one mental model
+    // ("double-click any region to edit it").
+    std::function<void (int trackIdx, int regionIdx)> onMidiRegionDoubleClicked;
+    std::function<void (int trackIdx, int regionIdx)> onAudioRegionDoubleClicked;
 
     // Selected track index (the track that owns the most-recently-clicked
     // region) or -1 if nothing is selected. Used by keyboard shortcuts in

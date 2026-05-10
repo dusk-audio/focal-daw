@@ -73,6 +73,7 @@ juce_add_gui_app(Focal
     BUNDLE_ID          "com.marckorte.focal"
     VERSION            ${PROJECT_VERSION}
     ${FOCAL_ICON_ARGS}
+    NEEDS_WAYLAND      TRUE
     MICROPHONE_PERMISSION_ENABLED TRUE
     MICROPHONE_PERMISSION_TEXT    "Focal needs microphone access to record audio from your inputs.")
 
@@ -123,6 +124,7 @@ target_sources(Focal PRIVATE
     src/session/SessionTemplates.cpp
     src/ui/AnalogVuMeter.cpp
     src/ui/AppConfig.cpp
+    src/ui/AudioRegionEditor.cpp
     src/ui/AudioSettingsPanel.cpp
     src/ui/AuxLaneComponent.cpp
     src/ui/AuxView.cpp
@@ -304,6 +306,10 @@ target_compile_definitions(Focal PRIVATE
     JUCE_APPLICATION_VERSION_STRING="$<TARGET_PROPERTY:Focal,JUCE_VERSION>"
     JUCE_JACK=1
     JUCE_ALSA=1
+    # Native Wayland windowing on Linux (plugdata fork). Bypasses XWayland
+    # and the meta_window_unmanage assertion that crashes mutter when an
+    # X11 toplevel is destroyed while focused.
+    $<$<PLATFORM_ID:Linux>:JUCE_WAYLAND=1>
     # Plugin host formats. Default JUCE setting is OFF; turn on the two
     # formats we actually scan + load (VST3 and LV2 - both popular on Linux
     # via yabridge / native ports). Without these, addDefaultFormats()
@@ -326,6 +332,14 @@ target_compile_definitions(Focal PRIVATE
     JucePlugin_IsSynth=0
     JucePlugin_WantsMidiInput=0
     JucePlugin_ProducesMidiOutput=0)
+
+if((CMAKE_SYSTEM_NAME STREQUAL "Linux") AND TARGET juce::pkgconfig_JUCE_WAYLAND_LINUX_DEPS)
+    # Pulls in wayland-client / xkbcommon / libdecor-0 include paths.
+    # Linkage is dlopen at runtime (NOLINK in the JUCE pkg-config target),
+    # so this is purely for the headers exposed via juce_gui_basics.h
+    # under JUCE_WAYLAND.
+    target_link_libraries(Focal PRIVATE juce::pkgconfig_JUCE_WAYLAND_LINUX_DEPS)
+endif()
 
 target_link_libraries(Focal PRIVATE
     juce::juce_audio_basics
