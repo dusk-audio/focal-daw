@@ -536,7 +536,7 @@ int runIpcHost() noexcept
     juce::ScopedJuceInitialiser_GUI juceInit;
 
     // Register the formats we host.
-    host.formatManager.addDefaultFormats();
+    juce::addDefaultFormatsToManager (host.formatManager);
 
     // 3) Ready handshake.
     {

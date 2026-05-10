@@ -8,7 +8,7 @@ PluginManager::PluginManager()
     // VST2 is gone from upstream JUCE so don't expect it. Format presence
     // depends on which JUCE modules were compiled in - VST3 is in
     // juce_audio_processors which we already link.
-    formatManager.addDefaultFormats();
+    juce::addDefaultFormatsToManager (formatManager);
 
     loadCache();
 }

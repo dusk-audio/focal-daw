@@ -74,18 +74,30 @@ public:
             centreWithSize (getWidth(), getHeight());
         }
 
-        setVisible (true);
+        // Defer setVisible to the next message-loop tick so the bounds
+        // restoration above fully propagates before the wl_surface gets
+        // created. Without this, on the JUCE-wayland fork + libdecor,
+        // the surface briefly maps at libdecor's default size (small
+        // box, upper-left) before the compositor's configure event
+        // with the saved bounds lands - the user sees a flash of a
+        // tiny upper-left window before the real UI shows. Stock X11
+        // doesn't have this gap because XCB sets the configured size
+        // synchronously inside setVisible(true). Hiding explicitly
+        // avoids any chance JUCE's base ctor flipped the flag on.
+        setVisible (false);
 
-        // Defer foreground-promotion to the next message-loop tick so
-        // JUCE's peer setup is complete and any synchronous iconify-
-        // on-map (Mutter on Linux/XWayland) has settled before we
-        // poke. bringWindowToFront is a no-op on non-Linux builds.
+        // Combined async tick: setVisible(true) creates the peer at the
+        // already-finalised bounds, then bringWindowToFront promotes
+        // focus once the peer exists. bringWindowToFront is a no-op on
+        // non-Linux builds.
         juce::Component::SafePointer<MainWindow> safeThis (this);
         juce::MessageManager::callAsync ([safeThis]
         {
-            if (auto* self = safeThis.getComponent())
-                if (auto* peer = self->getPeer())
-                    focal::platform::bringWindowToFront (*peer);
+            auto* self = safeThis.getComponent();
+            if (self == nullptr) return;
+            self->setVisible (true);
+            if (auto* peer = self->getPeer())
+                focal::platform::bringWindowToFront (*peer);
         });
     }
 

@@ -137,7 +137,7 @@ int runIpcHostTest (const std::string& hostExecutablePath,
     // format manager is parent-side here only to produce the XML; the
     // actual instance lives in the child.
     juce::AudioPluginFormatManager fm;
-    fm.addDefaultFormats();
+    juce::addDefaultFormatsToManager (fm);
     juce::OwnedArray<juce::PluginDescription> found;
     bool scanned = false;
     for (auto* fmt : fm.getFormats())
