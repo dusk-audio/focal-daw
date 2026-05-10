@@ -58,6 +58,15 @@ public:
     // hidden so it doesn't clash with the buttons sitting on top of it.
     void setHintVisible (bool visible);
 
+    // Below this transport-bar width, the right-side toggles collapse to
+    // short labels (SNAP→S, SUMMARY→chevron), the clock label shrinks,
+    // and MainComponent shrinks the bank-button overlay to match. The
+    // threshold is calibrated to fire just above the OS-enforced resize
+    // floor (ConsoleView::minimumContentWidth()+24, ~1790 px) so compact
+    // mode actually engages on smaller displays — the previous 1600 px
+    // value never triggered because the user couldn't drag below 1790.
+    static constexpr int kCompactTransportWidth = 1850;
+
 private:
     void timerCallback() override;
     void refreshButtonStates();
@@ -100,12 +109,6 @@ private:
     juce::TextButton tapButton      { "TAP" };
     juce::TextButton tuneButton     { "TUNE" };
 
-    // Below this transport-bar width, LOOP/PUNCH/SNAP/SUMMARY collapse
-    // to single-letter / chevron-only labels so the row stops clipping.
-    // Empirically ~1600 px is the threshold where the full labels start
-    // to overflow once the rest of the bar (clock, BPM, CLICK, C/I, TAP,
-    // TUNE) is laid out.
-    static constexpr int kCompactTransportWidth = 1600;
     void syncCompactLabels (bool compact);
     // Right-click on the PUNCH toggle opens a popup with pre-roll /
     // post-roll value pickers + an explanation banner.

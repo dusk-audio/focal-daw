@@ -707,18 +707,14 @@ void TransportBar::resized()
     place (punchButton);
     place (keyboardButton);
 
-    area.removeFromLeft (12);
-    clockLabel.setBounds (area.removeFromLeft (130));
-
-    // Below this transport-bar width the right-side toggles compete for
-    // space and clip; collapse the modes (LOOP/PUNCH/SNAP) and SUMMARY
-    // to single-letter / chevron-only labels with smaller bounds. The
-    // toggle behaviour and tooltips stay the same - only the button text
-    // contracts. Saves ~130 px on the right side, which closes the gap
-    // for windows in the 1100-1600 px range without touching the rest of
-    // the bar.
     const bool compact = getWidth() < kCompactTransportWidth;
     syncCompactLabels (compact);
+
+    area.removeFromLeft (12);
+    // Compact clock fits "00:00.000" at 18 px bold mono with ~2 px slack;
+    // gains ~20 px back so the bank-button overlay (positioned by
+    // MainComponent in the same x-range) has more room before colliding.
+    clockLabel.setBounds (area.removeFromLeft (compact ? 110 : 130));
 
     // TAPE toggle on the right edge of the bar; chevron-only in compact.
     tapeToggle.setBounds (area.removeFromRight (compact ? 32 : 84).reduced (1));

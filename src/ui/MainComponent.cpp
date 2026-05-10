@@ -693,9 +693,14 @@ void MainComponent::resized()
     bankBButton.setVisible (needsBanking);
     if (needsBanking)
     {
-        constexpr int kBankBtnW = 130;
+        // Match TransportBar's compact threshold so bank shrink and clock
+        // shrink fire at the same window width.
+        const bool compact = rowBounds.getWidth() < TransportBar::kCompactTransportWidth;
+        const int  kBankBtnW   = compact ? 90 : 130;
         constexpr int kBankBtnGap = 6;
         constexpr int kBankBtnH = 26;
+        bankAButton.setButtonText (compact ? "1-8"  : "BANK A  (1-8)");
+        bankBButton.setButtonText (compact ? "9-16" : "BANK B  (9-16)");
         const int bankY = rowBounds.getY() + (rowBounds.getHeight() - kBankBtnH) / 2;
         const int bankBlockEndX = stageX - 16;        // 16 px gap from stage block
         const int bankX         = bankBlockEndX - (kBankBtnW * 2 + kBankBtnGap);
