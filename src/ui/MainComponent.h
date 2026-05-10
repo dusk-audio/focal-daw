@@ -61,6 +61,14 @@ public:
     // post the quit message.
     void beginSafeShutdown();
 
+    // Process-shutdown only: relinquishes ownership of every loaded
+    // plugin instance without destroying it. Called from
+    // FocalApp::shutdown() right before mainWindow.reset() so the
+    // engine teardown skips plugin destruction (some Linux plugins
+    // abort the process from their destructor - see
+    // AudioEngine::leakAllPluginInstancesForShutdown for the why).
+    void leakAllPluginInstancesForShutdown();
+
 private:
     void openAudioSettings();
     void openBounceDialog();

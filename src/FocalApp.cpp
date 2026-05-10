@@ -926,6 +926,22 @@ void FocalApp::shutdown()
     // AudioDeviceManager is still alive. cancelAllModalComponents() here
     // is unhelpful - it only marks dialogs inactive and queues an async
     // delete that never fires before main() returns.
+
+    // Bypass plugin destruction on the way out. Some Linux plugins
+    // (notably u-he Diva) have buggy destructors that fail with
+    // pure-virtual-method-called during their shutdown sequence,
+    // aborting the process and leaving a coredump. Releasing the
+    // unique_ptrs without destroying the underlying instances skips
+    // the broken destructors entirely; the OS reclaims the memory
+    // when the process exits a moment later. The plugins'
+    // IPluginBase::terminate() hook does NOT run in this path - if a
+    // plugin saves state in terminate (Diva writes its midiAssignFile
+    // there), that state is the version from the previous successful
+    // load. Acceptable trade-off for a clean exit code + no coredump.
+    if (mainWindow != nullptr)
+        if (auto* main = dynamic_cast<MainComponent*> (mainWindow->getContentComponent()))
+            main->leakAllPluginInstancesForShutdown();
+
     mainWindow.reset();
 }
 

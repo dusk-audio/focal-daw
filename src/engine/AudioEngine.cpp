@@ -601,6 +601,15 @@ void AudioEngine::releaseAllPluginResources()
             laneStrip.getPluginSlot (s).releaseResources();
 }
 
+void AudioEngine::leakAllPluginInstancesForShutdown()
+{
+    for (auto& strip : strips)
+        strip.getPluginSlot().leakInstanceForShutdown();
+    for (auto& laneStrip : auxLaneStrips)
+        for (int s = 0; s < AuxLaneParams::kMaxLanePlugins; ++s)
+            laneStrip.getPluginSlot (s).leakInstanceForShutdown();
+}
+
 void AudioEngine::publishTransportStateForSave()
 {
     session.savedLoopStart    = transport.getLoopStart();

@@ -220,6 +220,18 @@ public:
     // call while processBlock could fire.
     void releaseAllPluginResources();
 
+    // Process-shutdown only: relinquish ownership of every loaded
+    // AudioPluginInstance without destroying any of them. Walks every
+    // ChannelStrip + every aux-lane plugin slot and calls
+    // PluginSlot::leakInstanceForShutdown(). Use case: bypass plugin-
+    // side destructor crashes on Linux (e.g. u-he Diva's
+    // ~AM_VST3_ViewInterface) by skipping plugin destruction entirely
+    // - the OS reclaims the leaked memory at process exit. Must be
+    // called AFTER releaseAllPluginResources() so the plugins have
+    // stopped processing, and only ever during the final shutdown
+    // sequence (per-call leaks accumulate otherwise).
+    void leakAllPluginInstancesForShutdown();
+
     // Transport (loop + punch) persistence - same publish/consume bookend.
     // The atomics live on Transport for audio-thread access; the serializer
     // sees only Session, so we mirror them onto Session.savedLoop* /

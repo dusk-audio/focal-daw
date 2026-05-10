@@ -102,6 +102,15 @@ PluginSlot::~PluginSlot()
         previousInstance->releaseResources();
 }
 
+void PluginSlot::leakInstanceForShutdown()
+{
+    currentInstance.store (nullptr, std::memory_order_release);
+    if (ownedInstance != nullptr)
+        (void) ownedInstance.release();
+    if (previousInstance != nullptr)
+        (void) previousInstance.release();
+}
+
 void PluginSlot::prepareToPlay (double sampleRate, int blockSize)
 {
     preparedSampleRate = sampleRate;

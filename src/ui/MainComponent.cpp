@@ -1136,6 +1136,11 @@ void MainComponent::requestQuit()
     quitModal.show (*this, std::move (dialog));
 }
 
+void MainComponent::leakAllPluginInstancesForShutdown()
+{
+    engine.leakAllPluginInstancesForShutdown();
+}
+
 void MainComponent::beginSafeShutdown()
 {
     // Quiesce the engine + tear down native window peers in an order

@@ -60,6 +60,22 @@ public:
     void prepareToPlay (double sampleRate, int blockSize);
     void releaseResources();
 
+    // Process-shutdown only: relinquish ownership of the loaded
+    // AudioPluginInstance(s) without destroying them. The instances
+    // remain in heap memory until the OS reclaims it on process exit.
+    //
+    // Why: some Linux plugins have buggy destructors that abort the
+    // process on the way out (e.g. u-he Diva's ~AM_VST3_ViewInterface
+    // calls a virtual that resolves to a pure virtual on the way up
+    // the destruction chain). The plugin's IPluginBase::terminate()
+    // hook may not run, but in exchange the process exits cleanly
+    // (zero exit code, no SIGABRT, no coredump). Acceptable trade-off
+    // because the OS reclaims the leaked memory immediately.
+    //
+    // Must NOT be called outside of process shutdown - leaks are
+    // per-call and accumulate.
+    void leakInstanceForShutdown();
+
     // Loads the plugin from a file. Returns true on success, false with
     // errorMessage populated on failure. Releases any previously-loaded
     // plugin first.
