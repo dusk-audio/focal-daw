@@ -1265,7 +1265,22 @@ public:
     PluginEditorWindow (const juce::String& title,
                         juce::AudioProcessorEditor& editor,
                         std::function<void()> onCloseButton)
-        : juce::DocumentWindow (title,
+        : juce::DocumentWindow (([&]
+                                  {
+                                      // Plugin editors are X11 children
+                                      // (VST3 X11EmbedWindowID, LV2
+                                      // LV2_UI__X11UI, JUCE-plugin
+                                      // X11-windowed renderer). XEmbed
+                                      // can't reparent into a wl_surface,
+                                      // so this wrapper must be an X11
+                                      // toplevel even when the rest of
+                                      // Focal is on Wayland. The flag
+                                      // is consumed by the very next
+                                      // createNewPeer call (triggered
+                                      // by addToDesktop=true below).
+                                      focal::platform::preferX11ForNextNativeWindow();
+                                      return title;
+                                  })(),
                                   juce::Colour (0xff202024),
                                   juce::DocumentWindow::closeButton,
                                   /*addToDesktop*/ true),
@@ -1326,6 +1341,11 @@ public:
                 if (auto* peer = self->getPeer())
                     focal::platform::bringWindowToFront (*peer);
         });
+
+        // Release the latched X11 preference so subsequent unrelated
+        // top-level windows (e.g. another plugin editor opened later
+        // for a different strip) start from the platform default.
+        focal::platform::clearPreferX11ForNativeWindow();
     }
 
     void closeButtonPressed() override
@@ -1411,10 +1431,22 @@ void ChannelStripComponent::closePluginEditor()
 void ChannelStripComponent::dropPluginEditor()
 {
     closePluginEditor();
-    // Reset the unique_ptr; ~AudioProcessorEditor calls
-    // editorBeingDeleted on the plugin instance, which is the canonical
-    // lifecycle path. Must run while pluginSlot.getInstance() (or the
-    // PluginSlot's previousInstance) is still alive.
+    // ~AudioProcessorEditor tears down the plugin's internal X11
+    // children synchronously (colour pickers, preset browsers,
+    // transient popups). On a Wayland session, any of those could
+    // theoretically be mutter's focus_window. A yield via
+    // requestFocusOnMainWaylandSurface lets the compositor process
+    // any pending unmaps before the synchronous destruction lands.
+    //
+    // Why not defer pluginEditor.reset() into a callAsync the same way
+    // closePluginEditor defers the wrapper window: the pluginEditor
+    // destructor calls editorBeingDeleted on its AudioProcessor. The
+    // AudioProcessor is only kept alive across ONE swap by PluginSlot's
+    // previousInstance keep-alive; two quick "Replace plugin" actions
+    // within the deferred-reset window would destroy the processor
+    // before the deferred reset, turning a rare focus race into a
+    // certain use-after-free.
+    focal::platform::requestFocusOnMainWaylandSurface();
     pluginEditor.reset();
     pluginEditorOwner = nullptr;
 }

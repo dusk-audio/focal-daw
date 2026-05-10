@@ -7,6 +7,7 @@
 #include "PlatformWindowing.h"
 
 #include <cstdio>
+#include <cstdlib>
 
 namespace focal::platform
 {
@@ -24,6 +25,15 @@ namespace
 {
     auto* sys = juce::XWindowSystem::getInstanceWithoutCreating();
     return sys != nullptr ? sys->getDisplay() : nullptr;
+}
+
+// True when the process is attached to a Wayland session. The plugin
+// editor toplevels are still X11 (via XWayland) but the main window is
+// a wl_surface, which is what makes the X-side focus dance no-op.
+bool isWaylandSession()
+{
+    const char* wd = std::getenv ("WAYLAND_DISPLAY");
+    return wd != nullptr && *wd != '\0';
 }
 
 juce::ComponentPeer* pickSiblingFocusTargetPeer (juce::Component& departing)
@@ -111,24 +121,64 @@ void prepareForTopLevelDestruction (juce::Component& topLevel)
     juce::Component::unfocusAllComponents();
     topLevel.giveAwayKeyboardFocus();
 
-    // EWMH _NET_ACTIVE_WINDOW (via bringWindowToFront) is the path mutter
-    // actually honours under XWayland - focus_window is updated by
-    // mutter's own focus-management code in response to compositor
-    // surface events, never by raw XSetInputFocus. Pairs with a
-    // callAsync at the call site so mutter's loop ticks between this
-    // and the destroy.
+    auto* d = juceDisplay();
+
+    if (isWaylandSession())
+    {
+        // Wayland-session path: the doomed plugin editor is an X11
+        // toplevel (via XWayland), the main Focal window is a
+        // wl_surface. Mutter does NOT honour X11 _NET_ACTIVE_WINDOW /
+        // XSetInputFocus / XIconify for focus_window updates on a
+        // Wayland session - the EWMH dance below is therefore a
+        // no-op. What we CAN do is unmap the doomed window cleanly
+        // and then yield to the compositor so it dispatches the
+        // resulting events on its main loop - which retargets
+        // focus_window off the unmapped X11 window.
+        if (d != nullptr)
+        {
+            if (auto* peer = topLevel.getPeer())
+            {
+                const auto win = (::Window) (uintptr_t) peer->getNativeHandle();
+                ::XWithdrawWindow (d, win, DefaultScreen (d));
+            }
+            ::XSync (d, False);
+            std::fprintf (stderr, "[Focal/Wayland] X11 unmap + roundtrip\n");
+        }
+        requestFocusOnMainWaylandSurface();
+        std::fflush (stderr);
+        return;
+    }
+
+    // Xorg session: the doomed window AND any sibling are both real
+    // X11 toplevels. EWMH _NET_ACTIVE_WINDOW on a sibling is the only
+    // path mutter actually honours for X11 focus_window retargeting;
+    // when no sibling exists, fall back to XIconify which routes
+    // through mutter's WM_CHANGE_STATE handler.
     if (auto* sibling = pickSiblingFocusTargetPeer (topLevel))
     {
         bringWindowToFront (*sibling);
         std::fprintf (stderr, "[Focal/X] focus -> sibling peer (EWMH)\n");
     }
+    else if (d != nullptr)
+    {
+        if (auto* peer = topLevel.getPeer())
+        {
+            const auto win = (::Window) (uintptr_t) peer->getNativeHandle();
+            ::XIconifyWindow (d, win, DefaultScreen (d));
+            std::fprintf (stderr, "[Focal/X] focus -> iconify (no sibling)\n");
+        }
+        else
+        {
+            std::fprintf (stderr, "[Focal/X] focus -> none (no peer)\n");
+        }
+    }
     else
     {
-        std::fprintf (stderr, "[Focal/X] focus -> none (no sibling)\n");
+        std::fprintf (stderr, "[Focal/X] focus -> none (no display)\n");
     }
     std::fflush (stderr);
 
-    if (auto* d = juceDisplay())
+    if (d != nullptr)
         ::XSync (d, False);
 
     flushWindowOperations();
@@ -141,5 +191,36 @@ void clearXInputFocus()
         ::XSetInputFocus (d, None, RevertToNone, CurrentTime);
         ::XSync (d, False);
     }
+}
+
+void preferX11ForNextNativeWindow()
+{
+    juce::WaylandWindowSystem::setSkipForPeerCreation (true);
+}
+
+void clearPreferX11ForNativeWindow()
+{
+    juce::WaylandWindowSystem::setSkipForPeerCreation (false);
+}
+
+void requestFocusOnMainWaylandSurface()
+{
+    // The plumbed-in JUCE-wayland fork doesn't expose xdg-activation-v1
+    // (no protocol XML codegen, no registry binding, no public API);
+    // adding it cleanly is a separate fork-side change. Until then we
+    // yield by roundtripping the Wayland connection - the compositor
+    // responds only after its main loop has dispatched its queue,
+    // which on a Wayland session includes processing any X11 unmaps
+    // that arrived from XWayland. Mutter's focus_window for the
+    // doomed X11 toplevel is therefore retargeted off it before this
+    // call returns. Pair with a callAsync at the call site so the
+    // subsequent X11 destroy lands an additional message-loop tick
+    // later, providing extra slack for any compositor work that
+    // didn't make it into the same dispatch round.
+    auto* sys = juce::WaylandWindowSystem::getInstanceWithoutCreating();
+    if (sys == nullptr) return;
+    auto* display = sys->getDisplay();
+    if (display == nullptr) return;
+    juce::WaylandSymbols::getInstance()->displayRoundtrip (display);
 }
 } // namespace focal::platform

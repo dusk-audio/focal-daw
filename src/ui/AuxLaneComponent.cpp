@@ -245,7 +245,11 @@ public:
     AuxPopoutWindow (const juce::String& title,
                      juce::AudioProcessorEditor& editor,
                      std::function<void()> onCloseButton)
-        : juce::DocumentWindow (title,
+        : juce::DocumentWindow (([&]
+                                  {
+                                      focal::platform::preferX11ForNextNativeWindow();
+                                      return title;
+                                  })(),
                                   juce::Colour (0xff202024),
                                   juce::DocumentWindow::closeButton,
                                   /*addToDesktop*/ true),
@@ -256,6 +260,7 @@ public:
         setResizable (true, true);
         centreAroundComponent (nullptr, getWidth(), getHeight());
         setVisible (true);
+        focal::platform::clearPreferX11ForNativeWindow();
     }
 
     void closeButtonPressed() override

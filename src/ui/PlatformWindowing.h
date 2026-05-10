@@ -85,4 +85,37 @@ void prepareForTopLevelDestruction (juce::Component& topLevel);
 // Mac/Windows: no-op (the compositor / WM doesn't have the same
 // focused-window-destroy assertion).
 void clearXInputFocus();
+
+// Wayland-session focus retarget. When the main window is a wl_surface
+// and a plugin editor is an X11 toplevel via XWayland, mutter's
+// focus_window can still be the doomed editor when its destroy lands -
+// XSetInputFocus / EWMH _NET_ACTIVE_WINDOW are no-ops on Wayland sessions.
+// The proper fix is xdg-activation-v1 (request the compositor activate
+// the main wl_surface); the JUCE-wayland fork doesn't expose it yet, so
+// the implementation today does a wl_display_roundtrip - blocks until
+// mutter has dispatched its main loop, which has the side effect of
+// processing the X11 unmap from XWayland and retargeting focus_window.
+//
+// Linux: WaylandSymbols::displayRoundtrip on JUCE's main wl_display.
+// Mac/Windows: no-op.
+void requestFocusOnMainWaylandSurface();
+
+// Latch a "use X11 for top-level peer creation" flag. While set, every
+// Component::createNewPeer routes to LinuxComponentPeer (X11) instead
+// of WaylandComponentPeer, even on a Wayland session. Used by plugin-
+// editor host wrappers because the Linux plugin protocols (VST3
+// X11EmbedWindowID, LV2 LV2_UI__X11UI, JUCE-plugin X11-windowed
+// renderer) need an X11 parent to attach to.
+//
+// Latched, not one-shot: a single juce::DocumentWindow ctor body
+// triggers multiple peer recreations (TopLevelWindow base ctor,
+// setUsingNativeTitleBar, setResizable, lookAndFeelChanged) - we
+// need the X11 routing to hold across all of them. Caller pattern:
+// preferX11ForNextNativeWindow() before construction, then
+// clearPreferX11ForNativeWindow() at the end of the ctor body.
+//
+// Linux: sets / clears JUCE-wayland's latched skip flag.
+// Mac/Windows: no-op.
+void preferX11ForNextNativeWindow();
+void clearPreferX11ForNativeWindow();
 } // namespace focal::platform

@@ -28,5 +28,8 @@ void prepareForTopLevelDestruction (juce::Component& topLevel)
     juce::Component::unfocusAllComponents();
     topLevel.giveAwayKeyboardFocus();
 }
-void clearXInputFocus() {}   // X-only; no-op on macOS
+void clearXInputFocus() {}                 // X-only; no-op on macOS
+void requestFocusOnMainWaylandSurface() {} // Wayland-only; no-op on macOS
+void preferX11ForNextNativeWindow() {}     // Wayland-only; no-op on macOS
+void clearPreferX11ForNativeWindow() {}    // Wayland-only; no-op on macOS
 } // namespace focal::platform
