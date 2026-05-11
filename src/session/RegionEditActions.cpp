@@ -102,21 +102,15 @@ bool SplitRegionAction::perform()
 
     orig.lengthInSamples  = leftLen;
 
-    // Reaper-style auto-crossfade: ~10 ms fade-out on the left slice
-    // + matching fade-in on the right slice so the split is silent
-    // even at non-zero-crossing cuts. Only added when no existing
-    // fade is in place (don't stomp user-set fades). Both fades sit
-    // within the slice that owns them — playback adds them
-    // independently, so the audible effect at the boundary is a
-    // short equal-power-ish overlap.
-    const double sr = juce::jmax (1.0, engine.getCurrentSampleRate());
-    const auto autoFadeSamples = (juce::int64) std::round (sr * 0.010);
-    if (orig.fadeOutSamples == 0)
-        orig.fadeOutSamples = juce::jmin (autoFadeSamples,
-                                              juce::jmax<juce::int64> (0, orig.lengthInSamples - orig.fadeInSamples));
-    if (right.fadeInSamples == 0)
-        right.fadeInSamples = juce::jmin (autoFadeSamples,
-                                              juce::jmax<juce::int64> (0, right.lengthInSamples - right.fadeOutSamples));
+    // Clamp fades against the new half-lengths so the original's existing
+    // fadeIn / fadeOut don't exceed their half's length. Split itself does
+    // NOT introduce auto-fades — the boundary is a hard cut by default.
+    // Crossfades only happen when regions are dragged to actually overlap;
+    // PlaybackEngine's implicit-overlap detection handles that case.
+    orig.fadeInSamples   = juce::jlimit<juce::int64> (0, orig.lengthInSamples, orig.fadeInSamples);
+    orig.fadeOutSamples  = juce::jlimit<juce::int64> (0, orig.lengthInSamples - orig.fadeInSamples, orig.fadeOutSamples);
+    right.fadeInSamples  = juce::jlimit<juce::int64> (0, right.lengthInSamples, right.fadeInSamples);
+    right.fadeOutSamples = juce::jlimit<juce::int64> (0, right.lengthInSamples - right.fadeInSamples, right.fadeOutSamples);
 
     regs.insert (regs.begin() + regionIdx + 1, right);
 
