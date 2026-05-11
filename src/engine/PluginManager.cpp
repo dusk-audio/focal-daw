@@ -1,4 +1,5 @@
 #include "PluginManager.h"
+#include "JuceCompat.h"
 
 namespace focal
 {
@@ -7,19 +8,9 @@ PluginManager::PluginManager()
     // Registers the platform-default formats: VST3 + LV2 + AU on Linux/macOS.
     // VST2 is gone from upstream JUCE so don't expect it. Format presence
     // depends on which JUCE modules were compiled in - VST3 is in
-    // juce_audio_processors which we already link.
-    //
-    // Focal pins the Linux build to the plugdata-team JUCE-wayland
-    // fork, which made AudioPluginFormatManager::addDefaultFormats()
-    // = delete and provided a free juce::addDefaultFormatsToManager()
-    // in its place. Upstream JUCE (Mac / Windows builds) still has
-    // the (deprecated) member. Branching on __linux__ keeps the
-    // source compilable against both APIs.
-   #if defined(__linux__)
-    juce::addDefaultFormatsToManager (formatManager);
-   #else
-    formatManager.addDefaultFormats();
-   #endif
+    // juce_audio_processors which we already link. The compat shim covers
+    // the upstream-vs-wayland-fork API split.
+    juce_compat::addDefaultFormats (formatManager);
 
     loadCache();
 }

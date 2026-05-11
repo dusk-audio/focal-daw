@@ -27,7 +27,27 @@ cmake --build build -j$(nproc)
 ./build/Focal_artefacts/Release/Focal
 ```
 
-JUCE is picked up from `/home/marc/projects/JUCE/` automatically. Pass `-DJUCE_PATH=/path/to/JUCE` to override.
+JUCE and the Dusk plugins repo are auto-discovered from sibling directories. Pass `-DJUCE_PATH=...` or `-DDUSK_PLUGINS_PATH=...` to override either.
+
+### Cross-OS dev (macOS authoring, Linux testing)
+
+Focal builds against different sibling repos depending on the host OS. Keep the two builds in separate directories so you never have to reconfigure when switching machines:
+
+| OS    | Build dir        | JUCE source                              | Plugins source                 |
+|-------|------------------|------------------------------------------|--------------------------------|
+| macOS | `build/`         | `../JUCE` (upstream)                     | `../plugins` (any branch)      |
+| Linux | `build-linux/`   | `../JUCE-wayland` (plugdata-team fork)   | `../plugins-main` (worktree)   |
+| Tests | `build-tests/`   | same as host OS                          | same as host OS                |
+
+CMake auto-detects:
+- **JUCE** — on Linux it prefers `../JUCE-wayland` if present, falls back to `../JUCE`. The wayland fork has 5 local commits Focal depends on (XEmbed mapping, X11-on-Wayland fix, peer-creation latch — see [memory](../../.claude/projects/-home-marc-projects-Focal/memory/linux_juce_wayland_pin.md)) and a divergent `addDefaultFormatsToManager` free function.
+- **Plugins** — prefers `../plugins-main` over `../plugins`. The `plugins-main` directory is a git worktree pinned to the plugins repo's `main` branch so feature-branch work in `../plugins/` doesn't break Focal's expected donor API. Set up once on Linux:
+  ```bash
+  cd ../plugins && git worktree add ../plugins-main main
+  ```
+  Mac dev typically stays on `main` of `../plugins` and skips the worktree.
+
+The upstream-vs-fork `addDefaultFormats` API split is hidden behind [src/engine/JuceCompat.h](src/engine/JuceCompat.h) — call `focal::juce_compat::addDefaultFormats(fm)` and the `#if defined(__linux__)` lives in one place. Don't sprinkle new platform `#ifdef`s into call sites.
 
 ## Phase plan
 

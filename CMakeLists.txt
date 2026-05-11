@@ -17,11 +17,22 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# JUCE path resolution: -DJUCE_PATH > sibling ../JUCE > external/JUCE submodule.
-# Same priority order as the Dusk Audio plugins repo so a developer with both
-# repos checked out only needs JUCE in one place.
+# JUCE path resolution. Per-OS defaults so a developer toggling between
+# Mac (upstream JUCE) and Linux (plugdata-team JUCE-wayland fork, required
+# for the wayland-juce8 features) doesn't have to pass -DJUCE_PATH each time.
+# Priority:
+#   1. -DJUCE_PATH (explicit override)
+#   2. Linux: sibling ../JUCE-wayland (wayland fork)
+#   3. Any OS: sibling ../JUCE (upstream)
+#   4. external/JUCE submodule
+# The wayland fork has its own XEmbed + addDefaultFormatsToManager API that
+# Focal's source assumes on Linux; see [src/engine/JuceCompat.h](src/engine/JuceCompat.h)
+# for the API-split shim.
 if(DEFINED JUCE_PATH)
     set(FOCAL_JUCE_SOURCE_DIR "${JUCE_PATH}")
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux"
+       AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../JUCE-wayland/CMakeLists.txt")
+    set(FOCAL_JUCE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../JUCE-wayland")
 elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../JUCE/CMakeLists.txt")
     set(FOCAL_JUCE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../JUCE")
 elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/JUCE/CMakeLists.txt")
@@ -30,7 +41,7 @@ else()
     message(FATAL_ERROR
         "JUCE not found. Options:\n"
         "  1. Set -DJUCE_PATH=/path/to/JUCE\n"
-        "  2. Clone JUCE to ../JUCE (sibling directory)\n"
+        "  2. Clone JUCE to ../JUCE (sibling) — or ../JUCE-wayland on Linux\n"
         "  3. Add as submodule: git submodule add https://github.com/juce-framework/JUCE.git external/JUCE")
 endif()
 
@@ -135,12 +146,22 @@ endif()
 
 # Dusk Audio plugins repo — donor for the analog DSP cores (4K EQ filter chain,
 # FET/Opto compressor, Pultec EQ, tape saturation, console saturation, plus the
-# AnalogEmulation library). Resolved via -DDUSK_PLUGINS_PATH > sibling
-# ../plugins. Header-only cores are picked up via the include paths below;
-# editing a header in the plugins repo automatically rebuilds the affected
-# Focal translation units. No copy / submodule bump required.
+# AnalogEmulation library). Header-only cores are picked up via the include
+# paths below; editing a header in the plugins repo automatically rebuilds
+# the affected Focal translation units. No copy / submodule bump required.
+#
+# Resolution priority:
+#   1. -DDUSK_PLUGINS_PATH (explicit override)
+#   2. sibling ../plugins-main — a permanent worktree pinned to plugins-`main`.
+#      Use this when the working ../plugins checkout is on a feature branch
+#      that may not have the donor API Focal expects. Create with:
+#          cd ../plugins && git worktree add ../plugins-main main
+#   3. sibling ../plugins (the usual checkout)
 if(DEFINED DUSK_PLUGINS_PATH)
     message(STATUS "Using Dusk plugins from: ${DUSK_PLUGINS_PATH}")
+elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../plugins-main/plugins/shared")
+    set(DUSK_PLUGINS_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../plugins-main")
+    message(STATUS "Using Dusk plugins from sibling worktree (plugins-main): ${DUSK_PLUGINS_PATH}")
 elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../plugins/plugins/shared")
     set(DUSK_PLUGINS_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../plugins")
     message(STATUS "Using Dusk plugins from sibling directory: ${DUSK_PLUGINS_PATH}")

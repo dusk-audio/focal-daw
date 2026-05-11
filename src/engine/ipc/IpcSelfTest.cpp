@@ -1,5 +1,6 @@
 #include "IpcSelfTest.h"
 #include "RemotePluginConnection.h"
+#include "../JuceCompat.h"
 
 #include <algorithm>
 #include <chrono>
@@ -138,11 +139,7 @@ int runIpcHostTest (const std::string& hostExecutablePath,
     // format manager is parent-side here only to produce the XML; the
     // actual instance lives in the child.
     juce::AudioPluginFormatManager fm;
-   #if defined(__linux__)
-    juce::addDefaultFormatsToManager (fm);
-   #else
-    fm.addDefaultFormats();
-   #endif
+    focal::juce_compat::addDefaultFormats (fm);
     juce::OwnedArray<juce::PluginDescription> found;
     bool scanned = false;
     for (auto* fmt : fm.getFormats())

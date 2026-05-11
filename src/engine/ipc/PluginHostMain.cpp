@@ -28,6 +28,7 @@
 //                          control-plane traffic.
 
 #include "PluginIpc.h"
+#include "../JuceCompat.h"
 
 #include <cerrno>
 #include <cstdio>
@@ -647,12 +648,9 @@ int runIpcHost() noexcept
     // it for any plugin that posts async messages.
     juce::ScopedJuceInitialiser_GUI juceInit;
 
-    // Register the formats we host.
-   #if defined(__linux__)
-    juce::addDefaultFormatsToManager (host.formatManager);
-   #else
-    host.formatManager.addDefaultFormats();
-   #endif
+    // Register the formats we host. Compat shim covers the upstream-vs-
+    // wayland-fork API split.
+    focal::juce_compat::addDefaultFormats (host.formatManager);
 
     // 3) Ready handshake.
     {
