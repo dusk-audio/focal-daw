@@ -14,6 +14,8 @@ add_executable(focal-tests
     embedded_modal_close_safety.cpp
     x11_anti_pattern_guard.cpp
     snap_helpers.cpp
+    fade_shapes.cpp
+    crossfade.cpp
     ${CMAKE_SOURCE_DIR}/src/dsp/BrickwallLimiter.cpp)
 
 target_include_directories(focal-tests PRIVATE

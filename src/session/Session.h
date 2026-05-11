@@ -399,6 +399,37 @@ struct MidiRegion
     bool locked = false;
 };
 
+// Fade curve shape applied to a region's fade-in / fade-out (and to the
+// implicit crossfade across overlapping regions on the same track). All
+// shapes map t in [0,1] -> gain in [0,1] with shape(0)=0 and shape(1)=1.
+// Linear is the historical default; EqualPower is constant-power and
+// preserves perceived loudness across crossfade overlaps.
+enum class FadeShape : int
+{
+    Linear     = 0,
+    EqualPower = 1,
+    Sigmoid    = 2,
+    Exp        = 3,
+    Log        = 4
+};
+
+// Apply the shape function. Caller normalises t into [0,1]. Out-of-range
+// inputs are clamped. Used by PlaybackEngine for audio rendering and by
+// AudioRegionEditor for envelope painting; keep in sync.
+inline float applyFadeShape (float t, FadeShape s) noexcept
+{
+    t = juce::jlimit (0.0f, 1.0f, t);
+    switch (s)
+    {
+        case FadeShape::Linear:     return t;
+        case FadeShape::EqualPower: return std::sin (t * juce::MathConstants<float>::halfPi);
+        case FadeShape::Sigmoid:    return t * t * (3.0f - 2.0f * t);
+        case FadeShape::Exp:        return t * t;
+        case FadeShape::Log:        return 1.0f - (1.0f - t) * (1.0f - t);
+    }
+    return t;
+}
+
 // Audio region - references a mono WAV file on disk. Multiple recordings
 // over the same timeline range stack into `previousTakes`; the live take's
 // fields (file/sourceOffset/lengthInSamples) plus that vector form a
@@ -414,12 +445,12 @@ struct AudioRegion
                                       // (matches the writer's channel count)
                                       // and persisted in the session.json.
 
-    // Crossfade ramps in samples. PlaybackEngine applies a linear envelope
-    // when reading: 0..1 across [timelineStart, +fadeInSamples), and 1..0
-    // across [end - fadeOutSamples, end). Zero (default) = no fade,
-    // hard edge. Set by RecordManager when committing a punched take so
-    // the new region crossfades against trimmed outer fragments of the
-    // existing region without an audible click at the punch boundary.
+    // Crossfade ramps in samples. PlaybackEngine applies the configured
+    // shape across [timelineStart, +fadeInSamples) for the in ramp and
+    // across [end - fadeOutSamples, end) for the out ramp. Zero (default) =
+    // no fade, hard edge. Set by RecordManager when committing a punched
+    // take so the new region crossfades against trimmed outer fragments
+    // of the existing region without an audible click at the punch boundary.
     //
     // Invariants (enforced by RecordManager when these are written, and
     // defensively re-clamped by PlaybackEngine::preparePlayback):
@@ -430,6 +461,15 @@ struct AudioRegion
     // produce a notch instead of a flat 1.0 hold.
     juce::int64 fadeInSamples  = 0;
     juce::int64 fadeOutSamples = 0;
+
+    // Per-region fade curve shape. Default Linear matches the original
+    // hard-coded ramp so existing sessions stay byte-identical when no
+    // shape was persisted. EqualPower is the default crossfade choice
+    // (constant power across the overlap when two regions abut). Sigmoid
+    // is an S-curve (smooth at both ends). Exp / Log bias the energy
+    // toward the unity / silent end respectively.
+    FadeShape fadeInShape  = FadeShape::Linear;
+    FadeShape fadeOutShape = FadeShape::Linear;
 
     // Per-region gain in dB. Default 0.0 = unity (no change). Applied
     // multiplicatively in PlaybackEngine's per-sample loop, on top of

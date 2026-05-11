@@ -69,6 +69,19 @@ private:
         juce::int64 sourceOffset    = 0;
         juce::int64 fadeInSamples   = 0;
         juce::int64 fadeOutSamples  = 0;
+        FadeShape   fadeInShape     = FadeShape::Linear;
+        FadeShape   fadeOutShape    = FadeShape::Linear;
+        // Implicit-crossfade overlap windows in TIMELINE samples. Set in
+        // preparePlayback after sorting: if this region overlaps the previous
+        // one in the track's list, overlapPrevStart..timelineStart+0 brackets
+        // the head crossfade window for THIS region (we fade in over it).
+        // Likewise, if this region overlaps the next one, [end - overlapNextLen,
+        // end) brackets the tail (we fade out over it). The shape used for
+        // implicit crossfades is FadeShape::EqualPower so summed power stays
+        // ~unity across the overlap. Explicit per-region fades (fadeIn/OutSamples
+        // > 0) take precedence in their window.
+        juce::int64 overlapPrevLen  = 0;  // crossfade head length, samples
+        juce::int64 overlapNextLen  = 0;  // crossfade tail length, samples
         int         numChannels     = 1;  // 1 = mono region (duplicate to R when stereo strip),
                                            // 2 = stereo region (read L+R from file).
         // Linear gain factor (dB-converted at preparePlayback so the

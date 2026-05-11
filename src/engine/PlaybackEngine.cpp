@@ -72,6 +72,8 @@ void PlaybackEngine::preparePlayback()
             rs.sourceOffset    = region.sourceOffset;
             rs.fadeInSamples   = juce::jmax ((juce::int64) 0, region.fadeInSamples);
             rs.fadeOutSamples  = juce::jmax ((juce::int64) 0, region.fadeOutSamples);
+            rs.fadeInShape     = region.fadeInShape;
+            rs.fadeOutShape    = region.fadeOutShape;
             rs.numChannels     = juce::jlimit (1, 2, region.numChannels);
             // Convert dB once on the message thread; the audio loop
             // multiplies by the linear factor per sample. Clamp the
@@ -105,6 +107,28 @@ void PlaybackEngine::preparePlayback()
                            {
                                return a.timelineStart < b.timelineStart;
                            });
+
+        // Implicit-crossfade overlap detection. Walk adjacent pairs in the
+        // sorted list; when region[i-1] extends into region[i], record the
+        // overlap length on both sides. The audio thread later uses these
+        // to ramp out the leading region + ramp in the trailing region
+        // across the overlap, so summed power stays ~unity instead of
+        // doubling. Only adjacent pairs are handled here; triple-stacked
+        // takes degrade to "newest wins" via existing summation behaviour.
+        for (size_t i = 1; i < stream->regions.size(); ++i)
+        {
+            auto& a = stream->regions[i - 1];
+            auto& b = stream->regions[i];
+            const juce::int64 aEnd = a.timelineStart + a.lengthInSamples;
+            if (aEnd > b.timelineStart)
+            {
+                const juce::int64 overlap = juce::jmin (
+                    aEnd - b.timelineStart,
+                    juce::jmin (a.lengthInSamples, b.lengthInSamples));
+                a.overlapNextLen = overlap;
+                b.overlapPrevLen = overlap;
+            }
+        }
 
         if (! stream->regions.empty())
             streams[(size_t) t] = std::move (stream);
@@ -170,11 +194,23 @@ void PlaybackEngine::readForTrack (int trackIndex,
         // overlap during a crossfade window. Mono regions duplicate the
         // L channel into outR (when outR is non-null) so the strip's
         // stereo path sees a center-panned signal.
-        const juce::int64 fadeIn  = r.fadeInSamples;
-        const juce::int64 fadeOut = r.fadeOutSamples;
+        //
+        // Effective fade = max(explicit, implicit overlap). Shape uses the
+        // user's pick when the explicit length wins, EqualPower otherwise
+        // so two adjacent regions sum to constant power across the overlap.
+        const juce::int64 explicitIn  = r.fadeInSamples;
+        const juce::int64 explicitOut = r.fadeOutSamples;
+        const juce::int64 implicitIn  = r.overlapPrevLen;
+        const juce::int64 implicitOut = r.overlapNextLen;
+        const juce::int64 fadeIn   = juce::jmax (explicitIn,  implicitIn);
+        const juce::int64 fadeOut  = juce::jmax (explicitOut, implicitOut);
+        const FadeShape fadeInShape  = (explicitIn  >= implicitIn)
+                                         ? r.fadeInShape  : FadeShape::EqualPower;
+        const FadeShape fadeOutShape = (explicitOut >= implicitOut)
+                                         ? r.fadeOutShape : FadeShape::EqualPower;
         const juce::int64 regionStart = r.timelineStart;
-        const juce::int64 fadeInGain = (fadeIn > 0) ? fadeIn : 1;
-        const juce::int64 fadeOutGain = (fadeOut > 0) ? fadeOut : 1;
+        const float fadeInDenom  = (fadeIn  > 0) ? (float) fadeIn  : 1.0f;
+        const float fadeOutDenom = (fadeOut > 0) ? (float) fadeOut : 1.0f;
         const auto* srcL = readScratch.getReadPointer (0);
         const auto* srcR = readStereo ? readScratch.getReadPointer (1) : srcL;
         const float regionGain = r.gainLinear;
@@ -186,15 +222,13 @@ void PlaybackEngine::readForTrack (int trackIndex,
             {
                 const juce::int64 inPos = timelineSample - regionStart;
                 if (inPos < fadeIn)
-                    gain *= juce::jlimit (0.0f, 1.0f,
-                                            (float) inPos / (float) fadeInGain);
+                    gain *= applyFadeShape ((float) inPos / fadeInDenom, fadeInShape);
             }
             if (fadeOut > 0)
             {
                 const juce::int64 outPos = regionEnd - timelineSample;
                 if (outPos < fadeOut)
-                    gain *= juce::jlimit (0.0f, 1.0f,
-                                            (float) outPos / (float) fadeOutGain);
+                    gain *= applyFadeShape ((float) outPos / fadeOutDenom, fadeOutShape);
             }
             outL[outOffset + i] += srcL[i] * gain;
             if (outR != nullptr)

@@ -194,6 +194,10 @@ juce::DynamicObject::Ptr trackToObject (const Track& t)
         // don't gain noise. PlaybackEngine treats absent fields as 0.
         if (r.fadeInSamples  > 0) rObj->setProperty ("fade_in",  (juce::int64) r.fadeInSamples);
         if (r.fadeOutSamples > 0) rObj->setProperty ("fade_out", (juce::int64) r.fadeOutSamples);
+        // Fade shapes emit only when non-Linear so older sessions stay
+        // diff-clean. Stored as the int enum value (0..4) matching FadeShape.
+        if (r.fadeInShape  != FadeShape::Linear) rObj->setProperty ("fade_in_shape",  (int) r.fadeInShape);
+        if (r.fadeOutShape != FadeShape::Linear) rObj->setProperty ("fade_out_shape", (int) r.fadeOutShape);
         // Skip gain_db when at unity to keep older sessions diff-clean
         // and avoid bloating the JSON for unedited regions. Float
         // exact-zero comparison is fine because the field is set
@@ -593,6 +597,16 @@ void restoreTrack (Track& t, const juce::var& v)
             r.sourceOffset    = (juce::int64) rv["source_offset"];
             r.fadeInSamples   = rv.hasProperty ("fade_in")  ? (juce::int64) rv["fade_in"]  : 0;
             r.fadeOutSamples  = rv.hasProperty ("fade_out") ? (juce::int64) rv["fade_out"] : 0;
+            auto loadShape = [] (const juce::var& v) -> FadeShape
+            {
+                const int i = (int) v;
+                if (i >= 0 && i <= (int) FadeShape::Log) return (FadeShape) i;
+                return FadeShape::Linear;
+            };
+            r.fadeInShape     = rv.hasProperty ("fade_in_shape")
+                                 ? loadShape (rv["fade_in_shape"])  : FadeShape::Linear;
+            r.fadeOutShape    = rv.hasProperty ("fade_out_shape")
+                                 ? loadShape (rv["fade_out_shape"]) : FadeShape::Linear;
             r.numChannels     = rv.hasProperty ("num_channels") ? (int) rv["num_channels"] : 1;
             r.gainDb          = rv.hasProperty ("gain_db")  ? (float) (double) rv["gain_db"] : 0.0f;
             r.customColour    = rv.hasProperty ("custom_colour")
