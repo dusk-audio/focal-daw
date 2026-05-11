@@ -2,6 +2,7 @@
 #include "../engine/AudioEngine.h"
 #include "../engine/Transport.h"
 #include "../session/RegionEditActions.h"
+#include "../session/SnapHelpers.h"
 #include <cmath>
 #include <limits>
 
@@ -463,6 +464,19 @@ void AudioRegionEditor::paint (juce::Graphics& g)
     paintEditCursor    (g, waveArea);
     paintTransportPlayhead (g, waveArea);
 
+    // Snap guide - thin vertical line at the snapped target of the
+    // active drag. Painted last so it sits on top of every overlay.
+    if (snapGuideTimelineSample >= 0)
+    {
+        const int gx = xForTimelineSample (snapGuideTimelineSample, waveArea);
+        if (gx >= waveArea.getX() && gx < waveArea.getRight())
+        {
+            g.setColour (juce::Colour (0xff80c0ff).withAlpha (0.85f));
+            g.drawVerticalLine (gx, (float) waveArea.getY(),
+                                 (float) waveArea.getBottom());
+        }
+    }
+
     // Stale-region guard: if the indices fell out of range (e.g. user
     // deleted the region while the editor was open), paint a hint.
     if (region() == nullptr)
@@ -658,23 +672,38 @@ void AudioRegionEditor::paintFadeEnvelopes (juce::Graphics& g,
 
     g.setColour (kFadeStroke.withAlpha (0.9f));
 
+    // Sample the configured shape across the fade pixel range so the
+    // painted envelope matches what PlaybackEngine renders. One vertex
+    // per pixel is plenty for the widths we see (8-300 px); cheaper than
+    // a Path::lineTo per sample.
+    auto strokeFade = [&] (int xStart, int xEnd, FadeShape shape, bool isFadeIn)
+    {
+        if (xEnd <= xStart) return;
+        const int span = xEnd - xStart;
+        juce::Path p;
+        for (int i = 0; i <= span; ++i)
+        {
+            const float t = (float) i / (float) span;
+            const float gain = applyFadeShape (isFadeIn ? t : 1.0f - t, shape);
+            const float y = (float) inset.getBottom() - gain * (float) inset.getHeight();
+            const float x = (float) (xStart + i);
+            if (i == 0) p.startNewSubPath (x, y);
+            else        p.lineTo          (x, y);
+        }
+        g.strokePath (p, juce::PathStrokeType (1.4f));
+    };
+
     if (r->fadeInSamples > 0)
     {
         const int xStart = xForSample (r->sourceOffset, area);
         const int xEnd   = xForSample (r->sourceOffset + r->fadeInSamples, area);
-        juce::Path p;
-        p.startNewSubPath ((float) xStart, (float) inset.getBottom());
-        p.lineTo          ((float) xEnd,   (float) inset.getY());
-        g.strokePath (p, juce::PathStrokeType (1.4f));
+        strokeFade (xStart, xEnd, r->fadeInShape, /*isFadeIn*/ true);
     }
     if (r->fadeOutSamples > 0)
     {
         const int xStart = xForSample (r->sourceOffset + r->lengthInSamples - r->fadeOutSamples, area);
         const int xEnd   = xForSample (r->sourceOffset + r->lengthInSamples, area);
-        juce::Path p;
-        p.startNewSubPath ((float) xStart, (float) inset.getY());
-        p.lineTo          ((float) xEnd,   (float) inset.getBottom());
-        g.strokePath (p, juce::PathStrokeType (1.4f));
+        strokeFade (xStart, xEnd, r->fadeOutShape, /*isFadeIn*/ false);
     }
 }
 
@@ -784,9 +813,23 @@ void AudioRegionEditor::mouseDown (const juce::MouseEvent& e)
 
     // Right-click → context menu (split / reset gain / reset fades / mute /
     // lock / colour). Captured here so it doesn't slip through to the
-    // edit-cursor branch below.
+    // edit-cursor branch below. Right-click on a fade handle goes to the
+    // fade-shape submenu instead so the user can pick the curve type.
     if (e.mods.isPopupMenu())
     {
+        if (! r->locked)
+        {
+            if (fadeInHandleRect (waveArea).contains (e.x, e.y))
+            {
+                showFadeShapeMenu (e.getScreenPosition(), /*isFadeIn*/ true);
+                return;
+            }
+            if (fadeOutHandleRect (waveArea).contains (e.x, e.y))
+            {
+                showFadeShapeMenu (e.getScreenPosition(), /*isFadeIn*/ false);
+                return;
+            }
+        }
         if (waveArea.contains (e.x, e.y))
         {
             editCursorSample = sampleForX (e.x, waveArea);
@@ -851,12 +894,27 @@ void AudioRegionEditor::mouseDown (const juce::MouseEvent& e)
 
     if (waveArea.contains (e.x, e.y))
     {
+        const int hitIdx = regionIndexAtX (e.x, waveArea);
+
+        // Shift-drag anywhere in the waveform body OR plain drag in a gap
+        // between regions starts a range selection. Matches Reaper's
+        // body-drag = time-selection muscle memory while keeping a plain
+        // click on a region body free for cursor-drop / move.
+        if (e.mods.isShiftDown() || hitIdx < 0)
+        {
+            rangeStartSample = sampleForX (e.x, waveArea);
+            rangeEndSample   = rangeStartSample;
+            rangeActive      = false;
+            dragMode         = DragMode::Range;
+            repaint();
+            return;
+        }
+
         // Click-to-focus inside the neighborhood view: if the click
         // landed on a DIFFERENT slice than the currently-focused one,
         // swap regionIdx to that slice and re-anchor the edit cursor
         // inside it. Same-slice clicks fall through to the existing
         // edit-cursor-drop + MoveRegion-prep behaviour.
-        const int hitIdx = regionIndexAtX (e.x, waveArea);
         if (hitIdx >= 0 && hitIdx != regionIdx)
         {
             regionIdx = hitIdx;
@@ -897,13 +955,55 @@ void AudioRegionEditor::mouseDrag (const juce::MouseEvent& e)
                                                    getWidth(),
                                                    getHeight() - kIconRowHeight - kRulerHeight - kStatusBarH);
 
+    // Snap-on-drag. Cmd bypasses (matches TransportBar's snap-toggle UI:
+    // permanent toggle for the default, modifier-key escape for one-off
+    // overrides). Snap operates in TIMELINE space (where the user reads
+    // the bar/beat ruler) but the underlying state mutations are
+    // file-sample-based, so we round-trip through the focused slice's
+    // sourceOffset → timelineStart mapping.
+    const bool bypassSnap = e.mods.isCommandDown();
+    const double sampleRate = engine.getCurrentSampleRate();
+
+    auto snapFileSampleToTimelineGrid = [&] (juce::int64 fileSample) -> juce::int64
+    {
+        snapGuideTimelineSample = -1;
+        if (bypassSnap || ! session.snapToGrid) return fileSample;
+        auto* rr = region();
+        if (rr == nullptr) return fileSample;
+        const auto fileToTimeline = rr->timelineStart - rr->sourceOffset;
+        const auto timelineSample = fileSample + fileToTimeline;
+        const auto snapped = snap::snapAbsoluteToGrid (timelineSample, session, sampleRate);
+        if (snapped != timelineSample)
+            snapGuideTimelineSample = snapped;
+        return snapped - fileToTimeline;
+    };
+
+    auto snapDeltaSamples = [&] (juce::int64 delta) -> juce::int64
+    {
+        if (bypassSnap) { snapGuideTimelineSample = -1; return delta; }
+        return snap::snapDeltaToGrid (delta, session, sampleRate);
+    };
+
     if (dragMode == DragMode::MoveCursor)
     {
-        editCursorSample = sampleForX (e.x, waveArea);
-        engine.getTransport().setPlayhead (timelineSampleForX (e.x, waveArea));
-        refreshStatusBarReadouts();
-        repaint();
-        return;
+        // Promote to MoveRegion once the drag exceeds a small threshold,
+        // so a click on the focused slice's body can be dragged-to-move
+        // without losing the cursor-drop behaviour for plain clicks.
+        constexpr int kMoveRegionPromoteThresholdPx = 3;
+        if (! r->locked
+            && std::abs (e.x - e.getMouseDownX()) > kMoveRegionPromoteThresholdPx)
+        {
+            dragMode = DragMode::MoveRegion;
+            // fall through into the MoveRegion branch below
+        }
+        else
+        {
+            editCursorSample = sampleForX (e.x, waveArea);
+            engine.getTransport().setPlayhead (timelineSampleForX (e.x, waveArea));
+            refreshStatusBarReadouts();
+            repaint();
+            return;
+        }
     }
 
     if (dragMode == DragMode::MoveRegion)
@@ -915,16 +1015,20 @@ void AudioRegionEditor::mouseDrag (const juce::MouseEvent& e)
         if (r->locked) return;
         const auto cursorTimeline = timelineSampleForX (e.x, waveArea);
         const auto dragStartTimeline = timelineSampleForX (e.getMouseDownX(), waveArea);
-        const auto delta = cursorTimeline - dragStartTimeline;
-        r->timelineStart = juce::jmax<juce::int64> (0,
-            dragOriginTimelineSample + delta);
+        const auto rawDelta = cursorTimeline - dragStartTimeline;
+        const auto delta = snapDeltaSamples (rawDelta);
+        const auto newStart = juce::jmax<juce::int64> (0, dragOriginTimelineSample + delta);
+        r->timelineStart = newStart;
+        if (! bypassSnap && session.snapToGrid && delta != rawDelta)
+            snapGuideTimelineSample = newStart;
         repaint();
         return;
     }
 
     if (dragMode == DragMode::Range)
     {
-        rangeEndSample = sampleForX (e.x, waveArea);
+        const auto snappedFileSample = snapFileSampleToTimelineGrid (sampleForX (e.x, waveArea));
+        rangeEndSample = snappedFileSample;
         rangeActive = (rangeEndSample != rangeStartSample);
         repaint();
         return;
@@ -934,7 +1038,7 @@ void AudioRegionEditor::mouseDrag (const juce::MouseEvent& e)
     {
         case DragMode::FadeIn:
         {
-            const auto sample = sampleForX (e.x, waveArea);
+            const auto sample = snapFileSampleToTimelineGrid (sampleForX (e.x, waveArea));
             const auto fadeIn = juce::jlimit<juce::int64> (
                 0,
                 juce::jmax<juce::int64> (0, r->lengthInSamples - r->fadeOutSamples),
@@ -944,7 +1048,7 @@ void AudioRegionEditor::mouseDrag (const juce::MouseEvent& e)
         }
         case DragMode::FadeOut:
         {
-            const auto sample = sampleForX (e.x, waveArea);
+            const auto sample = snapFileSampleToTimelineGrid (sampleForX (e.x, waveArea));
             const auto endAbs = r->sourceOffset + r->lengthInSamples;
             const auto fadeOut = juce::jlimit<juce::int64> (
                 0,
@@ -956,7 +1060,9 @@ void AudioRegionEditor::mouseDrag (const juce::MouseEvent& e)
         case DragMode::Gain:
         {
             // 0.1 dB per pixel matches TapeStrip's Alt-drag scale, so the
-            // muscle-memory carries over.
+            // muscle-memory carries over. Vertical drag - no horizontal
+            // snap.
+            snapGuideTimelineSample = -1;
             const float deltaDb = (float) (dragOriginMouseY - e.y) * 0.1f;
             r->gainDb = juce::jlimit (-24.0f, 12.0f, dragOriginGainDb + deltaDb);
             break;
@@ -971,7 +1077,7 @@ void AudioRegionEditor::mouseDrag (const juce::MouseEvent& e)
                 0,
                 regionAtDragStart.sourceOffset
                     + regionAtDragStart.lengthInSamples - 1,
-                sampleForX (e.x, waveArea));
+                snapFileSampleToTimelineGrid (sampleForX (e.x, waveArea)));
             const auto delta = newSourceOffset - regionAtDragStart.sourceOffset;
             r->sourceOffset    = newSourceOffset;
             r->lengthInSamples = regionAtDragStart.lengthInSamples - delta;
@@ -983,7 +1089,7 @@ void AudioRegionEditor::mouseDrag (const juce::MouseEvent& e)
         }
         case DragMode::TrimEnd:
         {
-            const auto endAbs = sampleForX (e.x, waveArea);
+            const auto endAbs = snapFileSampleToTimelineGrid (sampleForX (e.x, waveArea));
             const auto newLength = juce::jlimit<juce::int64> (
                 1,
                 std::numeric_limits<juce::int64>::max(),
@@ -1009,6 +1115,8 @@ void AudioRegionEditor::mouseUp (const juce::MouseEvent&)
             std::swap (rangeStartSample, rangeEndSample);
         rangeActive = (rangeEndSample > rangeStartSample);
         dragMode = DragMode::None;
+        snapGuideTimelineSample = -1;
+        repaint();
         return;
     }
     const bool wasUndoableEdit = (r != nullptr
@@ -1049,6 +1157,7 @@ void AudioRegionEditor::mouseUp (const juce::MouseEvent&)
         }
     }
     dragMode = DragMode::None;
+    snapGuideTimelineSample = -1;
     refreshStatusBarReadouts();
     repaint();
 }
@@ -1112,6 +1221,51 @@ void AudioRegionEditor::showContextMenu (juce::Point<int> screenPos)
                 default: return;
             }
             um.beginNewTransaction (label);
+            um.perform (new RegionEditAction (
+                self->session, self->engine,
+                self->trackIdx, self->regionIdx,
+                before, after));
+            self->refreshStatusBarReadouts();
+            self->repaint();
+        });
+}
+
+void AudioRegionEditor::showFadeShapeMenu (juce::Point<int> screenPos, bool isFadeIn)
+{
+    auto* r = region();
+    if (r == nullptr) return;
+
+    const FadeShape current = isFadeIn ? r->fadeInShape : r->fadeOutShape;
+    juce::PopupMenu m;
+    auto addShape = [&] (FadeShape s, const juce::String& name)
+    {
+        m.addItem ((int) s + 1, name, true, current == s);
+    };
+    addShape (FadeShape::Linear,     "Linear");
+    addShape (FadeShape::EqualPower, "Equal-power");
+    addShape (FadeShape::Sigmoid,    "S-curve");
+    addShape (FadeShape::Exp,        "Exponential");
+    addShape (FadeShape::Log,        "Logarithmic");
+
+    juce::Component::SafePointer<AudioRegionEditor> safe (this);
+    m.showMenuAsync (juce::PopupMenu::Options()
+                        .withTargetScreenArea (juce::Rectangle<int> (
+                            screenPos.x, screenPos.y, 1, 1)),
+        [safe, isFadeIn] (int chosen)
+        {
+            auto* self = safe.getComponent();
+            if (self == nullptr || chosen <= 0) return;
+            auto* rr = self->region();
+            if (rr == nullptr) return;
+            const FadeShape picked = (FadeShape) (chosen - 1);
+            const AudioRegion before = *rr;
+            AudioRegion after = before;
+            if (isFadeIn) after.fadeInShape  = picked;
+            else          after.fadeOutShape = picked;
+            if (after.fadeInShape == before.fadeInShape
+                && after.fadeOutShape == before.fadeOutShape) return;
+            auto& um = self->engine.getUndoManager();
+            um.beginNewTransaction (isFadeIn ? "Fade-in shape" : "Fade-out shape");
             um.perform (new RegionEditAction (
                 self->session, self->engine,
                 self->trackIdx, self->regionIdx,

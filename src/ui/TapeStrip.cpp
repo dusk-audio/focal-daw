@@ -1,6 +1,7 @@
 #include "TapeStrip.h"
 #include "../session/MarkerEditActions.h"
 #include "../session/RegionEditActions.h"
+#include "../session/SnapHelpers.h"
 
 namespace focal
 {
@@ -790,20 +791,7 @@ void TapeStrip::mouseDrag (const juce::MouseEvent& e)
 
         juce::int64 deltaSamples = sampleAtX (e.x) - midiDrag.mouseDownSample;
         // Snap-to-beat - same model as the audio drag below.
-        if (session.snapToGrid)
-        {
-            const double sr  = engine.getCurrentSampleRate();
-            const float  bpm = session.tempoBpm.load();
-            if (sr > 0.0)
-            {
-                const juce::int64 step = (bpm > 0.0f)
-                    ? (juce::int64) (sr * 60.0 / (double) bpm)
-                    : (juce::int64) sr;
-                if (step > 0)
-                    deltaSamples = ((deltaSamples + (deltaSamples >= 0 ? step / 2 : -step / 2))
-                                       / step) * step;
-            }
-        }
+        deltaSamples = snap::snapDeltaToGrid (deltaSamples, session, engine.getCurrentSampleRate());
         const auto newStart = juce::jmax<juce::int64> (
             0, midiDrag.origTimelineStart + deltaSamples);
         v[(size_t) midiDrag.regionIdx].timelineStart = newStart;
@@ -850,20 +838,9 @@ void TapeStrip::mouseDrag (const juce::MouseEvent& e)
             juce::int64 newPos = juce::jmax ((juce::int64) 0, cur);
             if (session.snapToGrid)
             {
-                const double sr  = engine.getCurrentSampleRate();
-                const float  bpm = session.tempoBpm.load();
-                if (sr > 0.0)
-                {
-                    const juce::int64 step = (bpm > 0.0f)
-                        ? (juce::int64) (sr * 60.0 / (double) bpm)
-                        : (juce::int64) sr;
-                    if (step > 0)
-                    {
-                        juce::int64 delta = cur - markerDrag.mouseDownSample;
-                        delta = ((delta + (delta >= 0 ? step / 2 : -step / 2)) / step) * step;
-                        newPos = juce::jmax ((juce::int64) 0, markerDrag.originSample + delta);
-                    }
-                }
+                const auto delta = snap::snapDeltaToGrid (cur - markerDrag.mouseDownSample,
+                                                          session, engine.getCurrentSampleRate());
+                newPos = juce::jmax ((juce::int64) 0, markerDrag.originSample + delta);
             }
             session.getMarkers()[(size_t) markerDrag.index].timelineSamples = newPos;
             repaint();
@@ -959,22 +936,7 @@ void TapeStrip::mouseDrag (const juce::MouseEvent& e)
     // The delta is rounded (not the absolute target) so a region whose
     // origin is mid-step stays mid-step on small drags - only large
     // drags re-align it to the grid.
-    if (session.snapToGrid)
-    {
-        const double sr  = engine.getCurrentSampleRate();
-        const float  bpm = session.tempoBpm.load();
-        if (sr > 0.0)
-        {
-            const juce::int64 step = (bpm > 0.0f)
-                ? (juce::int64) (sr * 60.0 / (double) bpm)
-                : (juce::int64) sr;
-            if (step > 0)
-            {
-                deltaSamples = ((deltaSamples + (deltaSamples >= 0 ? step / 2 : -step / 2))
-                                / step) * step;
-            }
-        }
-    }
+    deltaSamples = snap::snapDeltaToGrid (deltaSamples, session, engine.getCurrentSampleRate());
 
     constexpr juce::int64 kMinLengthSamples = 1024;  // ~21 ms @ 48k
     auto& r = regions[(size_t) drag.regionIdx];
@@ -1447,12 +1409,7 @@ void TapeStrip::mouseDoubleClick (const juce::MouseEvent& e)
     // position rather than a delta - new regions have no prior origin
     // to be "mid-step" relative to. The user can override by toggling
     // snap off before the double-click.
-    if (session.snapToGrid && bpm > 0.0f)
-    {
-        const juce::int64 step = (juce::int64) (sr * 60.0 / (double) bpm);
-        if (step > 0)
-            startSample = ((startSample + step / 2) / step) * step;
-    }
+    startSample = snap::snapAbsoluteToGrid (startSample, session, sr);
 
     const juce::int64 fourBarsSamples =
         (juce::int64) (sr * 60.0 / (double) bpm * (double) beatsBar * 4.0);

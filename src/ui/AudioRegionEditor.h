@@ -113,6 +113,10 @@ private:
     juce::int64 dragOriginSample  = 0;    // edit-cursor anchor for relative drags
     int         dragOriginMouseY  = 0;    // for the gain drag (vertical)
     float       dragOriginGainDb  = 0.0f;
+    // When >= 0, paint a 1-px vertical guide at this TIMELINE sample so
+    // the user can see exactly where the active drag will snap. Cleared
+    // on mouseUp. Driven by the snap helpers in mouseDrag.
+    juce::int64 snapGuideTimelineSample = -1;
 
     // Hit-test helpers - return the rect of each draggable handle within
     // the waveform area, or empty when the handle isn't currently visible
@@ -129,6 +133,10 @@ private:
     // UndoManager so Cmd+Z reverts. screenPos anchors the popup at the
     // click location (mouseDown forwards it from the MouseEvent).
     void showContextMenu (juce::Point<int> screenPos);
+
+    // Right-click on a fade handle: pick the in / out fade curve shape.
+    // `isFadeIn` selects which shape field the chosen value writes to.
+    void showFadeShapeMenu (juce::Point<int> screenPos, bool isFadeIn);
 
     // Properties button → real region inspector popup (rename / colour /
     // mute / lock / delete). Replaces the old behaviour where the button
