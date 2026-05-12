@@ -81,5 +81,12 @@ private:
 #endif
 
     void updateGainTargets() noexcept;
+
+    // VU-RMS smoother state. Block-RMS is integrated at 300 ms tau on the
+    // audio thread so the published atom matches what TapeMachine writes
+    // internally for its own VU - keeps mixer + TapeMachine meters in sync.
+    double sampleRateForMeter = 44100.0;
+    float  vuRmsLinL = 0.0f;
+    float  vuRmsLinR = 0.0f;
 };
 } // namespace focal

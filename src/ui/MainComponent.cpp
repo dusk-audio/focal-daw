@@ -22,6 +22,41 @@
 
 namespace focal
 {
+// Tracks the top-level window so AuxView's editor hosts (separate X11
+// toplevels on Linux/Wayland) can follow the main window across the
+// screen. Override targets ComponentMovementWatcher protected virtuals.
+class MainComponent::TopLevelMovementWatcher : public juce::ComponentMovementWatcher
+{
+public:
+    TopLevelMovementWatcher (juce::Component& target, MainComponent& ownerIn)
+        : juce::ComponentMovementWatcher (&target), owner (ownerIn) {}
+
+    using juce::ComponentMovementWatcher::componentMovedOrResized;
+    using juce::ComponentMovementWatcher::componentVisibilityChanged;
+
+    void componentMovedOrResized (bool /*wasMoved*/, bool /*wasResized*/) override
+    {
+        if (owner.auxView != nullptr)
+            owner.auxView->repositionAllHosts();
+    }
+    void componentPeerChanged() override
+    {
+        if (owner.auxView != nullptr)
+            owner.auxView->repositionAllHosts();
+    }
+    void componentVisibilityChanged() override
+    {
+        if (owner.auxView != nullptr)
+        {
+            const bool vis = getComponent() != nullptr && getComponent()->isVisible();
+            owner.auxView->setAllHostsHidden (! vis);
+        }
+    }
+
+private:
+    MainComponent& owner;
+};
+
 namespace
 {
 // Focal-styled "save changes before quitting?" panel hosted by
@@ -454,6 +489,18 @@ MainComponent::~MainComponent()
     juce::LookAndFeel::setDefaultLookAndFeel (nullptr);
 }
 
+void MainComponent::parentHierarchyChanged()
+{
+    juce::Component::parentHierarchyChanged();
+    // Install the top-level movement watcher exactly once, after the
+    // host top-level (the DocumentWindow that owns us) is attached.
+    if (topLevelMovementWatcher == nullptr)
+    {
+        if (auto* tlw = getTopLevelComponent(); tlw != nullptr && tlw != this)
+            topLevelMovementWatcher = std::make_unique<TopLevelMovementWatcher> (*tlw, *this);
+    }
+}
+
 void MainComponent::paint (juce::Graphics& g)
 {
     g.fillAll (juce::Colour (0xff0d0d0f));
@@ -467,6 +514,41 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     const bool cmd     = mods.isCommandDown();   // Ctrl on Linux/Windows, Cmd on macOS
     const bool shift   = mods.isShiftDown();
     const bool noMods  = ! cmd && ! shift && ! mods.isAltDown();
+
+    // ── Edit-mode shortcuts (Ardour-style). 'G' picks Grab Mode so the
+    // user can flip back to move/select after a Range or Cut detour. No
+    // modifiers so it never collides with the Cmd+letter clipboard ops.
+    if (code == 'G' && noMods)
+    {
+        session.editMode = EditMode::Grab;
+        if (audioEditor != nullptr) audioEditor->syncEditModeToolbar();
+        if (pianoRoll   != nullptr) pianoRoll->syncEditModeToolbar();
+        if (tapeStrip   != nullptr) tapeStrip->repaint();
+        return true;
+    }
+
+    // ── TapeStrip zoom: '=' / '+' zoom in, '-' zoom out, '0' fit.
+    // Skipped when a modal editor (audio / piano roll) has focus —
+    // those have their own zoom keypress paths and grab focus first.
+    if (tapeStrip != nullptr && audioEditor == nullptr && pianoRoll == nullptr)
+    {
+        const auto ch = key.getTextCharacter();
+        if (noMods && (ch == '=' || ch == '+'))
+        {
+            tapeStrip->zoomByFactor (1.15f);
+            return true;
+        }
+        if (noMods && ch == '-')
+        {
+            tapeStrip->zoomByFactor (1.0f / 1.15f);
+            return true;
+        }
+        if (noMods && ch == '0')
+        {
+            tapeStrip->zoomFit();
+            return true;
+        }
+    }
 
     // ── Edit: Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z, Ctrl/Cmd+Y ──
     if (code == 'Z' && cmd && ! shift) { um.undo(); return true; }
@@ -1930,7 +2012,7 @@ void MainComponent::openPianoRoll (int trackIdx, int regionIdx)
     pianoRoll = std::make_unique<PianoRollComponent> (session, engine, trackIdx, regionIdx);
     pianoRollTrackIdx  = trackIdx;
     pianoRollRegionIdx = regionIdx;
-    pianoRollDim = std::make_unique<DimOverlay>();
+    pianoRollDim = std::make_unique<DimOverlay> (0.80f);
 
     // Sized as a centred panel that leaves a small inset on each side so
     // the dimmed backdrop is still visible (helps users see they're in a
@@ -1987,7 +2069,7 @@ void MainComponent::openAudioEditor (int trackIdx, int regionIdx)
     audioEditor = std::make_unique<AudioRegionEditor> (session, engine, trackIdx, regionIdx);
     audioEditorTrackIdx  = trackIdx;
     audioEditorRegionIdx = regionIdx;
-    audioEditorDim = std::make_unique<DimOverlay>();
+    audioEditorDim = std::make_unique<DimOverlay> (0.80f);
 
     const auto bounds = getLocalBounds();
     const int inset = juce::jmax (24, juce::jmin (bounds.getWidth(), bounds.getHeight()) / 16);

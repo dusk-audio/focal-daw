@@ -154,6 +154,15 @@ void ChannelCompEditor::refreshLabelsForMode()
     releaseLabel.setText (release, juce::dontSendNotification);
     makeupLabel .setText (makeup,  juce::dontSendNotification);
 
+    // Per-mode threshold knob range. FET's "INPUT" knob is drive (0..40 dB)
+    // into the DSP's fixed -10 dBFS detection threshold — the real 1176
+    // has no threshold control. Opto / VCA use the generic -60..0 dB
+    // threshold scale.
+    if (m == 1)
+        threshKnob.setRange (0.0,   40.0, 0.1);
+    else
+        threshKnob.setRange (-60.0, 0.0,  0.1);
+
     // HIDE knobs that don't drive anything in the active mode rather than
     // dimming them. Opto's threshold (peak-red) and makeup (gain) are the
     // only meaningful controls - the optical model's attack/release/ratio
@@ -224,17 +233,12 @@ void ChannelCompEditor::writeThresholdToMode()
         }
         case 1: // FET
         {
-            // Threshold drives the input gain stage; output is the chain-
-            // compensation MINUS the user's separately-set makeup. This
-            // cooperates with writeMakeupToMode so adjusting threshold no
-            // longer wipes any makeup the user has dialled in. Makeup-intent
-            // is tracked in the legacy `compMakeupDb` field (re-purposed as
-            // the unified user-makeup atom across modes).
-            const float drive  = juce::jlimit (0.0f, 40.0f, -threshDb);
-            const float makeup = track.strip.compMakeupDb.load (std::memory_order_relaxed);
-            track.strip.compFetInput .store (drive, std::memory_order_relaxed);
-            track.strip.compFetOutput.store (juce::jlimit (-20.0f, 20.0f, -drive + makeup),
-                                              std::memory_order_relaxed);
+            // INPUT knob writes drive directly into the FET's fixed-threshold
+            // detector — matches hardware 1176 (no threshold control). Output
+            // is independent; no chain coupling so dragging INPUT doesn't
+            // mysteriously change output level.
+            const float drive = juce::jlimit (0.0f, 40.0f, threshDb);
+            track.strip.compFetInput.store (drive, std::memory_order_relaxed);
             break;
         }
         case 2: // VCA: direct
@@ -326,10 +330,9 @@ void ChannelCompEditor::writeMakeupToMode()
             track.strip.compOptoGain.store (pct, std::memory_order_relaxed);
             break;
         }
-        case 1: // FET: cooperative - apply makeup ON TOP of threshold's chain comp
+        case 1: // FET: independent OUTPUT knob, no chain coupling.
         {
-            const float drive  = track.strip.compFetInput.load (std::memory_order_relaxed);
-            track.strip.compFetOutput.store (juce::jlimit (-20.0f, 20.0f, -drive + dB),
+            track.strip.compFetOutput.store (juce::jlimit (-20.0f, 20.0f, dB),
                                               std::memory_order_relaxed);
             break;
         }
@@ -359,8 +362,10 @@ void ChannelCompEditor::syncKnobsFromMode()
         }
         case 1: // FET
         {
-            const float drive = track.strip.compFetInput.load (std::memory_order_relaxed);
-            threshKnob.setValue (-drive, juce::dontSendNotification);
+            // INPUT knob mirrors compFetInput drive directly (0..40 dB).
+            // OUTPUT knob mirrors compFetOutput directly — both independent.
+            threshKnob.setValue (track.strip.compFetInput.load  (std::memory_order_relaxed),
+                                    juce::dontSendNotification);
             // Map the discrete FET ratio index back to the unified ratio knob's
             // continuous scale. Mirrors the inverse of writeRatioToMode():
             //   0=4:1, 1=8:1, 2=12:1, 3=20:1, 4=All (clamped to display max).
@@ -370,9 +375,7 @@ void ChannelCompEditor::syncKnobsFromMode()
             ratioKnob.setValue   (kFetRatioDisplay[ratioIdx], juce::dontSendNotification);
             attackKnob.setValue  (track.strip.compFetAttack.load  (std::memory_order_relaxed), juce::dontSendNotification);
             releaseKnob.setValue (track.strip.compFetRelease.load (std::memory_order_relaxed), juce::dontSendNotification);
-            // Show the user's makeup intent (compMakeupDb), NOT the derived
-            // compFetOutput - the latter includes the threshold's chain comp.
-            makeupKnob.setValue  (track.strip.compMakeupDb.load   (std::memory_order_relaxed), juce::dontSendNotification);
+            makeupKnob.setValue  (track.strip.compFetOutput.load  (std::memory_order_relaxed), juce::dontSendNotification);
             break;
         }
         case 2: // VCA
@@ -563,10 +566,7 @@ void writeThresholdForMode (Track& t, float threshDb)
         case 1:
         {
             const float drive = juce::jlimit (0.0f, 40.0f, -threshDb);
-            const float makeup = t.strip.compMakeupDb.load (std::memory_order_relaxed);
-            t.strip.compFetInput .store (drive, std::memory_order_relaxed);
-            t.strip.compFetOutput.store (juce::jlimit (-20.0f, 20.0f, -drive + makeup),
-                                          std::memory_order_relaxed);
+            t.strip.compFetInput.store (drive, std::memory_order_relaxed);
             break;
         }
         case 2:

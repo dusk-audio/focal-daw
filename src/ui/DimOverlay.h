@@ -15,7 +15,11 @@ namespace focal
 class DimOverlay final : public juce::Component
 {
 public:
-    DimOverlay();
+    // alpha is the fill darkness, 0..1. Default 0.55 matches the
+    // CallOutBox / startup / tuner usage; modal editors (audio region,
+    // piano roll) pass a heavier value (~0.80) so the DAW behind reads
+    // as background rather than co-equal context.
+    explicit DimOverlay (float alpha = 0.55f);
 
     void paint (juce::Graphics& g) override;
     void mouseDown (const juce::MouseEvent& e) override;
@@ -24,6 +28,8 @@ public:
     std::function<void()> onClick;
 
 private:
+    float fillAlpha;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DimOverlay)
 };
 } // namespace focal

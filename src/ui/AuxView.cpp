@@ -38,7 +38,7 @@ AuxView::AuxView (Session& session, AudioEngine& engine)
         // editors and timer callbacks survive across selector switches;
         // only the active one is visible.
         lanes[(size_t) i] = std::make_unique<AuxLaneComponent> (
-            session.auxLane (i), engine.getAuxLaneStrip (i), i);
+            session.auxLane (i), engine.getAuxLaneStrip (i), i, engine);
         addChildComponent (lanes[(size_t) i].get());
     }
 
@@ -63,9 +63,44 @@ void AuxView::setActiveLane (int index)
     {
         selectorButtons[(size_t) i].setToggleState (i == index, juce::dontSendNotification);
         if (lanes[(size_t) i] != nullptr)
-            lanes[(size_t) i]->setVisible (i == index);
+        {
+            const bool active = (i == index);
+            lanes[(size_t) i]->setVisible (active);
+            // Editor hosts are X11 toplevels separate from the JUCE
+            // visibility tree - hide them explicitly when their lane
+            // isn't active, else they keep floating over the screen.
+            lanes[(size_t) i]->setEditorHostsHidden (! active || ! isVisible());
+        }
     }
     resized();
+    repositionAllHosts();
+}
+
+void AuxView::repositionAllHosts()
+{
+    if (activeLaneIndex < 0 || activeLaneIndex >= Session::kNumAuxLanes) return;
+    if (auto* lane = lanes[(size_t) activeLaneIndex].get())
+        lane->repositionEditorHosts();
+}
+
+void AuxView::setAllHostsHidden (bool hidden)
+{
+    for (auto& lane : lanes)
+        if (lane != nullptr)
+            lane->setEditorHostsHidden (hidden);
+}
+
+void AuxView::visibilityChanged()
+{
+    // Whole AUX view swapped out (user picked MIXING / RECORDING /
+    // MASTERING) or back in. Hide / re-show only the active lane's host
+    // since inactive lanes' hosts are already hidden.
+    const bool nowVisible = isVisible();
+    for (int i = 0; i < Session::kNumAuxLanes; ++i)
+        if (lanes[(size_t) i] != nullptr)
+            lanes[(size_t) i]->setEditorHostsHidden (! nowVisible || i != activeLaneIndex);
+    if (nowVisible)
+        repositionAllHosts();
 }
 
 void AuxView::paint (juce::Graphics& g)

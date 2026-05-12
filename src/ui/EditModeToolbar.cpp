@@ -1,0 +1,319 @@
+#include "EditModeToolbar.h"
+
+namespace focal
+{
+namespace
+{
+const juce::Colour kBg          { 0xff181820 };
+const juce::Colour kBorder      { 0xff404048 };
+const juce::Colour kButtonFill  { 0xff282830 };
+const juce::Colour kButtonHover { 0xff363642 };
+const juce::Colour kActiveRim   { 0xff80c0ff };
+const juce::Colour kGlyph       { 0xffd0d0d8 };
+const juce::Colour kGlyphActive { 0xffffffff };
+
+void paintGrabGlyph (juce::Graphics& g, juce::Rectangle<float> r)
+{
+    // Stylised hand: square palm + four short fingers extended up + thumb
+    // angled off the left. Matches Ardour's Grab-Mode glyph at a glance
+    // without needing a bitmap asset.
+    const float cx = r.getCentreX();
+    const float cy = r.getCentreY();
+    const float s  = juce::jmin (r.getWidth(), r.getHeight());
+    const float palmW  = s * 0.50f;
+    const float palmH  = s * 0.40f;
+    const float fingerW = s * 0.10f;
+    const float fingerH = s * 0.32f;
+    const float palmX  = cx - palmW * 0.5f;
+    const float palmY  = cy + s * 0.02f;     // palm sits slightly below centre
+
+    juce::Path p;
+    p.addRoundedRectangle (palmX, palmY, palmW, palmH, 2.0f);
+    // Four fingers across the top of the palm, top edge above palmY.
+    for (int i = 0; i < 4; ++i)
+    {
+        const float slot = palmW / 4.0f;
+        const float fx   = palmX + slot * (float) i + (slot - fingerW) * 0.5f;
+        p.addRoundedRectangle (fx, palmY - fingerH * 0.85f,
+                                  fingerW, fingerH, 1.5f);
+    }
+    // Thumb on the left side, angled slightly outward via translation only
+    // (path-rotate isn't worth the indirection at this size).
+    p.addRoundedRectangle (palmX - fingerW * 0.85f,
+                              palmY + palmH * 0.15f,
+                              fingerW, palmH * 0.65f, 1.5f);
+    g.fillPath (p);
+}
+
+void paintRangeGlyph (juce::Graphics& g, juce::Rectangle<float> r)
+{
+    // Horizontal double-arrow with end caps - selection range.
+    const float cy = r.getCentreY();
+    const float x0 = r.getX() + 4.0f;
+    const float x1 = r.getRight() - 4.0f;
+    juce::Path p;
+    // Bar line
+    p.startNewSubPath (x0 + 4.0f, cy); p.lineTo (x1 - 4.0f, cy);
+    // Left cap
+    p.startNewSubPath (x0, cy - 4.0f); p.lineTo (x0, cy + 4.0f);
+    p.startNewSubPath (x0 + 4.0f, cy); p.lineTo (x0, cy - 3.0f);
+    p.startNewSubPath (x0 + 4.0f, cy); p.lineTo (x0, cy + 3.0f);
+    // Right cap
+    p.startNewSubPath (x1, cy - 4.0f); p.lineTo (x1, cy + 4.0f);
+    p.startNewSubPath (x1 - 4.0f, cy); p.lineTo (x1, cy - 3.0f);
+    p.startNewSubPath (x1 - 4.0f, cy); p.lineTo (x1, cy + 3.0f);
+    g.strokePath (p, juce::PathStrokeType (1.4f));
+}
+
+void paintCutGlyph (juce::Graphics& g, juce::Rectangle<float> r)
+{
+    // Scissors-ish: two crossing strokes with small loops.
+    const float cx = r.getCentreX();
+    const float cy = r.getCentreY();
+    const float a  = juce::jmin (r.getWidth(), r.getHeight()) * 0.32f;
+    juce::Path p;
+    p.startNewSubPath (cx - a, cy - a); p.lineTo (cx + a, cy + a);
+    p.startNewSubPath (cx + a, cy - a); p.lineTo (cx - a, cy + a);
+    g.strokePath (p, juce::PathStrokeType (1.6f));
+    // Loop bottoms
+    g.drawEllipse (cx - a - 1.5f, cy + a - 1.5f, 3.0f, 3.0f, 1.2f);
+    g.drawEllipse (cx + a - 1.5f, cy + a - 1.5f, 3.0f, 3.0f, 1.2f);
+}
+
+void paintGridGlyph (juce::Graphics& g, juce::Rectangle<float> r)
+{
+    const auto inner = r.reduced (4.0f);
+    const float step = inner.getWidth() / 3.0f;
+    juce::Path p;
+    for (int i = 1; i < 3; ++i)
+    {
+        const float x = inner.getX() + step * (float) i;
+        const float y = inner.getY() + step * (float) i;
+        p.startNewSubPath (x, inner.getY());     p.lineTo (x, inner.getBottom());
+        p.startNewSubPath (inner.getX(), y);     p.lineTo (inner.getRight(), y);
+    }
+    g.strokePath (p, juce::PathStrokeType (1.0f));
+    g.drawRect (inner, 1.0f);
+}
+
+void paintDrawGlyph (juce::Graphics& g, juce::Rectangle<float> r)
+{
+    // Pencil pointing top-right.
+    const float x0 = r.getX() + 5.0f;
+    const float y0 = r.getBottom() - 5.0f;
+    const float x1 = r.getRight() - 5.0f;
+    const float y1 = r.getY() + 5.0f;
+    juce::Path p;
+    p.startNewSubPath (x0, y0); p.lineTo (x1, y1);
+    p.startNewSubPath (x1 - 4.0f, y1 + 1.0f); p.lineTo (x1, y1); p.lineTo (x1 - 1.0f, y1 + 4.0f);
+    g.strokePath (p, juce::PathStrokeType (1.6f));
+}
+} // namespace
+
+EditModeToolbar::ModeButton::ModeButton (const juce::String& name, EditMode m)
+    : juce::Button (name), mode (m)
+{
+    setClickingTogglesState (false);
+    setMouseCursor (juce::MouseCursor::PointingHandCursor);
+    // Don't steal keyboard focus from the host modal on click — otherwise
+    // a follow-up Ctrl+Z lands on the button instead of the editor's
+    // keyPressed handler.
+    setMouseClickGrabsKeyboardFocus (false);
+    setWantsKeyboardFocus (false);
+}
+
+void EditModeToolbar::ModeButton::paintButton (juce::Graphics& g,
+                                                  bool isMouseOver, bool /*isButtonDown*/)
+{
+    auto r = getLocalBounds().toFloat().reduced (2.0f);
+    g.setColour (isMouseOver ? kButtonHover : kButtonFill);
+    g.fillRoundedRectangle (r, 3.0f);
+    g.setColour (active ? kActiveRim : kBorder);
+    g.drawRoundedRectangle (r, 3.0f, active ? 1.6f : 1.0f);
+
+    g.setColour (active ? kGlyphActive : kGlyph);
+    switch (mode)
+    {
+        case EditMode::Grab:  paintGrabGlyph  (g, r); break;
+        case EditMode::Range: paintRangeGlyph (g, r); break;
+        case EditMode::Cut:   paintCutGlyph   (g, r); break;
+        case EditMode::Grid:  paintGridGlyph  (g, r); break;
+        case EditMode::Draw:  paintDrawGlyph  (g, r); break;
+    }
+}
+
+EditModeToolbar::EditModeToolbar (AudioEngine& engineRef) : engine (engineRef)
+{
+    auto wireButton = [this] (ModeButton& b)
+    {
+        b.onClick = [this, &b] { setEditMode (b.getMode()); };
+        addAndMakeVisible (b);
+    };
+    wireButton (grabButton);
+    wireButton (rangeButton);
+    wireButton (cutButton);
+    wireButton (gridButton);
+    wireButton (drawButton);
+
+    grabButton.setTooltip  ("Grab Mode (select/move objects)\nShortcut: G");
+    rangeButton.setTooltip ("Range Mode (select time ranges)\nShortcut: R");
+    cutButton.setTooltip   ("Cut Mode (split regions)\nShortcut: C");
+    gridButton.setTooltip  ("Grid Mode (edit tempo-map, drag/drop music-time grid)");
+    drawButton.setTooltip  ("Draw Mode (draw and edit notes / region gain envelope)");
+
+    snapToggleButton.setClickingTogglesState (true);
+    snapToggleButton.setToggleState (engine.getSession().snapToGrid, juce::dontSendNotification);
+    snapToggleButton.setMouseClickGrabsKeyboardFocus (false);
+    snapToggleButton.setWantsKeyboardFocus (false);
+    // Toggle-on uses the same accent-rim colour as the active edit-mode
+    // button so the user gets a clear "snap is on" cue. JUCE default
+    // toggle look only differs subtly in shade between states — too
+    // easy to miss in a row of similar buttons.
+    snapToggleButton.setColour (juce::TextButton::buttonOnColourId,  kActiveRim);
+    snapToggleButton.setColour (juce::TextButton::buttonColourId,    kButtonFill);
+    snapToggleButton.setColour (juce::TextButton::textColourOnId,    juce::Colours::black);
+    snapToggleButton.setColour (juce::TextButton::textColourOffId,   kGlyph);
+    snapToggleButton.onClick = [this]
+    {
+        engine.getSession().snapToGrid = snapToggleButton.getToggleState();
+        if (onSnapChanged) onSnapChanged();
+    };
+    addAndMakeVisible (snapToggleButton);
+
+    snapResolutionButton.setTooltip ("Snap resolution (musical / triplet / dotted / timecode)");
+    snapResolutionButton.setMouseClickGrabsKeyboardFocus (false);
+    snapResolutionButton.setWantsKeyboardFocus (false);
+    snapResolutionButton.onClick = [this] { showSnapResolutionMenu(); };
+    addAndMakeVisible (snapResolutionButton);
+
+    syncFromSession();
+}
+
+juce::String EditModeToolbar::labelFor (SnapResolution r)
+{
+    switch (r)
+    {
+        case SnapResolution::Bar:              return "Bar";
+        case SnapResolution::Half:             return "1/2 Note";
+        case SnapResolution::Quarter:          return "1/4 Note";
+        case SnapResolution::Eighth:           return "1/8 Note";
+        case SnapResolution::Sixteenth:        return "1/16 Note";
+        case SnapResolution::ThirtySecond:     return "1/32 Note";
+        case SnapResolution::SixtyFourth:      return "1/64 Note";
+        case SnapResolution::OneTwentyEighth:  return "1/128 Note";
+        case SnapResolution::HalfTriplet:      return "1/2 Triplet";
+        case SnapResolution::QuarterTriplet:   return "1/4 Triplet";
+        case SnapResolution::EighthTriplet:    return "1/8 Triplet";
+        case SnapResolution::SixteenthTriplet: return "1/16 Triplet";
+        case SnapResolution::ThirtySecondTrip: return "1/32 Triplet";
+        case SnapResolution::HalfDotted:       return "1/2 Dotted";
+        case SnapResolution::QuarterDotted:    return "1/4 Dotted";
+        case SnapResolution::EighthDotted:     return "1/8 Dotted";
+        case SnapResolution::SixteenthDotted:  return "1/16 Dotted";
+        case SnapResolution::Timecode:         return "Timecode";
+        case SnapResolution::MinSec:           return "MinSec";
+        case SnapResolution::CDFrames:         return "CD Frames";
+    }
+    return "1/4 Note";
+}
+
+void EditModeToolbar::showSnapResolutionMenu()
+{
+    const auto current = engine.getSession().snapResolution;
+    auto makeItem = [&] (juce::PopupMenu& m, SnapResolution r)
+    {
+        m.addItem ((int) r + 1, labelFor (r), true, current == r);
+    };
+
+    juce::PopupMenu m;
+    makeItem (m, SnapResolution::Bar);
+    makeItem (m, SnapResolution::Half);
+    makeItem (m, SnapResolution::Quarter);
+    makeItem (m, SnapResolution::Eighth);
+    makeItem (m, SnapResolution::Sixteenth);
+    makeItem (m, SnapResolution::ThirtySecond);
+    makeItem (m, SnapResolution::SixtyFourth);
+    makeItem (m, SnapResolution::OneTwentyEighth);
+
+    juce::PopupMenu triplets;
+    makeItem (triplets, SnapResolution::HalfTriplet);
+    makeItem (triplets, SnapResolution::QuarterTriplet);
+    makeItem (triplets, SnapResolution::EighthTriplet);
+    makeItem (triplets, SnapResolution::SixteenthTriplet);
+    makeItem (triplets, SnapResolution::ThirtySecondTrip);
+    m.addSubMenu ("Triplets", triplets);
+
+    juce::PopupMenu dotted;
+    makeItem (dotted, SnapResolution::HalfDotted);
+    makeItem (dotted, SnapResolution::QuarterDotted);
+    makeItem (dotted, SnapResolution::EighthDotted);
+    makeItem (dotted, SnapResolution::SixteenthDotted);
+    m.addSubMenu ("Dotted", dotted);
+
+    m.addSeparator();
+    makeItem (m, SnapResolution::Timecode);
+    makeItem (m, SnapResolution::MinSec);
+    makeItem (m, SnapResolution::CDFrames);
+
+    juce::Component::SafePointer<EditModeToolbar> safe (this);
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&snapResolutionButton),
+        [safe] (int chosen)
+        {
+            auto* self = safe.getComponent();
+            if (self == nullptr || chosen <= 0) return;
+            const int v = chosen - 1;
+            if (v < 0 || v > (int) SnapResolution::CDFrames) return;
+            self->engine.getSession().snapResolution = (SnapResolution) v;
+            self->snapResolutionButton.setButtonText (labelFor ((SnapResolution) v));
+            if (self->onSnapChanged) self->onSnapChanged();
+        });
+}
+
+void EditModeToolbar::syncFromSession()
+{
+    updateButtonStates();
+    snapToggleButton.setToggleState (engine.getSession().snapToGrid, juce::dontSendNotification);
+    snapResolutionButton.setButtonText (labelFor (engine.getSession().snapResolution));
+}
+
+void EditModeToolbar::updateButtonStates()
+{
+    const auto current = engine.getSession().editMode;
+    grabButton.setActive  (current == EditMode::Grab);
+    rangeButton.setActive (current == EditMode::Range);
+    cutButton.setActive   (current == EditMode::Cut);
+    gridButton.setActive  (current == EditMode::Grid);
+    drawButton.setActive  (current == EditMode::Draw);
+}
+
+void EditModeToolbar::setEditMode (EditMode m)
+{
+    if (engine.getSession().editMode == m) return;
+    engine.getSession().editMode = m;
+    updateButtonStates();
+    if (onEditModeChanged) onEditModeChanged();
+}
+
+void EditModeToolbar::paint (juce::Graphics& g)
+{
+    g.fillAll (kBg);
+    g.setColour (kBorder);
+    g.drawHorizontalLine (getHeight() - 1, 0.0f, (float) getWidth());
+}
+
+void EditModeToolbar::resized()
+{
+    auto r = getLocalBounds().reduced (4, 6);
+    constexpr int kBtn = 36;
+    constexpr int kGap = 3;
+    for (auto* b : { &grabButton, &rangeButton, &cutButton, &gridButton, &drawButton })
+    {
+        b->setBounds (r.removeFromLeft (kBtn));
+        r.removeFromLeft (kGap);
+    }
+    r.removeFromLeft (12);  // group separator
+    snapToggleButton.setBounds (r.removeFromLeft (56));
+    r.removeFromLeft (4);
+    snapResolutionButton.setBounds (r.removeFromLeft (110));
+}
+} // namespace focal

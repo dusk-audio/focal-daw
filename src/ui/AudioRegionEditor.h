@@ -14,6 +14,7 @@
 namespace focal
 {
 class AudioEngine;
+class EditModeToolbar;
 
 // Modal editor for one AudioRegion. Sister to PianoRollComponent. Shows
 // the slice's waveform via juce::AudioThumbnail and overlays the fade
@@ -56,7 +57,7 @@ public:
     bool keyPressed     (const juce::KeyPress&) override;
 
     // Visual constants exposed so the host overlay can size itself.
-    static constexpr int kIconRowHeight = 36;   // top - 8 action icons
+    static constexpr int kIconRowHeight = 48;   // top - action icons + edit-mode palette
     static constexpr int kRulerHeight   = 28;   // bar.beat ruler under icon row
     static constexpr int kStatusBarH    = 30;   // bottom - readouts + props
     static constexpr int kKeyboardWidth = 0;
@@ -113,6 +114,19 @@ private:
     juce::int64 dragOriginSample  = 0;    // edit-cursor anchor for relative drags
     int         dragOriginMouseY  = 0;    // for the gain drag (vertical)
     float       dragOriginGainDb  = 0.0f;
+
+    // Ctrl/Cmd+click on a neighborhood region toggles it into this set.
+    // The focused regionIdx is the "primary" selection and is always
+    // implicitly included; this vector holds additional same-track region
+    // indices. Multi-select drives Delete (removes all), drag-move
+    // (translates the whole set by the drag delta), and arrow-nudge.
+    // Empty by default; cleared on plain (no-mod) click.
+    std::vector<int> additionalSelectedRegions;
+    // Per-region timelineStart snapshots captured at drag start so the
+    // mouseDrag handler can translate every selected region by the same
+    // delta. Same length + order as the union (focused first, additional
+    // after). Resized in mouseDown's MoveRegion-prep paths.
+    std::vector<juce::int64> dragMultiOriginStarts;
     // When >= 0, paint a 1-px vertical guide at this TIMELINE sample so
     // the user can see exactly where the active drag will snap. Cleared
     // on mouseUp. Driven by the snap helpers in mouseDrag.
@@ -171,7 +185,7 @@ private:
     class IconButton final : public juce::Button
     {
     public:
-        enum class Glyph { Undo, Redo, Split, Normalize, Reverse, TakeCycle, ZoomFit, Properties };
+        enum class Glyph { Undo, Redo, Split, Normalize, ZoomFit, ZoomIn, ZoomOut, Properties };
         IconButton (const juce::String& name, Glyph g);
         void paintButton (juce::Graphics&, bool isMouseOver, bool isButtonDown) override;
     private:
@@ -181,10 +195,34 @@ private:
     IconButton redoButton       { "Redo",       IconButton::Glyph::Redo };
     IconButton splitButton      { "Split",      IconButton::Glyph::Split };
     IconButton normalizeButton  { "Normalize",  IconButton::Glyph::Normalize };
-    IconButton reverseButton    { "Reverse",    IconButton::Glyph::Reverse };
-    IconButton takeCycleButton  { "Take",       IconButton::Glyph::TakeCycle };
-    IconButton zoomFitButton    { "Zoom fit",   IconButton::Glyph::ZoomFit };
     IconButton propertiesButton { "Properties", IconButton::Glyph::Properties };
+    IconButton zoomOutButton    { "Zoom out",   IconButton::Glyph::ZoomOut };
+    IconButton zoomInButton     { "Zoom in",    IconButton::Glyph::ZoomIn };
+    IconButton zoomFitButton    { "Zoom fit",   IconButton::Glyph::ZoomFit };
+
+    // Ardour-style edit-mode palette + snap controls. Lives inline in
+    // the modal's icon row so the user picks the active tool mode while
+    // editing a region. session.editMode persists session-wide, so a
+    // mode set here also drives TapeStrip's mouse dispatch.
+    std::unique_ptr<EditModeToolbar> editModeToolbar;
+
+public:
+    // Called by MainComponent when a global hotkey (e.g. 'G') flips
+    // session.editMode while the modal is open, so the toolbar repaints
+    // with the new active state.
+    void syncEditModeToolbar();
+
+    // Walk the track's regions and update every auto-managed fade so it
+    // matches the current overlap with its neighbours. Two-way: a fresh
+    // overlap creates / widens; an overlap that vanished retracts a
+    // previously-auto fade back to zero. User-pinned fades (fadeInAuto /
+    // fadeOutAuto == false with non-zero length) stay untouched. Each
+    // changed region commits as its own RegionEditAction inside the
+    // caller's undo transaction. Called after every geometry mutation —
+    // MoveRegion, TrimStart, TrimEnd — so left-side and right-side
+    // overlaps are both handled uniformly.
+    void syncAutoCrossfades();
+private:
 
     // Reaper-style bottom status-bar children. Real interactive widgets,
     // not paint-only - JUCE handles dispatch / hover / focus.
@@ -192,11 +230,6 @@ private:
     juce::Label        gainLabel;
     juce::Label        fadeLabel;
     juce::Label        infoLabel;
-    // "T1/3" style readout next to the TakeCycle toolbar button so
-    // the user can see how many takes are stacked and which one is
-    // live without cycling blind. Painted by the existing toolbar
-    // band; positioned in layoutIconRow.
-    juce::Label        takeReadout;
     // Region label / source file name at the top-left of the modal,
     // above the bar ruler. Drives "what am I editing?" identification
     // without forcing the user to close the modal to check the timeline.
@@ -213,9 +246,10 @@ private:
     // so Cmd+Z reverts cleanly. normalize is non-destructive (gainDb
     // adjustment); reverse is destructive (rewrites the source file).
     void normalizeRegion();
-    void reverseRegion();
-    void cycleTake();
     void zoomFit();
+    // Multiplicative zoom around the edit cursor — same math the '=' / '-'
+    // keypresses use. factor > 1 = zoom in, < 1 = zoom out.
+    void zoomByFactor (float factor);
     void splitAtCursor();
 
     void rebuildThumbIfNeeded();

@@ -153,6 +153,41 @@ private:
     bool        haveRemoved = false;
 };
 
+// Joins (glues) a set of audio regions on the same track into one.
+//   • Fast path: when every selected region references the same source
+//     file and the regions abut (or overlap) on the timeline, the join
+//     collapses them into a single AudioRegion by extending the leading
+//     region's lengthInSamples and erasing the rest. Source data and
+//     existing fades at the outer edges are preserved.
+//   • Slow path: when sources differ or there are gaps, the join renders
+//     a fresh WAV into <session>/takes/ that mixes every selected region
+//     across [minStart, maxEnd) and replaces the selection with one
+//     region pointing at that file.
+// `indices` must list the track-relative region indices the user wants
+// joined; ctor sorts a copy by timelineStart so the action records a
+// stable order. perform() captures the before-state of every involved
+// region so undo() can restore the full pre-join layout.
+class JoinRegionsAction final : public juce::UndoableAction
+{
+public:
+    JoinRegionsAction (Session& session, AudioEngine& engine,
+                        int trackIdx, const std::vector<int>& indices);
+
+    bool perform() override;
+    bool undo()    override;
+    int  getSizeInUnits() override { return 6; }
+
+private:
+    Session& session;
+    AudioEngine& engine;
+    int trackIdx;
+    std::vector<int> indices;            // sorted by timelineStart
+    std::vector<AudioRegion> beforeRegions;
+    int  resultInsertedAt = -1;
+    juce::File renderedFile;             // only set on the slow path
+    bool firstPerformDone = false;
+};
+
 // MIDI counterpart to DeleteRegionAction. Mutates through the
 // AtomicSnapshot's currentMutable() since midiRegions is a swap-load
 // vector; same race profile every other piano-roll edit accepts.

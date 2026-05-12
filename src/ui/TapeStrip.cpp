@@ -10,6 +10,21 @@ TapeStrip::TapeStrip (Session& s, AudioEngine& e) : session (s), engine (e)
     setOpaque (true);
     startTimerHz (30);
     engine.getUndoManager().addChangeListener (this);
+
+    auto wireZoom = [this] (juce::TextButton& b, const juce::String& tip,
+                              std::function<void()> click)
+    {
+        b.setTooltip (tip);
+        b.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff282830));
+        b.setColour (juce::TextButton::textColourOffId, juce::Colour (0xffd0d0d8));
+        b.setMouseClickGrabsKeyboardFocus (false);
+        b.setWantsKeyboardFocus (false);
+        b.onClick = std::move (click);
+        addAndMakeVisible (b);
+    };
+    wireZoom (zoomOutButton, "Zoom out (-)",        [this] { zoomByFactor (1.0f / 1.25f); });
+    wireZoom (zoomInButton,  "Zoom in (=)",         [this] { zoomByFactor (1.25f); });
+    wireZoom (zoomFitButton, "Zoom to fit (Cmd+0)", [this] { zoomFit(); });
 }
 
 TapeStrip::~TapeStrip()
@@ -76,7 +91,67 @@ double TapeStrip::pixelsPerSecond() const noexcept
 
     auto col = tracksColumnBounds();
     if (col.getWidth() <= 0) return 0.0;
-    return (double) col.getWidth() / maxSeconds;
+    const double autoFit = (double) col.getWidth() / maxSeconds;
+    return autoFit * (double) juce::jlimit (0.1f, 32.0f, userZoomFactor);
+}
+
+void TapeStrip::zoomByFactor (float factor, int anchorX)
+{
+    // Capture the sample currently under anchorX BEFORE changing zoom
+    // so we can adjust scroll afterwards to keep that sample pinned.
+    const juce::int64 anchorSampleBefore = (anchorX >= 0) ? sampleAtX (anchorX) : 0;
+    userZoomFactor = juce::jlimit (0.1f, 32.0f, userZoomFactor * factor);
+    if (anchorX >= 0)
+    {
+        const double sr = engine.getCurrentSampleRate();
+        const double px = pixelsPerSecond();
+        auto col = tracksColumnBounds();
+        if (sr > 0.0 && px > 0.0)
+        {
+            // After zoom: anchorX should resolve to anchorSampleBefore.
+            // Rearranged: scrollSamples = anchorSampleBefore - (anchorX - col.x) * sr / px
+            const double pixelsFromLeft = (double) (anchorX - col.getX());
+            const auto desiredScroll = anchorSampleBefore
+                                          - (juce::int64) (pixelsFromLeft / px * sr);
+            scrollSamples = juce::jmax<juce::int64> (0, desiredScroll);
+        }
+    }
+    // Reset scroll to 0 once we drop back to fit-all (zoom <= 1).
+    if (userZoomFactor <= 1.0f)
+        scrollSamples = 0;
+    repaint();
+}
+
+void TapeStrip::zoomFit() noexcept
+{
+    scrollSamples = 0;
+
+    // The legacy pixelsPerSecond() builds in a 60-second minimum + 20 %
+    // headroom margin, so just resetting userZoomFactor to 1.0 leaves
+    // short content squished into the left half of the strip. Compute
+    // the zoom that makes the rightmost content sample land at the
+    // column's right edge — that's the user's "fit" expectation.
+    const double sr = engine.getCurrentSampleRate();
+    if (sr <= 0.0)
+    {
+        userZoomFactor = 1.0f;
+        repaint();
+        return;
+    }
+
+    juce::int64 maxSample = engine.getTransport().getPlayhead();
+    for (int t = 0; t < Session::kNumTracks; ++t)
+        for (auto& r : session.track (t).regions)
+            maxSample = juce::jmax (maxSample, r.timelineStart + r.lengthInSamples);
+
+    const double contentSec    = (double) juce::jmax<juce::int64> (1, maxSample) / sr;
+    const double autoFitBudget = juce::jmax (60.0, contentSec * 1.20);
+    // pxPerSec at zoom 1 = col.width / autoFitBudget. We want the
+    // visible window to equal contentSec exactly, so
+    // zoom = autoFitBudget / contentSec.
+    const float fitZoom = (float) (autoFitBudget / juce::jmax (0.001, contentSec));
+    userZoomFactor = juce::jlimit (0.1f, 32.0f, fitZoom);
+    repaint();
 }
 
 juce::int64 TapeStrip::sampleAtX (int x) const noexcept
@@ -86,7 +161,7 @@ juce::int64 TapeStrip::sampleAtX (int x) const noexcept
     if (sr <= 0.0 || px <= 0.0) return 0;
     auto col = tracksColumnBounds();
     const double seconds = (double) (x - col.getX()) / px;
-    return (juce::int64) juce::jmax (0.0, seconds * sr);
+    return scrollSamples + (juce::int64) juce::jmax (0.0, seconds * sr);
 }
 
 int TapeStrip::xForSample (juce::int64 s) const noexcept
@@ -94,7 +169,8 @@ int TapeStrip::xForSample (juce::int64 s) const noexcept
     const double sr = engine.getCurrentSampleRate();
     const double px = pixelsPerSecond();
     if (sr <= 0.0 || px <= 0.0) return tracksColumnBounds().getX();
-    return tracksColumnBounds().getX() + (int) ((double) s / sr * px);
+    const auto rel = s - scrollSamples;
+    return tracksColumnBounds().getX() + (int) ((double) rel / sr * px);
 }
 
 TapeStrip::RegionHit TapeStrip::hitTestRegion (int x, int y) const noexcept
@@ -196,6 +272,8 @@ void TapeStrip::clearAllSelections() noexcept
 {
     selectedTrack  = -1;
     selectedRegion = -1;
+    selectedMidiTrack  = -1;
+    selectedMidiRegion = -1;
     additionalSelections.clear();
 }
 
@@ -261,7 +339,22 @@ void TapeStrip::rebuildPlaybackIfStopped()
         engine.getPlaybackEngine().preparePlayback();
 }
 
-void TapeStrip::resized() {}
+void TapeStrip::resized()
+{
+    // Zoom HUD: right-aligned in the ruler band.
+    auto r = rulerBounds().reduced (2);
+    constexpr int kBtnW = 32;
+    constexpr int kFitW = 36;
+    constexpr int kGap  = 2;
+    auto place = [&] (juce::TextButton& b, int w)
+    {
+        b.setBounds (r.removeFromRight (w));
+        r.removeFromRight (kGap);
+    };
+    place (zoomFitButton, kFitW);
+    place (zoomInButton,  kBtnW);
+    place (zoomOutButton, kBtnW);
+}
 
 void TapeStrip::timerCallback()
 {
@@ -555,6 +648,53 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
         return;
     }
 
+    // Edit-mode dispatch. Cut Mode: clicking a region body splits at the
+    // click sample (single click, no drag). Range Mode: any body click in
+    // the track-column starts a ruler-style range selection — reuses the
+    // existing rulerSelection state so the mouseDrag + mouseUp + paint
+    // paths handle the visual range and the loop/punch action popup
+    // without further wiring. Grab / Grid / Draw fall through to legacy
+    // behaviour (Grid + Draw are Phase 3c/3d).
+    //
+    // Cmd/Ctrl/Shift held bypass the mode dispatch entirely so the
+    // multi-region selection (Ctrl+click) and range-extend (Shift+click)
+    // gestures from the legacy block keep working regardless of mode.
+    const bool bypassModeDispatch = e.mods.isCommandDown() || e.mods.isShiftDown();
+    if (! e.mods.isRightButtonDown() && col.contains (e.x, e.y) && ! bypassModeDispatch)
+    {
+        if (session.editMode == EditMode::Cut)
+        {
+            const auto hit = hitTestRegion (e.x, e.y);
+            if (hit.op != RegionOp::None
+                && (hit.op == RegionOp::Move
+                    || hit.op == RegionOp::TrimStart
+                    || hit.op == RegionOp::TrimEnd))
+            {
+                const auto& reg = session.track (hit.track).regions[(size_t) hit.regionIdx];
+                if (! reg.locked)
+                {
+                    auto& um = engine.getUndoManager();
+                    um.beginNewTransaction ("Split region");
+                    um.perform (new SplitRegionAction (
+                        session, engine, hit.track, hit.regionIdx, sampleAtX (e.x)));
+                    repaint();
+                    return;
+                }
+                // Locked region: fall through to normal selection handling
+                // below so the user can still pick the region up. No split,
+                // no early return.
+            }
+        }
+        if (session.editMode == EditMode::Range)
+        {
+            rulerSelection.active        = true;
+            rulerSelection.originSample  = sampleAtX (e.x);
+            rulerSelection.currentSample = rulerSelection.originSample;
+            repaint();
+            return;
+        }
+    }
+
     // Left-click on the track label (the strip on the far left of each
     // row, before the timeline column starts) selects that track without
     // picking a region. Lets keyboard shortcuts (A / S / X) target a
@@ -604,6 +744,8 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
 
             selectedTrack  = hit.track;
             selectedRegion = hit.regionIdx;
+            selectedMidiTrack  = -1;
+            selectedMidiRegion = -1;
             rebuildPlaybackIfStopped();
             repaint();
         }
@@ -631,17 +773,44 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
             return;
         }
 
-        // Shift / Cmd-click on a region body toggles it in/out of the
-        // multi-selection without starting a drag. Edge ops (trim,
-        // fade, take badge) ignore the modifier - those are still
-        // single-region operations even when other regions are
-        // selected. Group drag begins from a plain (no-modifier)
-        // click on an already-selected region body.
-        const bool extendSelection = (e.mods.isShiftDown() || e.mods.isCommandDown());
-        if (extendSelection
-            && (hit.op == RegionOp::Move
-                || hit.op == RegionOp::TrimStart
-                || hit.op == RegionOp::TrimEnd))
+        // Shift / Cmd-click on a region body extends the multi-selection
+        // without starting a drag. Edge ops (trim, fade, take badge)
+        // ignore the modifier - those are still single-region operations
+        // even when other regions are selected. Group drag begins from a
+        // plain (no-modifier) click on an already-selected region body.
+        //   • Cmd-click  → toggle the clicked region.
+        //   • Shift-click on the same track as the primary → fill every
+        //     region between the primary and the clicked one (by
+        //     timelineStart order) into the selection.
+        //   • Shift-click on a different track → fall back to toggle.
+        const bool isBodyHit = (hit.op == RegionOp::Move
+                                 || hit.op == RegionOp::TrimStart
+                                 || hit.op == RegionOp::TrimEnd);
+        if (e.mods.isShiftDown() && isBodyHit
+            && selectedTrack == hit.track && selectedRegion >= 0)
+        {
+            const auto& regs = session.track (hit.track).regions;
+            if (selectedRegion < (int) regs.size()
+                && hit.regionIdx < (int) regs.size())
+            {
+                const auto anchorTL = regs[(size_t) selectedRegion].timelineStart;
+                const auto clickTL  = regs[(size_t) hit.regionIdx].timelineStart;
+                const auto lo = juce::jmin (anchorTL, clickTL);
+                const auto hi = juce::jmax (anchorTL, clickTL);
+                for (int i = 0; i < (int) regs.size(); ++i)
+                {
+                    const auto t = regs[(size_t) i].timelineStart;
+                    if (t < lo || t > hi) continue;
+                    if (i == selectedRegion) continue;
+                    if (! isRegionSelected (hit.track, i))
+                        toggleRegionSelected (hit.track, i);
+                }
+                drag.op = RegionOp::None;
+                repaint();
+                return;
+            }
+        }
+        if ((e.mods.isShiftDown() || e.mods.isCommandDown()) && isBodyHit)
         {
             toggleRegionSelected (hit.track, hit.regionIdx);
             drag.op = RegionOp::None;   // no drag mode entered
@@ -746,6 +915,16 @@ void TapeStrip::mouseDown (const juce::MouseEvent& e)
                 midiDrag.mouseDownSample   = sampleAtX (e.x);
                 midiDrag.origTimelineStart = r.timelineStart;
                 midiDrag.origState         = r;
+                selectedMidiTrack  = t;
+                selectedMidiRegion = i;
+                // Plain MIDI click clears the audio selection so the two
+                // selection sets don't both light up. Modifier-extend on
+                // MIDI regions isn't supported yet; that path stays
+                // single-region for now.
+                selectedTrack  = -1;
+                selectedRegion = -1;
+                additionalSelections.clear();
+                repaint();
                 return;
             }
             break;
@@ -1478,11 +1657,15 @@ void TapeStrip::mouseMove (const juce::MouseEvent& e)
             break;
         case RegionOp::Move:
             // Alt over the body promotes Move -> AdjustGain on click;
-            // signal it with an up/down resize cursor so the user
-            // doesn't drag horizontally and accidentally move.
+            // signal that with an up/down resize cursor so the user
+            // doesn't drag horizontally and accidentally move. Plain
+            // hover stays the normal arrow — the body is selectable
+            // and draggable, but a dragging-hand cursor on every
+            // region read as "always grabbing something" and clashed
+            // with the actual drag-in-progress cursor.
             setMouseCursor (e.mods.isAltDown()
                               ? juce::MouseCursor::UpDownResizeCursor
-                              : juce::MouseCursor::DraggingHandCursor);
+                              : juce::MouseCursor::NormalCursor);
             break;
         case RegionOp::AdjustGain:
             setMouseCursor (juce::MouseCursor::UpDownResizeCursor);
@@ -1503,6 +1686,36 @@ void TapeStrip::mouseExit (const juce::MouseEvent&)
         hoveredTrack  = -1;
         hoveredRegion = -1;
         repaint();
+    }
+}
+
+void TapeStrip::mouseWheelMove (const juce::MouseEvent& e,
+                                  const juce::MouseWheelDetails& w)
+{
+    // Cmd/Ctrl + wheel = horizontal zoom anchored on the cursor sample,
+    // matching the audio + piano-roll editor wheel-zoom convention.
+    if (e.mods.isCommandDown() || e.mods.isCtrlDown())
+    {
+        const float factor = w.deltaY > 0.0f ? 1.15f : (1.0f / 1.15f);
+        zoomByFactor (factor, e.x);
+        return;
+    }
+    // Plain wheel = horizontal scroll when zoomed > 1; absorb otherwise
+    // so the parent doesn't accidentally scroll the console behind us.
+    if (userZoomFactor > 1.0f)
+    {
+        const double sr = engine.getCurrentSampleRate();
+        if (sr > 0.0)
+        {
+            // ~half a second per wheel-notch. Sign: positive deltaY (away
+            // from user) = scroll left = decrease scrollSamples.
+            const auto step = (juce::int64) (sr * 0.5);
+            const double dx = std::abs (w.deltaX) > 0.001f ? w.deltaX
+                                                            : w.deltaY;
+            const auto delta = (juce::int64) (dx * (double) step);
+            scrollSamples = juce::jmax<juce::int64> (0, scrollSamples - delta);
+            repaint();
+        }
     }
 }
 
@@ -1531,6 +1744,37 @@ void TapeStrip::showRegionContextMenu (const RegionHit& hit, juce::Point<int> sc
                                                          hitCopy.track,
                                                          hitCopy.regionIdx,
                                                          playhead));
+                    safeThis->repaint();
+                });
+
+    // Join regions: enabled when at least two regions on this track are
+    // selected (counting the primary + additional). Same-source abutting
+    // selections collapse cheaply; everything else renders a glued WAV.
+    int joinCount = 0;
+    std::vector<int> joinIdxs;
+    if (selectedTrack == hit.track && selectedRegion >= 0)
+    {
+        joinIdxs.push_back (selectedRegion);
+        ++joinCount;
+    }
+    for (const auto& id : additionalSelections)
+        if (id.track == hit.track)
+        {
+            joinIdxs.push_back (id.regionIdx);
+            ++joinCount;
+        }
+    m.addItem ("Join selected regions", joinCount >= 2, false,
+                [safeThis = juce::Component::SafePointer<TapeStrip> (this),
+                 track = hit.track, joinIdxs]
+                {
+                    if (safeThis == nullptr) return;
+                    auto& um = safeThis->engine.getUndoManager();
+                    um.beginNewTransaction (
+                        juce::String ("Join ") + juce::String ((int) joinIdxs.size())
+                        + " regions");
+                    um.perform (new JoinRegionsAction (
+                        safeThis->session, safeThis->engine, track, joinIdxs));
+                    safeThis->clearAllSelections();
                     safeThis->repaint();
                 });
     m.addSeparator();
@@ -2180,8 +2424,9 @@ void TapeStrip::paint (juce::Graphics& g)
         // each note's start position, vertically distributed by pitch)
         // so the user can read note density at a glance from the timeline.
         const auto& midiRegions = session.track (t).midiRegions.current();
-        for (const auto& region : midiRegions)
+        for (int mri = 0; mri < (int) midiRegions.size(); ++mri)
         {
+            const auto& region = midiRegions[(size_t) mri];
             const int x0 = xForSample (region.timelineStart);
             const int x1 = xForSample (region.timelineStart + region.lengthInSamples);
             if (x1 <= col.getX() || x0 >= col.getRight()) continue;
@@ -2192,21 +2437,34 @@ void TapeStrip::paint (juce::Graphics& g)
                                   .getIntersection (col.withTrimmedTop (1).withTrimmedBottom (1));
             if (regionRect.isEmpty()) continue;
 
+            const bool isMidiSelected = (t == selectedMidiTrack
+                                          && mri == selectedMidiRegion);
+
             // Block fill - desaturated region accent (custom colour
             // when set, otherwise track) with a subtle inset so it
-            // reads "MIDI" vs the brighter audio block colour. Muted
-            // regions get further desaturated + half alpha to read
-            // as "skipped".
+            // reads "MIDI" vs the brighter audio block colour. Selected
+            // regions brighten the fill + paint a white outline,
+            // mirroring the audio selection look. Muted regions get
+            // further desaturated + half alpha to read as "skipped".
             const auto base = region.customColour.isTransparent()
                 ? session.track (t).colour
                 : region.customColour;
             auto midiFill = base.withMultipliedSaturation (0.5f).withMultipliedBrightness (0.55f);
+            if (isMidiSelected) midiFill = midiFill.brighter (0.30f);
             if (region.muted)
                 midiFill = midiFill.withMultipliedSaturation (0.20f).withMultipliedAlpha (0.45f);
             g.setColour (midiFill);
             g.fillRoundedRectangle (regionRect.toFloat(), 2.0f);
-            g.setColour (base.withAlpha (region.muted ? 0.45f : 0.85f));
-            g.drawRoundedRectangle (regionRect.toFloat().reduced (0.5f), 2.0f, 0.8f);
+            if (isMidiSelected)
+            {
+                g.setColour (juce::Colours::white.withAlpha (0.85f));
+                g.drawRoundedRectangle (regionRect.toFloat().reduced (0.5f), 2.0f, 1.6f);
+            }
+            else
+            {
+                g.setColour (base.withAlpha (region.muted ? 0.45f : 0.85f));
+                g.drawRoundedRectangle (regionRect.toFloat().reduced (0.5f), 2.0f, 0.8f);
+            }
 
             // User-supplied label, top-left of the region body. Same
             // shadow + white-text combo the audio painter uses.

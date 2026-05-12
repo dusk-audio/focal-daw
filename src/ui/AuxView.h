@@ -39,6 +39,18 @@ public:
     // host owns is hit BEFORE the unmap of the main window in phase 6.
     void closeAllAuxPopouts();
 
+    // Re-push the slot screen-rect for every active lane's editor host -
+    // called from MainComponent's main-window movement watcher so the
+    // hosts follow when the user drags or resizes the main window.
+    void repositionAllHosts();
+
+    // Hide / show every active lane's editor host. Called when AUX view
+    // visibility flips (user switches main view to MIXING / RECORDING /
+    // MASTERING and back).
+    void setAllHostsHidden (bool hidden);
+
+    void visibilityChanged() override;
+
 private:
     int activeLaneIndex = 0;
 

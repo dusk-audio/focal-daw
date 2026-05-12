@@ -1,4 +1,5 @@
 #include "AudioRegionEditor.h"
+#include "EditModeToolbar.h"
 #include "../engine/AudioEngine.h"
 #include "../engine/Transport.h"
 #include "../session/RegionEditActions.h"
@@ -56,10 +57,16 @@ AudioRegionEditor::AudioRegionEditor (Session& s, AudioEngine& e, int t, int r)
     wireIcon (redoButton,       "Redo",                [this] { engine.getUndoManager().redo(); refreshStatusBarReadouts(); repaint(); });
     wireIcon (splitButton,      "Split at edit cursor",[this] { splitAtCursor(); });
     wireIcon (normalizeButton,  "Normalize",           [this] { normalizeRegion(); });
-    wireIcon (reverseButton,    "Reverse",             [this] { reverseRegion(); });
-    wireIcon (takeCycleButton,  "Cycle take",          [this] { cycleTake(); });
-    wireIcon (zoomFitButton,    "Zoom to fit region",  [this] { zoomFit(); });
     wireIcon (propertiesButton, "Region properties...", [this] { showRegionPropertiesPopup(); });
+    wireIcon (zoomOutButton,    "Zoom out (-)",         [this] { zoomByFactor (1.0f / 1.15f); });
+    wireIcon (zoomInButton,     "Zoom in (=)",          [this] { zoomByFactor (1.15f); });
+    wireIcon (zoomFitButton,    "Zoom to fit region",   [this] { zoomFit(); });
+
+    // Edit-mode + snap palette. Lives inline in the icon row band.
+    // session.editMode drives both modal mouse handlers and TapeStrip's
+    // dispatch, so a pick here is global.
+    editModeToolbar = std::make_unique<EditModeToolbar> (engine);
+    addAndMakeVisible (editModeToolbar.get());
 
     // Bottom status-bar readouts.
     auto styleReadout = [] (juce::Label& l, juce::Justification just)
@@ -136,15 +143,6 @@ AudioRegionEditor::AudioRegionEditor (Session& s, AudioEngine& e, int t, int r)
         repaint();
     };
 
-    // Take counter next to the TakeCycle toolbar button. Small label,
-    // styled like the other readouts but transparent background so it
-    // sits inside the toolbar band cleanly.
-    takeReadout.setJustificationType (juce::Justification::centredLeft);
-    takeReadout.setColour (juce::Label::textColourId, juce::Colour (0xff9090a0));
-    takeReadout.setFont (juce::Font (juce::FontOptions (11.0f, juce::Font::bold)));
-    takeReadout.setInterceptsMouseClicks (false, false);
-    addAndMakeVisible (takeReadout);
-
     // Title line above the bar ruler. Shows region label when set,
     // falling back to the source WAV filename. Editable so the user
     // can rename without opening the Properties popup.
@@ -215,6 +213,10 @@ AudioRegionEditor::AudioRegionEditor (Session& s, AudioEngine& e, int t, int r)
         refreshStatusBarReadouts();
         repaint();
     };
+    muteToggle.setMouseClickGrabsKeyboardFocus (false);
+    muteToggle.setWantsKeyboardFocus (false);
+    lockToggle.setMouseClickGrabsKeyboardFocus (false);
+    lockToggle.setWantsKeyboardFocus (false);
     addAndMakeVisible (muteToggle);
     addAndMakeVisible (lockToggle);
 
@@ -661,6 +663,30 @@ void AudioRegionEditor::paintWaveform (juce::Graphics& g, juce::Rectangle<int> a
     g.setColour (kBeatLine.withAlpha (0.6f));
     g.drawHorizontalLine (inset.getCentreY(),
                             (float) inset.getX(), (float) inset.getRight());
+
+    // Multi-selection highlight: faint accent overlay over every region
+    // index in additionalSelectedRegions. The focused regionIdx already
+    // reads bright via the per-slice paint; this band differentiates the
+    // SECONDARY selection so the user knows which slices a group op
+    // (delete / move / nudge) would hit.
+    if (! additionalSelectedRegions.empty())
+    {
+        g.setColour (juce::Colour (0xff80c0ff).withAlpha (0.18f));
+        for (int idx : additionalSelectedRegions)
+        {
+            if (idx < 0 || idx >= (int) regs.size()) continue;
+            const auto& reg = regs[(size_t) idx];
+            if (reg.lengthInSamples <= 0) continue;
+            const auto regEnd = reg.timelineStart + reg.lengthInSamples;
+            const auto a = juce::jmax (reg.timelineStart, anchorTimelineStart);
+            const auto b = juce::jmin (regEnd, anchorEnd);
+            if (b <= a) continue;
+            const int xa = xForTimelineSample (a, area);
+            const int xb = xForTimelineSample (b, area);
+            if (xb > xa)
+                g.fillRect (xa, inset.getY(), xb - xa, inset.getHeight());
+        }
+    }
 }
 
 void AudioRegionEditor::paintFadeEnvelopes (juce::Graphics& g,
@@ -847,6 +873,11 @@ void AudioRegionEditor::mouseDown (const juce::MouseEvent& e)
                                                     getWidth(), kRulerHeight);
     if (rulerArea.contains (e.x, e.y))
     {
+        // Ruler click seeks the transport playhead (Reaper/Ardour
+        // muscle memory) AND starts a range-select drag. A click
+        // without drag is therefore a pure seek; a drag refines the
+        // selection on top.
+        engine.getTransport().setPlayhead (timelineSampleForX (e.x, waveArea));
         rangeStartSample = sampleForX (e.x, waveArea);
         rangeEndSample   = rangeStartSample;
         rangeActive      = false;   // becomes true once the drag distance > 0
@@ -896,11 +927,93 @@ void AudioRegionEditor::mouseDown (const juce::MouseEvent& e)
     {
         const int hitIdx = regionIndexAtX (e.x, waveArea);
 
+        // Cmd/Ctrl+click on a neighborhood region toggles it into the
+        // additional-selection set (mirrors TapeStrip's multi-select
+        // gesture). Edge / fade / gain handles are still single-region
+        // ops above; only body hits participate. Bypass mode-specific
+        // dispatch so Range / Cut don't swallow the gesture.
+        if (e.mods.isCommandDown() && hitIdx >= 0)
+        {
+            if (hitIdx == regionIdx)
+            {
+                // No-op: the focused region is implicitly selected.
+            }
+            else
+            {
+                auto it = std::find (additionalSelectedRegions.begin(),
+                                      additionalSelectedRegions.end(), hitIdx);
+                if (it != additionalSelectedRegions.end())
+                    additionalSelectedRegions.erase (it);
+                else
+                    additionalSelectedRegions.push_back (hitIdx);
+            }
+            dragMode = DragMode::None;
+            repaint();
+            return;
+        }
+
+        // Shift+click on a region body fills every region between the
+        // primary (focused regionIdx) and the clicked region into the
+        // additional-selection set, in timeline order. Matches the
+        // TapeStrip Shift+click gesture so muscle memory carries over.
+        // Shift+click in a gap still starts a time-range drag below.
+        if (e.mods.isShiftDown() && hitIdx >= 0 && hitIdx != regionIdx)
+        {
+            const auto& regs = session.track (trackIdx).regions;
+            if (regionIdx >= 0 && regionIdx < (int) regs.size()
+                && hitIdx < (int) regs.size())
+            {
+                const auto anchorTL = regs[(size_t) regionIdx].timelineStart;
+                const auto clickTL  = regs[(size_t) hitIdx].timelineStart;
+                const auto lo = juce::jmin (anchorTL, clickTL);
+                const auto hi = juce::jmax (anchorTL, clickTL);
+                additionalSelectedRegions.clear();
+                for (int i = 0; i < (int) regs.size(); ++i)
+                {
+                    if (i == regionIdx) continue;
+                    const auto t = regs[(size_t) i].timelineStart;
+                    if (t < lo || t > hi) continue;
+                    additionalSelectedRegions.push_back (i);
+                }
+                dragMode = DragMode::None;
+                repaint();
+                return;
+            }
+        }
+
+        // Edit-mode dispatch in the waveform body. Cut: single click splits
+        // the region UNDER THE CLICK (not the editor's focused region) so
+        // a sequence of cuts works even after the first split has moved
+        // the boundary out from under regionIdx. Range: any body click
+        // forces a range-select drag regardless of where it lands.
+        const auto mode = session.editMode;
+        if (mode == EditMode::Cut && hitIdx >= 0)
+        {
+            const auto& reg = session.track (trackIdx).regions[(size_t) hitIdx];
+            if (! reg.locked)
+            {
+                const auto timelineSplit = timelineSampleForX (e.x, waveArea);
+                auto& um = engine.getUndoManager();
+                um.beginNewTransaction ("Split region");
+                um.perform (new SplitRegionAction (
+                    session, engine, trackIdx, hitIdx, timelineSplit));
+                // After split, regs[hitIdx] is the left half and the
+                // right half is at hitIdx+1. Focus the slice that the
+                // user just cut (= the left half) so the modal's
+                // neighborhood paint stays anchored on the cut zone.
+                regionIdx = hitIdx;
+                refreshStatusBarReadouts();
+                repaint();
+            }
+            return;
+        }
+
         // Shift-drag anywhere in the waveform body OR plain drag in a gap
-        // between regions starts a range selection. Matches Reaper's
-        // body-drag = time-selection muscle memory while keeping a plain
-        // click on a region body free for cursor-drop / move.
-        if (e.mods.isShiftDown() || hitIdx < 0)
+        // between regions starts a range selection (Grab Mode). Range Mode
+        // forces this path on every body click. Matches Reaper's body-drag
+        // = time-selection muscle memory while keeping a plain click on a
+        // region body free for cursor-drop / move in Grab Mode.
+        if (mode == EditMode::Range || e.mods.isShiftDown() || hitIdx < 0)
         {
             rangeStartSample = sampleForX (e.x, waveArea);
             rangeEndSample   = rangeStartSample;
@@ -910,13 +1023,41 @@ void AudioRegionEditor::mouseDown (const juce::MouseEvent& e)
             return;
         }
 
+        // Helper: snapshot timelineStart for every additional-selected
+        // region so MoveRegion drag can translate them all by the same
+        // delta. Ordering mirrors additionalSelectedRegions.
+        auto captureMultiOrigins = [&] ()
+        {
+            dragMultiOriginStarts.clear();
+            const auto& regs = session.track (trackIdx).regions;
+            for (int idx : additionalSelectedRegions)
+            {
+                if (idx >= 0 && idx < (int) regs.size())
+                    dragMultiOriginStarts.push_back (regs[(size_t) idx].timelineStart);
+                else
+                    dragMultiOriginStarts.push_back (0);
+            }
+        };
+
+        const bool clickedSelected = (hitIdx >= 0
+            && (hitIdx == regionIdx
+                || std::find (additionalSelectedRegions.begin(),
+                              additionalSelectedRegions.end(), hitIdx)
+                   != additionalSelectedRegions.end()));
+
         // Click-to-focus inside the neighborhood view: if the click
         // landed on a DIFFERENT slice than the currently-focused one,
         // swap regionIdx to that slice and re-anchor the edit cursor
         // inside it. Same-slice clicks fall through to the existing
-        // edit-cursor-drop + MoveRegion-prep behaviour.
+        // edit-cursor-drop + MoveRegion-prep behaviour. Transport
+        // playhead is NOT moved by region clicks — the user picks up
+        // an item to move it, not to seek; the ruler band handles
+        // explicit seek clicks separately. Clicking on a region that
+        // is already part of the multi-selection preserves the set so
+        // the drag translates the whole group.
         if (hitIdx >= 0 && hitIdx != regionIdx)
         {
+            if (! clickedSelected) additionalSelectedRegions.clear();
             regionIdx = hitIdx;
             if (auto* nr = region())
             {
@@ -927,20 +1068,21 @@ void AudioRegionEditor::mouseDown (const juce::MouseEvent& e)
                         timelineSampleForX (e.x, waveArea) - nr->timelineStart);
                 dragOriginTimelineSample = nr->timelineStart;
             }
-            engine.getTransport().setPlayhead (timelineSampleForX (e.x, waveArea));
+            captureMultiOrigins();
             dragMode = DragMode::MoveRegion;
             refreshStatusBarReadouts();
             repaint();
             return;
         }
 
-        // Same-slice click: edit cursor follows + transport playhead
-        // snaps to the click so the user can audition from the drop
-        // point. dragOriginTimeline tracked so a follow-up horizontal
-        // drag can promote to MoveRegion.
+        // Same-slice click: edit cursor follows (editor-internal,
+        // doesn't move the transport playhead). dragOriginTimeline
+        // tracked so a follow-up horizontal drag past the 3 px
+        // threshold promotes the click into a MoveRegion drag.
+        if (! clickedSelected) additionalSelectedRegions.clear();
         editCursorSample = sampleForX (e.x, waveArea);
         dragOriginTimelineSample = r->timelineStart;
-        engine.getTransport().setPlayhead (timelineSampleForX (e.x, waveArea));
+        captureMultiOrigins();
         dragMode = DragMode::MoveCursor;
         refreshStatusBarReadouts();
         repaint();
@@ -999,7 +1141,6 @@ void AudioRegionEditor::mouseDrag (const juce::MouseEvent& e)
         else
         {
             editCursorSample = sampleForX (e.x, waveArea);
-            engine.getTransport().setPlayhead (timelineSampleForX (e.x, waveArea));
             refreshStatusBarReadouts();
             repaint();
             return;
@@ -1011,7 +1152,7 @@ void AudioRegionEditor::mouseDrag (const juce::MouseEvent& e)
         // Live-mutate timelineStart so the user sees the slice slide
         // while dragging. Commit (RegionEditAction) fires on mouseUp.
         // Anchor stays put -> view doesn't shift, only the focused
-        // slice moves visually.
+        // slice (and any additional-selected regions) move visually.
         if (r->locked) return;
         const auto cursorTimeline = timelineSampleForX (e.x, waveArea);
         const auto dragStartTimeline = timelineSampleForX (e.getMouseDownX(), waveArea);
@@ -1021,6 +1162,21 @@ void AudioRegionEditor::mouseDrag (const juce::MouseEvent& e)
         r->timelineStart = newStart;
         if (! bypassSnap && session.snapToGrid && delta != rawDelta)
             snapGuideTimelineSample = newStart;
+        // Multi-select translate: every additional region shifts by the
+        // same delta as the focused region. dragMultiOriginStarts was
+        // populated in mouseDown so we don't accumulate drift across
+        // mouseDrag invocations.
+        auto& regs = session.track (trackIdx).regions;
+        for (size_t i = 0; i < additionalSelectedRegions.size()
+                              && i < dragMultiOriginStarts.size(); ++i)
+        {
+            const int idx = additionalSelectedRegions[i];
+            if (idx < 0 || idx >= (int) regs.size()) continue;
+            auto& other = regs[(size_t) idx];
+            if (other.locked) continue;
+            other.timelineStart = juce::jmax<juce::int64> (0,
+                dragMultiOriginStarts[i] + delta);
+        }
         repaint();
         return;
     }
@@ -1124,7 +1280,20 @@ void AudioRegionEditor::mouseUp (const juce::MouseEvent&)
                                     && dragMode != DragMode::MoveCursor);
     if (wasUndoableEdit)
     {
-        const AudioRegion afterState = *r;
+        AudioRegion afterState = *r;
+        // Manual fade-handle drag promotes the fade to user-owned so the
+        // auto-crossfade pass on subsequent moves won't retract or
+        // resize it.
+        if (dragMode == DragMode::FadeIn)
+        {
+            afterState.fadeInAuto = false;
+            r->fadeInAuto = false;
+        }
+        if (dragMode == DragMode::FadeOut)
+        {
+            afterState.fadeOutAuto = false;
+            r->fadeOutAuto = false;
+        }
         // Skip the action if nothing actually changed (e.g. user grabbed
         // a handle and didn't drag). UndoManager would happily record a
         // no-op transaction otherwise.
@@ -1134,6 +1303,8 @@ void AudioRegionEditor::mouseUp (const juce::MouseEvent&)
          || afterState.lengthInSamples != regionAtDragStart.lengthInSamples
          || afterState.fadeInSamples   != regionAtDragStart.fadeInSamples
          || afterState.fadeOutSamples  != regionAtDragStart.fadeOutSamples
+         || afterState.fadeInAuto      != regionAtDragStart.fadeInAuto
+         || afterState.fadeOutAuto     != regionAtDragStart.fadeOutAuto
          || afterState.gainDb          != regionAtDragStart.gainDb;
         if (changed)
         {
@@ -1154,8 +1325,43 @@ void AudioRegionEditor::mouseUp (const juce::MouseEvent&)
             um.perform (new RegionEditAction (
                 session, engine, trackIdx, regionIdx,
                 regionAtDragStart, afterState));
+
+            // Multi-select Move: every additional region also has its
+            // timelineStart shifted live. Commit each as its own
+            // RegionEditAction inside the same undo transaction so a
+            // single Cmd+Z reverts the whole group move.
+            if (dragMode == DragMode::MoveRegion)
+            {
+                auto& regs = session.track (trackIdx).regions;
+                for (size_t i = 0; i < additionalSelectedRegions.size()
+                                      && i < dragMultiOriginStarts.size(); ++i)
+                {
+                    const int idx = additionalSelectedRegions[i];
+                    if (idx < 0 || idx >= (int) regs.size()) continue;
+                    auto& other = regs[(size_t) idx];
+                    if (other.locked) continue;
+                    AudioRegion otherAfter = other;
+                    if (otherAfter.timelineStart == dragMultiOriginStarts[i]) continue;
+                    AudioRegion otherBefore = otherAfter;
+                    otherBefore.timelineStart = dragMultiOriginStarts[i];
+                    other = otherBefore;
+                    um.perform (new RegionEditAction (
+                        session, engine, trackIdx, idx,
+                        otherBefore, otherAfter));
+                }
+
+            }
+            // Auto-crossfade sync runs after any geometry edit so both
+            // sides of an overlap update uniformly.
+            if (dragMode == DragMode::MoveRegion
+                || dragMode == DragMode::TrimStart
+                || dragMode == DragMode::TrimEnd)
+            {
+                syncAutoCrossfades();
+            }
         }
     }
+    dragMultiOriginStarts.clear();
     dragMode = DragMode::None;
     snapGuideTimelineSample = -1;
     refreshStatusBarReadouts();
@@ -1169,6 +1375,8 @@ void AudioRegionEditor::showContextMenu (juce::Point<int> screenPos)
 
     juce::PopupMenu m;
     m.addItem (1, "Split at edit cursor");
+    m.addItem (6, "Join selected regions",
+                /*enabled*/ ! additionalSelectedRegions.empty());
     m.addSeparator();
     m.addItem (2, "Reset gain (0 dB)");
     m.addItem (3, "Reset fades");
@@ -1205,6 +1413,30 @@ void AudioRegionEditor::showContextMenu (juce::Point<int> screenPos)
                 return;
             }
 
+            if (chosen == 6)
+            {
+                if (self->additionalSelectedRegions.empty()) return;
+                std::vector<int> idxs = self->additionalSelectedRegions;
+                idxs.push_back (self->regionIdx);
+                um.beginNewTransaction (
+                    juce::String ("Join ") + juce::String ((int) idxs.size())
+                    + " regions");
+                um.perform (new JoinRegionsAction (
+                    self->session, self->engine, self->trackIdx, idxs));
+                self->additionalSelectedRegions.clear();
+                // The merged region sits at the lowest source index; re-anchor
+                // the focused regionIdx to it so the modal continues editing
+                // the result.
+                int minIdx = self->regionIdx;
+                for (int i : idxs) if (i >= 0 && i < minIdx) minIdx = i;
+                self->regionIdx = juce::jmax (0, minIdx);
+                const int total = (int) self->session.track (self->trackIdx).regions.size();
+                if (self->regionIdx >= total) self->regionIdx = total - 1;
+                self->refreshStatusBarReadouts();
+                self->repaint();
+                return;
+            }
+
             // The remaining actions all become RegionEditActions.
             const AudioRegion before = *rr;
             AudioRegion after = before;
@@ -1213,7 +1445,10 @@ void AudioRegionEditor::showContextMenu (juce::Point<int> screenPos)
             {
                 case 2: after.gainDb         = 0.0f;  label = "Reset gain";  break;
                 case 3: after.fadeInSamples  = 0;
-                          after.fadeOutSamples = 0;     label = "Reset fades"; break;
+                          after.fadeOutSamples = 0;
+                          after.fadeInAuto    = false;
+                          after.fadeOutAuto   = false;
+                          label = "Reset fades"; break;
                 case 4: after.muted          = ! before.muted;
                         label = before.muted ? "Unmute" : "Mute"; break;
                 case 5: after.locked         = ! before.locked;
@@ -1260,8 +1495,8 @@ void AudioRegionEditor::showFadeShapeMenu (juce::Point<int> screenPos, bool isFa
             const FadeShape picked = (FadeShape) (chosen - 1);
             const AudioRegion before = *rr;
             AudioRegion after = before;
-            if (isFadeIn) after.fadeInShape  = picked;
-            else          after.fadeOutShape = picked;
+            if (isFadeIn) { after.fadeInShape  = picked; after.fadeInAuto  = false; }
+            else          { after.fadeOutShape = picked; after.fadeOutAuto = false; }
             if (after.fadeInShape == before.fadeInShape
                 && after.fadeOutShape == before.fadeOutShape) return;
             auto& um = self->engine.getUndoManager();
@@ -1313,11 +1548,18 @@ bool AudioRegionEditor::keyPressed (const juce::KeyPress& k)
 {
     if (k == juce::KeyPress::escapeKey)
     {
-        // First Esc clears an active range; second Esc closes. Matches
-        // the piano roll's "Esc clears selection then closes" pattern.
+        // First Esc clears an active range OR multi-selection; second
+        // Esc closes. Matches the piano roll's "Esc clears selection
+        // then closes" pattern.
         if (rangeActive)
         {
             rangeActive = false;
+            repaint();
+            return true;
+        }
+        if (! additionalSelectedRegions.empty())
+        {
+            additionalSelectedRegions.clear();
             repaint();
             return true;
         }
@@ -1326,31 +1568,78 @@ bool AudioRegionEditor::keyPressed (const juce::KeyPress& k)
     }
     const bool cmdOrCtrl = k.getModifiers().isCommandDown()
                               || k.getModifiers().isCtrlDown();
+    const bool noMods = ! cmdOrCtrl && ! k.getModifiers().isShiftDown()
+                        && ! k.getModifiers().isAltDown();
+
+    // Edit-mode shortcuts. The modal grabs keyboard focus on open so
+    // MainComponent::keyPressed never sees these while the editor is up.
+    // G/R/C also reclaim the global transport bindings (R=record toggle,
+    // C=metronome toggle) for the duration of the modal — handled locally,
+    // returns true so the global handler doesn't re-fire.
+    if (noMods)
+    {
+        const auto ch = k.getTextCharacter();
+        const bool isG = (ch == 'g' || ch == 'G');
+        const bool isR = (ch == 'r' || ch == 'R');
+        const bool isC = (ch == 'c' || ch == 'C');
+        if (isG || isR || isC)
+        {
+            session.editMode = isG ? EditMode::Grab
+                              : isR ? EditMode::Range
+                                    : EditMode::Cut;
+            syncEditModeToolbar();
+            repaint();
+            return true;
+        }
+    }
+
     // Local Cmd+Z / Cmd+Shift+Z. The engine's UndoManager has a global
     // keyboard binding, but it doesn't know to invalidate this editor's
     // view — so without this handler the audio data reverts but the
     // modal still paints the pre-undo geometry. Calling undo() here
     // and then repainting + refreshing the readouts keeps the view in
     // sync with the model on every step of the undo stack.
-    if (cmdOrCtrl && (k.getTextCharacter() == 'z' || k.getTextCharacter() == 'Z'))
+    // Use getKeyCode() rather than getTextCharacter(): the text char is
+    // suppressed (returns 0 / a control byte) on most platforms while
+    // Ctrl/Cmd is held, so the old check never fired the undo branch.
     {
-        if (k.getModifiers().isShiftDown()) engine.getUndoManager().redo();
-        else                                  engine.getUndoManager().undo();
-        rangeActive = false;
-        refreshStatusBarReadouts();
-        repaint();
-        return true;
+        const int code = k.getKeyCode();
+        if (cmdOrCtrl && (code == 'Z' || code == 'z'))
+        {
+            if (k.getModifiers().isShiftDown()) engine.getUndoManager().redo();
+            else                                  engine.getUndoManager().undo();
+            rangeActive = false;
+            additionalSelectedRegions.clear();
+            // Undo can shuffle region order (split-merge restores the
+            // pre-split state but the focused index may now point past
+            // the end if the editor was on a slice that got merged).
+            // Clamp to a still-existing index, or close the modal when
+            // the track has no regions at all.
+            const auto regCount = (int) session.track (trackIdx).regions.size();
+            if (regCount == 0)
+            {
+                if (onCloseRequested) onCloseRequested();
+                return true;
+            }
+            if (regionIdx >= regCount) regionIdx = regCount - 1;
+            if (regionIdx < 0)         regionIdx = 0;
+            refreshStatusBarReadouts();
+            repaint();
+            return true;
+        }
     }
     // Region navigation - same-track only, no wrap.
-    if (cmdOrCtrl && k.getTextCharacter() == ']') { navigateRegion (+1); return true; }
-    if (cmdOrCtrl && k.getTextCharacter() == '[') { navigateRegion (-1); return true; }
+    if (cmdOrCtrl && (k.getKeyCode() == ']' || k.getTextCharacter() == ']'))
+    { navigateRegion (+1); return true; }
+    if (cmdOrCtrl && (k.getKeyCode() == '[' || k.getTextCharacter() == '['))
+    { navigateRegion (-1); return true; }
 
     // Split: 'S' or Cmd+E. With a range active, splits at BOTH
     // boundaries (3 regions). Without a range, splits at the edit
     // cursor (existing single-cut behaviour from splitAtCursor()).
     const auto ch = k.getTextCharacter();
     const bool isSplit = (ch == 's' || ch == 'S')
-                          || (cmdOrCtrl && (ch == 'e' || ch == 'E'));
+                          || (cmdOrCtrl && (k.getKeyCode() == 'E' || k.getKeyCode() == 'e'));
     if (isSplit)
     {
         auto* r = region();
@@ -1412,7 +1701,7 @@ bool AudioRegionEditor::keyPressed (const juce::KeyPress& k)
     // were a free-standing slice of the source file - same audio file,
     // sourceOffset advanced to the chunk's start, length = chunk
     // length. Paste then drops it as a new region at the edit cursor.
-    if (cmdOrCtrl && (k.getTextCharacter() == 'c' || k.getTextCharacter() == 'C'))
+    if (cmdOrCtrl && (k.getKeyCode() == 'C' || k.getKeyCode() == 'c'))
     {
         auto* r = region();
         if (r == nullptr) return true;
@@ -1438,7 +1727,7 @@ bool AudioRegionEditor::keyPressed (const juce::KeyPress& k)
         clip.hasContent  = true;
         return true;
     }
-    if (cmdOrCtrl && (k.getTextCharacter() == 'x' || k.getTextCharacter() == 'X'))
+    if (cmdOrCtrl && (k.getKeyCode() == 'X' || k.getKeyCode() == 'x'))
     {
         auto* r = region();
         if (r == nullptr) return true;
@@ -1485,7 +1774,7 @@ bool AudioRegionEditor::keyPressed (const juce::KeyPress& k)
         if (onCloseRequested) onCloseRequested();
         return true;
     }
-    if (cmdOrCtrl && (k.getTextCharacter() == 'v' || k.getTextCharacter() == 'V'))
+    if (cmdOrCtrl && (k.getKeyCode() == 'V' || k.getKeyCode() == 'v'))
     {
         auto& clip = engine.getRegionClipboard();
         if (! clip.hasContent) return true;
@@ -1537,6 +1826,22 @@ bool AudioRegionEditor::keyPressed (const juce::KeyPress& k)
             return true;
         }
         auto& um = engine.getUndoManager();
+        // Multi-select Delete: remove every additional region first
+        // (descending index order so earlier deletes don't shift later
+        // indices). Then delete the focused region last and close.
+        if (! additionalSelectedRegions.empty())
+        {
+            std::vector<int> idxs = additionalSelectedRegions;
+            idxs.push_back (regionIdx);
+            std::sort (idxs.begin(), idxs.end(), std::greater<int>());
+            idxs.erase (std::unique (idxs.begin(), idxs.end()), idxs.end());
+            um.beginNewTransaction (idxs.size() > 1 ? "Delete regions" : "Delete region");
+            for (int idx : idxs)
+                um.perform (new DeleteRegionAction (session, engine, trackIdx, idx));
+            additionalSelectedRegions.clear();
+            if (onCloseRequested) onCloseRequested();
+            return true;
+        }
         um.beginNewTransaction ("Delete region");
         um.perform (new DeleteRegionAction (session, engine, trackIdx, regionIdx));
         if (onCloseRequested) onCloseRequested();
@@ -1557,13 +1862,21 @@ bool AudioRegionEditor::keyPressed (const juce::KeyPress& k)
         const auto step = (k.getModifiers().isShiftDown() ? samplesPerBeat * bpb
                                                               : samplesPerBeat);
         const auto delta = (k == juce::KeyPress::leftKey ? -step : step);
-        const AudioRegion before = *r;
-        AudioRegion after = before;
-        after.timelineStart = juce::jmax<juce::int64> (0, before.timelineStart + delta);
-        if (after.timelineStart == before.timelineStart) return true;
         auto& um = engine.getUndoManager();
         um.beginNewTransaction (delta < 0 ? "Nudge region left" : "Nudge region right");
-        um.perform (new RegionEditAction (session, engine, trackIdx, regionIdx, before, after));
+        auto nudgeOne = [&] (int idx)
+        {
+            if (idx < 0 || idx >= (int) session.track (trackIdx).regions.size()) return;
+            auto& reg = session.track (trackIdx).regions[(size_t) idx];
+            if (reg.locked) return;
+            const AudioRegion before = reg;
+            AudioRegion after = before;
+            after.timelineStart = juce::jmax<juce::int64> (0, before.timelineStart + delta);
+            if (after.timelineStart == before.timelineStart) return;
+            um.perform (new RegionEditAction (session, engine, trackIdx, idx, before, after));
+        };
+        nudgeOne (regionIdx);
+        for (int idx : additionalSelectedRegions) nudgeOne (idx);
         refreshStatusBarReadouts();
         repaint();
         return true;
@@ -1574,23 +1887,27 @@ bool AudioRegionEditor::keyPressed (const juce::KeyPress& k)
     // a zoom step. Mirrors mouseWheelMove's Cmd+wheel ramp.
     if (ch == '=' || ch == '+' || ch == '-')
     {
-        const auto* r = region();
-        if (r == nullptr) return true;
-        const auto waveArea = juce::Rectangle<int> (
-            0, kIconRowHeight + kRulerHeight,
-            getWidth(),
-            getHeight() - kIconRowHeight - kRulerHeight - kStatusBarH);
-        const float factor = (ch == '-') ? (1.0f / 1.15f) : 1.15f;
-        const auto anchorXBefore = xForSample (editCursorSample, waveArea);
-        pixelsPerSample = juce::jlimit (1.0e-5f, 1.0f, pixelsPerSample * factor);
-        const auto anchorSampleAfterRaw = sampleForX (anchorXBefore, waveArea);
-        scrollSamples += (editCursorSample - anchorSampleAfterRaw);
-        scrollSamples = juce::jlimit<juce::int64> (0,
-            juce::jmax<juce::int64> (0, r->lengthInSamples - 1), scrollSamples);
-        repaint();
+        zoomByFactor (ch == '-' ? (1.0f / 1.15f) : 1.15f);
         return true;
     }
     return false;
+}
+
+void AudioRegionEditor::zoomByFactor (float factor)
+{
+    const auto* r = region();
+    if (r == nullptr) return;
+    const auto waveArea = juce::Rectangle<int> (
+        0, kIconRowHeight + kRulerHeight,
+        getWidth(),
+        getHeight() - kIconRowHeight - kRulerHeight - kStatusBarH);
+    const auto anchorXBefore = xForSample (editCursorSample, waveArea);
+    pixelsPerSample = juce::jlimit (1.0e-5f, 1.0f, pixelsPerSample * factor);
+    const auto anchorSampleAfterRaw = sampleForX (anchorXBefore, waveArea);
+    scrollSamples += (editCursorSample - anchorSampleAfterRaw);
+    scrollSamples = juce::jlimit<juce::int64> (0,
+        juce::jmax<juce::int64> (0, r->lengthInSamples - 1), scrollSamples);
+    repaint();
 }
 
 // ── Top icon-row buttons ──────────────────────────────────────────────
@@ -1598,6 +1915,11 @@ AudioRegionEditor::IconButton::IconButton (const juce::String& name, Glyph g)
     : juce::Button (name), glyph (g)
 {
     setClickingTogglesState (false);
+    // Don't steal keyboard focus from the host modal — otherwise a
+    // follow-up Ctrl+Z (or any other modal hotkey) routes to the
+    // button instead of the editor's keyPressed.
+    setMouseClickGrabsKeyboardFocus (false);
+    setWantsKeyboardFocus (false);
 }
 
 void AudioRegionEditor::IconButton::paintButton (juce::Graphics& g,
@@ -1691,40 +2013,6 @@ void AudioRegionEditor::IconButton::paintButton (juce::Graphics& g,
             (void) yBot;
             break;
         }
-        case Glyph::Reverse:
-        {
-            // Left-pointing chevron arrow over a wave-line.
-            juce::Path p;
-            p.startNewSubPath (centre.x + r * 0.7f, centre.y - r * 0.6f);
-            p.lineTo          (centre.x - r * 0.7f, centre.y);
-            p.lineTo          (centre.x + r * 0.7f, centre.y + r * 0.6f);
-            g.strokePath (p, juce::PathStrokeType (1.6f));
-            // Tiny wavy line below to suggest "audio".
-            juce::Path wave;
-            wave.startNewSubPath (centre.x - r * 0.7f, centre.y + r * 0.85f);
-            wave.quadraticTo    (centre.x - r * 0.35f, centre.y + r * 0.6f,
-                                    centre.x,          centre.y + r * 0.85f);
-            wave.quadraticTo    (centre.x + r * 0.35f, centre.y + r * 1.1f,
-                                    centre.x + r * 0.7f, centre.y + r * 0.85f);
-            g.strokePath (wave, juce::PathStrokeType (1.0f));
-            break;
-        }
-        case Glyph::TakeCycle:
-        {
-            // Two circular arrows forming a refresh-cycle.
-            juce::Path arc;
-            arc.addCentredArc (centre.x, centre.y, r * 0.9f, r * 0.9f,
-                                  0.0f,
-                                  juce::MathConstants<float>::pi * 0.35f,
-                                  juce::MathConstants<float>::pi * 1.40f, true);
-            g.strokePath (arc, juce::PathStrokeType (1.4f));
-            // Arrowhead at the end of the arc.
-            const float endAng = juce::MathConstants<float>::pi * 1.40f;
-            juce::Point<float> end (centre.x + std::sin (endAng) * r * 0.9f,
-                                       centre.y - std::cos (endAng) * r * 0.9f);
-            strokeArrowhead (end, end + juce::Point<float> (0.5f, 0.5f), 3.0f);
-            break;
-        }
         case Glyph::ZoomFit:
         {
             const float w = r * 0.95f;
@@ -1744,6 +2032,31 @@ void AudioRegionEditor::IconButton::paintButton (juce::Graphics& g,
             g.drawLine (centre.x + w, centre.y + bracketLen * 0.5f,
                           centre.x + w - armLen, centre.y + bracketLen * 0.5f, 1.4f);
             g.fillEllipse (centre.x - 1.5f, centre.y - 1.5f, 3.0f, 3.0f);
+            break;
+        }
+        case Glyph::ZoomIn:
+        {
+            // Magnifier with a "+" inside.
+            const float rad = r * 0.62f;
+            const float cx  = centre.x - r * 0.18f;
+            const float cy  = centre.y - r * 0.18f;
+            g.drawEllipse (cx - rad, cy - rad, rad * 2.0f, rad * 2.0f, 1.4f);
+            g.drawLine (cx + rad * 0.55f, cy + rad * 0.55f,
+                          centre.x + r * 0.85f, centre.y + r * 0.85f, 1.8f);
+            g.drawLine (cx - rad * 0.5f, cy, cx + rad * 0.5f, cy, 1.4f);
+            g.drawLine (cx, cy - rad * 0.5f, cx, cy + rad * 0.5f, 1.4f);
+            break;
+        }
+        case Glyph::ZoomOut:
+        {
+            // Magnifier with a "-" inside.
+            const float rad = r * 0.62f;
+            const float cx  = centre.x - r * 0.18f;
+            const float cy  = centre.y - r * 0.18f;
+            g.drawEllipse (cx - rad, cy - rad, rad * 2.0f, rad * 2.0f, 1.4f);
+            g.drawLine (cx + rad * 0.55f, cy + rad * 0.55f,
+                          centre.x + r * 0.85f, centre.y + r * 0.85f, 1.8f);
+            g.drawLine (cx - rad * 0.5f, cy, cx + rad * 0.5f, cy, 1.4f);
             break;
         }
         case Glyph::Properties:
@@ -1766,34 +2079,156 @@ void AudioRegionEditor::IconButton::paintButton (juce::Graphics& g,
 
 void AudioRegionEditor::layoutIconRow (juce::Rectangle<int> area)
 {
-    auto inner = area.reduced (8, 4);
-    const int dia = juce::jmin (inner.getHeight(), 28);
-    const int gap = 6;
+    auto inner = area.reduced (8, 6);
+    const int dia = juce::jmin (inner.getHeight(), 36);
+    const int gap = 8;
     auto place = [&] (IconButton& b)
     {
         b.setBounds (inner.removeFromLeft (dia).withSizeKeepingCentre (dia, dia));
         inner.removeFromLeft (gap);
     };
+    // Zoom cluster anchored on the FAR RIGHT (Fit | + | -). Lay it out
+    // first by removing from the right so it stays glued there as the
+    // rest of the row grows.
+    auto placeRight = [&] (IconButton& b)
+    {
+        b.setBounds (inner.removeFromRight (dia).withSizeKeepingCentre (dia, dia));
+        inner.removeFromRight (gap);
+    };
+    placeRight (zoomFitButton);
+    placeRight (zoomInButton);
+    placeRight (zoomOutButton);
+    inner.removeFromRight (8);
+
     place (undoButton);
     place (redoButton);
     inner.removeFromLeft (gap);
     place (splitButton);
     place (normalizeButton);
-    place (reverseButton);
-    place (takeCycleButton);
-    // Tiny take readout right after the TakeCycle button. Sized so
-    // "T99/99" fits comfortably; longer strings clip rather than push
-    // the rest of the toolbar.
-    takeReadout.setBounds (inner.removeFromLeft (44)
-                                  .withSizeKeepingCentre (44, area.getHeight() - 8));
-    inner.removeFromLeft (gap);
-    place (zoomFitButton);
     place (propertiesButton);
+    inner.removeFromLeft (12);
+    // Edit-mode palette + snap controls sized to match its internal
+    // layout (5 buttons × 30 + gaps + Snap + denomination dropdown).
+    if (editModeToolbar != nullptr)
+    {
+        constexpr int kToolbarWidth = 390;
+        const int w = juce::jmin (kToolbarWidth, inner.getWidth());
+        editModeToolbar->setBounds (inner.removeFromLeft (w));
+        inner.removeFromLeft (gap);
+    }
     // Title strip occupies what's left of the toolbar band. Stretches
     // so long region labels / filenames don't get truncated below the
     // available width.
     if (inner.getWidth() > 0)
         titleLabel.setBounds (inner.reduced (8, 2));
+}
+
+void AudioRegionEditor::syncEditModeToolbar()
+{
+    if (editModeToolbar != nullptr) editModeToolbar->syncFromSession();
+}
+
+void AudioRegionEditor::syncAutoCrossfades()
+{
+    if (trackIdx < 0 || trackIdx >= Session::kNumTracks) return;
+    auto& regs = session.track (trackIdx).regions;
+    if (regs.empty()) return;
+
+    // Sort indices by timelineStart so adjacent pairs match playback
+    // ordering. We then know, for each region, its immediate
+    // predecessor + successor in time.
+    std::vector<int> order;
+    order.reserve (regs.size());
+    for (int i = 0; i < (int) regs.size(); ++i) order.push_back (i);
+    std::sort (order.begin(), order.end(),
+                [&] (int a, int b)
+                {
+                    return regs[(size_t) a].timelineStart
+                         < regs[(size_t) b].timelineStart;
+                });
+
+    auto overlapWith = [&] (const AudioRegion& a, const AudioRegion& b) -> juce::int64
+    {
+        const auto aEnd = a.timelineStart + a.lengthInSamples;
+        if (aEnd <= b.timelineStart) return 0;
+        return juce::jmin (
+            aEnd - b.timelineStart,
+            juce::jmin (a.lengthInSamples, b.lengthInSamples));
+    };
+
+    auto& um = engine.getUndoManager();
+    for (size_t pos = 0; pos < order.size(); ++pos)
+    {
+        const int idx = order[pos];
+        auto& self = regs[(size_t) idx];
+        if (self.locked) continue;
+
+        juce::int64 overlapPrev = 0, overlapNext = 0;
+        if (pos > 0)
+            overlapPrev = overlapWith (regs[(size_t) order[pos - 1]], self);
+        if (pos + 1 < order.size())
+            overlapNext = overlapWith (self, regs[(size_t) order[pos + 1]]);
+
+        const AudioRegion before = self;
+        AudioRegion after = before;
+
+        // Fade-in is governed by overlap with the preceding region.
+        // Mutate only when the fade is auto-managed (or absent —
+        // implicitly auto, will be promoted). User-pinned fades stay.
+        if (after.fadeInAuto || after.fadeInSamples == 0)
+        {
+            if (overlapPrev > 0)
+            {
+                after.fadeInSamples = overlapPrev;
+                if (after.fadeInShape == FadeShape::Linear)
+                    after.fadeInShape = FadeShape::EqualPower;
+                after.fadeInAuto = true;
+            }
+            else if (after.fadeInAuto)
+            {
+                after.fadeInSamples = 0;
+                after.fadeInShape   = FadeShape::Linear;
+                after.fadeInAuto    = false;
+            }
+        }
+
+        // Fade-out governed by overlap with the following region.
+        if (after.fadeOutAuto || after.fadeOutSamples == 0)
+        {
+            if (overlapNext > 0)
+            {
+                after.fadeOutSamples = overlapNext;
+                if (after.fadeOutShape == FadeShape::Linear)
+                    after.fadeOutShape = FadeShape::EqualPower;
+                after.fadeOutAuto = true;
+            }
+            else if (after.fadeOutAuto)
+            {
+                after.fadeOutSamples = 0;
+                after.fadeOutShape   = FadeShape::Linear;
+                after.fadeOutAuto    = false;
+            }
+        }
+
+        // Re-clamp so fadeIn + fadeOut stays within the region length.
+        after.fadeInSamples  = juce::jlimit<juce::int64> (
+            0, after.lengthInSamples, after.fadeInSamples);
+        after.fadeOutSamples = juce::jlimit<juce::int64> (
+            0, after.lengthInSamples - after.fadeInSamples,
+            after.fadeOutSamples);
+
+        if (after.fadeInSamples  == before.fadeInSamples
+            && after.fadeOutSamples == before.fadeOutSamples
+            && after.fadeInShape    == before.fadeInShape
+            && after.fadeOutShape   == before.fadeOutShape
+            && after.fadeInAuto     == before.fadeInAuto
+            && after.fadeOutAuto    == before.fadeOutAuto)
+            continue;
+
+        self = before;   // RegionEditAction.perform re-applies after
+        um.perform (new RegionEditAction (
+            session, engine, trackIdx, idx, before, after));
+    }
 }
 
 void AudioRegionEditor::layoutStatusBar (juce::Rectangle<int> area)
@@ -1866,12 +2301,6 @@ void AudioRegionEditor::refreshStatusBarReadouts()
         muteToggle.setToggleState (r->muted,  juce::dontSendNotification);
         lockToggle.setToggleState (r->locked, juce::dontSendNotification);
 
-        // Take counter: live take is index 1; previousTakes stack
-        // alongside. "T1/3" = live + 2 stacked older takes.
-        const int totalTakes = 1 + (int) r->previousTakes.size();
-        takeReadout.setText ("T1/" + juce::String (totalTakes),
-                                juce::dontSendNotification);
-
         // Title: prefer user label, fall back to filename. Skip update
         // while the label is in edit mode so we don't stomp typed input.
         if (! titleLabel.isBeingEdited())
@@ -1902,38 +2331,6 @@ void AudioRegionEditor::zoomFit()
                                                    getWidth(),
                                                    getHeight() - kIconRowHeight - kRulerHeight - kStatusBarH);
     zoomFitToArea (waveArea);
-    repaint();
-}
-
-void AudioRegionEditor::cycleTake()
-{
-    auto* r = region();
-    if (r == nullptr || r->previousTakes.empty()) return;
-    const AudioRegion before = *r;
-    AudioRegion after = before;
-
-    // Rotate: front of previousTakes becomes the new active take; the
-    // current active take goes to the back. Same shape as TapeStrip's
-    // TakeBadge rotation logic.
-    TakeRef nextTake = after.previousTakes.front();
-    after.previousTakes.erase (after.previousTakes.begin());
-    TakeRef oldActive;
-    oldActive.file            = after.file;
-    oldActive.sourceOffset    = after.sourceOffset;
-    oldActive.lengthInSamples = after.lengthInSamples;
-    after.previousTakes.push_back (oldActive);
-    after.file            = nextTake.file;
-    after.sourceOffset    = nextTake.sourceOffset;
-    after.lengthInSamples = nextTake.lengthInSamples;
-    after.fadeInSamples   = juce::jlimit<juce::int64> (0, after.lengthInSamples, after.fadeInSamples);
-    after.fadeOutSamples  = juce::jlimit<juce::int64> (0, after.lengthInSamples - after.fadeInSamples,
-                                                            after.fadeOutSamples);
-
-    auto& um = engine.getUndoManager();
-    um.beginNewTransaction ("Cycle take");
-    um.perform (new RegionEditAction (session, engine, trackIdx, regionIdx, before, after));
-    rebuildThumbIfNeeded();
-    refreshStatusBarReadouts();
     repaint();
 }
 
@@ -1978,96 +2375,6 @@ void AudioRegionEditor::normalizeRegion()
     auto& um = engine.getUndoManager();
     um.beginNewTransaction ("Normalize");
     um.perform (new RegionEditAction (session, engine, trackIdx, regionIdx, before, after));
-    refreshStatusBarReadouts();
-    repaint();
-}
-
-void AudioRegionEditor::reverseRegion()
-{
-    auto* r = region();
-    if (r == nullptr || ! r->file.existsAsFile() || r->lengthInSamples <= 0) return;
-
-    auto warn = [] (const juce::String& msg)
-    {
-        juce::AlertWindow::showMessageBoxAsync (
-            juce::MessageBoxIconType::WarningIcon, "Reverse region", msg);
-    };
-
-    // Cap the in-memory reverse buffer at ~1 GiB of float storage across all
-    // channels (≈ 30 min mono / 15 min stereo @ 96 kHz). Above this the alloc
-    // becomes a real OOM risk; ask the user to split the region first.
-    constexpr juce::int64 kMaxReverseFloats = 256ll * 1024 * 1024;
-    const juce::int64 channelCount = juce::jmax<juce::int64> (1, r->numChannels);
-    if (r->lengthInSamples * channelCount > kMaxReverseFloats)
-    {
-        warn ("Region is too large to reverse in memory. Split it first, then reverse the pieces.");
-        return;
-    }
-
-    std::unique_ptr<juce::AudioFormatReader> reader (formatManager.createReaderFor (r->file));
-    if (reader == nullptr) { warn ("Could not open the source file for reading."); return; }
-
-    const auto numSamples = (int) juce::jlimit<juce::int64> (
-        1, std::numeric_limits<int>::max(), r->lengthInSamples);
-    const int channels = juce::jmax (1, (int) reader->numChannels);
-    juce::AudioBuffer<float> buf (channels, numSamples);
-    reader->read (&buf, 0, numSamples, r->sourceOffset, true, true);
-
-    // In-place reverse per channel.
-    for (int c = 0; c < channels; ++c)
-        std::reverse (buf.getWritePointer (c), buf.getWritePointer (c) + numSamples);
-
-    // Write to <session>/takes/<originalStem>-rev-<uuid>.wav.
-    auto takesDir = session.getSessionDirectory().getChildFile ("takes");
-    if (! takesDir.exists())
-    {
-        const auto res = takesDir.createDirectory();
-        if (res.failed()) { warn ("Could not create takes directory: " + res.getErrorMessage()); return; }
-    }
-    const auto outFile = takesDir.getNonexistentChildFile (
-        r->file.getFileNameWithoutExtension() + "-rev", ".wav", false);
-
-    juce::WavAudioFormat wav;
-    std::unique_ptr<juce::FileOutputStream> out (outFile.createOutputStream());
-    if (out == nullptr) { warn ("Could not open the output file for writing."); return; }
-    std::unique_ptr<juce::AudioFormatWriter> writer (
-        wav.createWriterFor (out.get(), reader->sampleRate, (juce::uint32) channels,
-                                (int) reader->bitsPerSample, {}, 0));
-    if (writer == nullptr)
-    {
-        // out still owns the stream; let it close on scope exit before deleting.
-        out.reset();
-        outFile.deleteFile();
-        warn ("Could not create the WAV writer.");
-        return;
-    }
-    out.release();   // ownership transferred to writer
-    if (! writer->writeFromAudioSampleBuffer (buf, 0, numSamples))
-    {
-        writer.reset();
-        outFile.deleteFile();
-        warn ("Failed to write the reversed audio to disk.");
-        return;
-    }
-    writer.reset();   // flush + close
-
-    const AudioRegion before = *r;
-    AudioRegion after = before;
-    after.file            = outFile;
-    after.sourceOffset    = 0;
-    after.lengthInSamples = numSamples;
-    // Rotate the original into previousTakes so the user can flip back via
-    // the Take-cycle icon - matches what cycleTake expects.
-    TakeRef oldTake;
-    oldTake.file            = before.file;
-    oldTake.sourceOffset    = before.sourceOffset;
-    oldTake.lengthInSamples = before.lengthInSamples;
-    after.previousTakes.insert (after.previousTakes.begin(), oldTake);
-
-    auto& um = engine.getUndoManager();
-    um.beginNewTransaction ("Reverse region");
-    um.perform (new RegionEditAction (session, engine, trackIdx, regionIdx, before, after));
-    rebuildThumbIfNeeded();
     refreshStatusBarReadouts();
     repaint();
 }
@@ -2277,14 +2584,16 @@ void AudioRegionEditor::navigateRegion (int delta)
 
 int AudioRegionEditor::transportPlayheadX (juce::Rectangle<int> waveArea) const
 {
-    const auto* r = region();
-    if (r == nullptr || r->lengthInSamples <= 0) return -1;
+    // Map the transport playhead via the anchor TIMELINE window so the
+    // line shows up across the entire wave area — including over the
+    // dimmed neighborhood slices and the gaps between them — not just
+    // inside the focused region's file-sample range.
     const auto playheadTimeline = engine.getTransport().getPlayhead();
-    const auto fileSample = r->sourceOffset
-                              + (playheadTimeline - r->timelineStart);
-    if (fileSample < r->sourceOffset
-        || fileSample > r->sourceOffset + r->lengthInSamples) return -1;
-    const int x = xForSample (fileSample, waveArea);
+    if (anchorTimelineLength <= 0) return -1;
+    if (playheadTimeline < anchorTimelineStart
+        || playheadTimeline >= anchorTimelineStart + anchorTimelineLength)
+        return -1;
+    const int x = xForTimelineSample (playheadTimeline, waveArea);
     if (x < waveArea.getX() || x > waveArea.getRight()) return -1;
     return x;
 }

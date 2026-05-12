@@ -66,7 +66,7 @@ BusComponent::BusComponent (Bus& b, Session& s, int idx)
     // way they would on an analog console. Stereo: two needles overlaid on
     // one face (L = black, R = oxblood).
     vuMeter = std::make_unique<AnalogVuMeter> (
-        &bus.strip.meterPostBusLDb, &bus.strip.meterPostBusRDb);
+        &bus.strip.meterPostBusRmsL, &bus.strip.meterPostBusRmsR);
     addAndMakeVisible (*vuMeter);
 
     const auto eqGreen = juce::Colour (0xff80c090);
@@ -309,32 +309,55 @@ void BusComponent::paint (juce::Graphics& g)
             g.setColour (juce::Colour (0xff2a2a2e));
             g.drawRoundedRectangle (bar, 1.5f, 0.6f);
 
-            const float frac = juce::jlimit (0.0f, 1.0f,
-                (displayedDb - kMinDb) / (kMaxDb - kMinDb));
+            // LED-style hard zones — match the channel-strip meter look.
+            const juce::Colour kLedGreen  (0xff20d040);
+            const juce::Colour kLedYellow (0xfff0e020);
+            const juce::Colour kLedRed    (0xffff2020);
+            auto fracForDb = [&] (float db)
+            {
+                return juce::jlimit (0.0f, 1.0f, (db - kMinDb) / (kMaxDb - kMinDb));
+            };
+            auto colourForDb = [&] (float db) -> juce::Colour
+            {
+                if (db >=  5.0f) return kLedRed;
+                if (db >= -5.0f) return kLedYellow;
+                return kLedGreen;
+            };
+
+            const float frac = fracForDb (displayedDb);
             const float fillH = (bar.getHeight() - 4.0f) * frac;
             if (fillH > 0.5f)
             {
-                auto fillRect = juce::Rectangle<float> (bar.getX() + 1.5f,
-                                                         bar.getBottom() - 2.0f - fillH,
-                                                         bar.getWidth() - 3.0f, fillH);
-                // Soft outer glow - two stacked translucent rectangles in
-                // the meter's tip colour. Cheap (no Gaussian blur) and the
-                // alpha falloff reads as bloom around the lit area.
-                const auto tipCol = (frac > 0.85f) ? juce::Colour (0xffff5050)
-                                                    : (frac > 0.65f) ? juce::Colour (0xffe0c050)
-                                                                       : juce::Colour (0xff70c060);
-                g.setColour (tipCol.withAlpha (0.18f));
+                const float x = bar.getX() + 1.5f;
+                const float w = bar.getWidth() - 3.0f;
+                const float yFillTop = bar.getBottom() - 2.0f - fillH;
+                const float yFillBot = bar.getBottom() - 2.0f;
+                const auto fillRect = juce::Rectangle<float> (x, yFillTop, w, fillH);
+
+                const auto tipCol = colourForDb (displayedDb);
+                g.setColour (tipCol.withAlpha (0.20f));
                 g.fillRoundedRectangle (fillRect.expanded (1.5f), 2.0f);
                 g.setColour (tipCol.withAlpha (0.10f));
                 g.fillRoundedRectangle (fillRect.expanded (3.0f), 3.0f);
 
-                juce::ColourGradient grad (juce::Colour (0xff70c060),
-                                            fillRect.getX(), fillRect.getBottom(),
-                                            juce::Colour (0xffff5050),
-                                            fillRect.getX(), bar.getY(), false);
-                grad.addColour (0.65, juce::Colour (0xffe0c050));
-                g.setGradientFill (grad);
-                g.fillRoundedRectangle (fillRect, 1.0f);
+                const float yRedTop    = bar.getBottom() - 2.0f - fracForDb ( 5.0f) * (bar.getHeight() - 4.0f);
+                const float yYellowTop = bar.getBottom() - 2.0f - fracForDb (-5.0f) * (bar.getHeight() - 4.0f);
+
+                auto fillBand = [&] (float top, float bottom, juce::Colour col)
+                {
+                    if (bottom <= top) return;
+                    g.setColour (col);
+                    g.fillRect (juce::Rectangle<float> (x, top, w, bottom - top));
+                };
+                fillBand (juce::jmax (yFillTop, bar.getY()),
+                            juce::jmin (yRedTop, yFillBot),
+                            kLedRed);
+                fillBand (juce::jmax (yFillTop, yRedTop),
+                            juce::jmin (yYellowTop, yFillBot),
+                            kLedYellow);
+                fillBand (juce::jmax (yFillTop, yYellowTop),
+                            yFillBot,
+                            kLedGreen);
             }
         };
 

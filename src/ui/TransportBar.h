@@ -14,9 +14,15 @@ namespace focal
 class TransportIconButton final : public juce::Button
 {
 public:
-    enum class Icon { Stop, Play, Record, Rewind, Forward, Loop, Punch, Keyboard };
+    enum class Icon { Stop, Play, Record, Rewind, Forward, Loop, Punch, Keyboard,
+                       Bars, TimeClock, Metronome };
 
     TransportIconButton (const juce::String& name, Icon icon, juce::Colour activeColour);
+
+    // Swap which glyph the button paints. Used by timeFormatToggle so the
+    // button can flip between a clock and a bar/beat icon as the user
+    // cycles modes without rebuilding the button.
+    void setIcon (Icon newIcon) noexcept { iconType = newIcon; repaint(); }
 
     void paintButton (juce::Graphics&, bool isMouseOver, bool isButtonDown) override;
 
@@ -110,7 +116,9 @@ private:
     bool        ffwdIsScrubbing = false;
     juce::int64 lastScrubTickMs = 0;
     juce::TextButton snapToggle    { "SNAP" };
-    juce::TextButton clickToggle   { "CLICK" };
+    TransportIconButton clickToggle { "Metronome",
+                                          TransportIconButton::Icon::Metronome,
+                                          juce::Colour (0xff60c060) };
     juce::TextButton countInToggle { "C/I" };
     juce::Label      bpmCaption;
     juce::Label      bpmValue;
@@ -141,10 +149,17 @@ private:
     // Hidden in compact mode to avoid colliding with MainComponent's
     // bank-button overlay; right-click on clockLabel is the always-
     // available fallback.
-    juce::TextButton timeFormatToggle { "TIME" };
+    // Icon swaps between a bar/beat glyph (when in Time mode — clicking
+    // returns to Bars) and a clock glyph (when in Bars mode — clicking
+    // switches to Time). Visual flips inverse of the active mode so the
+    // icon always shows "what you'll get on click", matching the text
+    // convention this replaced.
+    TransportIconButton timeFormatToggle { "Time/Bars toggle",
+                                              TransportIconButton::Icon::TimeClock,
+                                              juce::Colour (0xff7080a0) };
     // Action stored so the clock's right-click handler can fire the
     // same code path as the button's onClick.
-    std::function<void()> flipTimeModeOnClock;
+    std::function<void()> flipTimeModeOnClock { [] {} };
     juce::Label      hintLabel;
 
 public:

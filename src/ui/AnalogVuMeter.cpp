@@ -16,21 +16,25 @@ const juce::Colour kNeedle         { 0xff141418 };
 const juce::Colour kNeedleR        { 0xff8a2828 };
 const juce::Colour kPivotHousing   { 0xff222226 };
 
-// Voltage-linear mapping (10^(dB/20)) - matches a real galvanometer's
-// mechanical response and puts 0 VU at ~70 % of the dial travel exactly
-// like the reference photo.
+// IEC 60268-17 dB-linear scale: -20 VU at 0 %, 0 VU at ~87 %, +3 VU at
+// 100 %. Matches the TapeMachine plugin's VU scale so meters across the
+// mixer + TapeMachine read the same on identical signals.
 float dbToFraction (float vuDb) noexcept
 {
-    constexpr float kMaxVu = 3.0f;
-    const float maxV = std::pow (10.0f, kMaxVu / 20.0f);
-    const float v    = std::pow (10.0f, juce::jmin (vuDb, kMaxVu) / 20.0f);
-    return juce::jlimit (0.0f, 1.0f, v / maxV);
+    return juce::jlimit (0.0f, 1.0f, (vuDb + 20.0f) / 23.0f);
 }
 
-// Visible idle position so the needle doesn't collapse into a flat-left
-// stub when the meter is silent. -25 dB ≈ 5 % travel - reads as "off"
-// without looking broken.
-constexpr float kIdleVuDb = -25.0f;
+// Scale endpoints in VU dB (mirrors TapeMachine clamp).
+constexpr float kVuMin = -20.0f;
+constexpr float kVuMax =   3.0f;
+
+// IEC 60268-17 ballistics (300 ms rise to 99 % via 65 ms RC) + mechanical
+// spring overshoot. Same constants TapeMachine uses so the needles share
+// dynamic behaviour, not just scale.
+constexpr float kRefreshHz         = 60.0f;
+constexpr float kVuTimeConstantMs  = 65.0f;
+constexpr float kOvershootDamping  = 0.78f;
+constexpr float kOvershootStiff    = 180.0f;
 
 struct LabelledTick
 {
@@ -57,11 +61,11 @@ const LabelledTick kTicks[] =
 } // namespace
 
 AnalogVuMeter::AnalogVuMeter (const std::atomic<float>* l, const std::atomic<float>* r)
-    : leftDb (l), rightDb (r)
+    : leftRms (l), rightRms (r)
 {
     setInterceptsMouseClicks (false, false);
     setOpaque (false);
-    startTimerHz (30);
+    startTimerHz ((int) kRefreshHz);
 }
 
 AnalogVuMeter::~AnalogVuMeter() = default;
@@ -90,22 +94,37 @@ void AnalogVuMeter::resized()
 
 void AnalogVuMeter::timerCallback()
 {
-    if (leftDb == nullptr) return;
+    if (leftRms == nullptr) return;
 
-    constexpr float kAlpha = 0.40f;
-    auto smooth = [] (float& current, float target)
+    const float dt      = 1.0f / kRefreshHz;
+    const float vuCoeff = 1.0f - std::exp (-1000.0f * dt / kVuTimeConstantMs);
+    const float critDamp = kOvershootDamping * 2.0f * std::sqrt (kOvershootStiff);
+
+    auto rmsToVuDb = [this] (const std::atomic<float>* atom)
     {
-        current += kAlpha * (target - current);
+        const float rms = juce::jmax (1.0e-6f, atom->load (std::memory_order_relaxed));
+        const float dbFs = 20.0f * std::log10 (rms);
+        return juce::jlimit (kVuMin, kVuMax, dbFs - referenceDbFs);
     };
 
-    const float l = leftDb->load (std::memory_order_relaxed) - referenceDbFs;
-    smooth (displayedDbL, juce::jmax (l, kIdleVuDb));
-
-    if (rightDb != nullptr)
+    auto tickChannel = [&] (const std::atomic<float>* atom, float& pos, float& vel)
     {
-        const float r = rightDb->load (std::memory_order_relaxed) - referenceDbFs;
-        smooth (displayedDbR, juce::jmax (r, kIdleVuDb));
-    }
+        const float target = (rmsToVuDb (atom) - kVuMin) / (kVuMax - kVuMin);
+
+        const float springForce  = (target - pos) * kOvershootStiff;
+        const float dampingForce = -vel * critDamp;
+        vel += (springForce + dampingForce) * dt;
+        pos += vel * dt;
+        pos += vuCoeff * (target - pos) * 0.3f;
+        pos  = juce::jlimit (0.0f, 1.0f, pos);
+
+        if (std::abs (vel) < 0.001f && std::abs (target - pos) < 0.001f)
+            vel = 0.0f;
+    };
+
+    tickChannel (leftRms, needlePosL, needleVelL);
+    if (rightRms != nullptr)
+        tickChannel (rightRms, needlePosR, needleVelR);
 
     repaint();
 }
@@ -210,10 +229,9 @@ void AnalogVuMeter::paint (juce::Graphics& g)
     if (cachedFace.isValid())
         g.drawImageAt (cachedFace, 0, 0);
 
-    auto drawNeedle = [&] (float displayDb, juce::Colour c, float thickness)
+    auto drawNeedle = [&] (float frac, juce::Colour c, float thickness)
     {
-        const float frac = dbToFraction (displayDb);
-        const float deg  = (frac - 0.5f) * 2.0f * halfArcDeg - 90.0f;
+        const float deg = (frac - 0.5f) * 2.0f * halfArcDeg - 90.0f;
         const float rad  = juce::degreesToRadians (deg);
         // Needle starts inside the visible pivot housing and ends just
         // shy of the tick line, never overshooting into the tick numbers.
@@ -229,8 +247,8 @@ void AnalogVuMeter::paint (juce::Graphics& g)
 
     // Right needle slightly behind the left one (drawn first) so a centred-
     // pan stereo signal shows the mono read-out cleanly with the L on top.
-    if (rightDb != nullptr)
-        drawNeedle (displayedDbR, kNeedleR, 1.2f);
-    drawNeedle (displayedDbL, kNeedle, 1.4f);
+    if (rightRms != nullptr)
+        drawNeedle (needlePosR, kNeedleR, 1.2f);
+    drawNeedle (needlePosL, kNeedle, 1.4f);
 }
 } // namespace focal

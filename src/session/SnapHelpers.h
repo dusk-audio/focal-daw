@@ -45,23 +45,76 @@ namespace focal::snap
         return ((sample + step / 2) / step) * step;
     }
 
+    // Step in samples for a SnapResolution at the current tempo + time-sig.
+    // Musical resolutions multiply the quarter-note step (sr * 60 / bpm) by
+    // a fraction (eighth = 0.5, sixteenth = 0.25, etc.). Triplets are ×2/3,
+    // dotted are ×3/2. Bar uses the active beatsPerBar so 3/4 vs 4/4 give
+    // different bar widths. Timecode / MinSec / CD-Frames are sample-rate
+    // multiples that don't depend on tempo. Returns 0 when sr <= 0 or
+    // when a tempo-dependent step is requested with bpm <= 0 (caller
+    // sees this as "snap disabled" since snapDelta/snapAbsolute no-op
+    // on step <= 0).
+    inline juce::int64 stepForResolution (SnapResolution r, double sampleRate,
+                                           float bpm, int beatsPerBar) noexcept
+    {
+        if (sampleRate <= 0.0) return 0;
+        const auto musical = [&] (float quartersPerStep) -> juce::int64
+        {
+            if (bpm <= 0.0f) return 0;
+            const double quarterSamples = sampleRate * 60.0 / (double) bpm;
+            return (juce::int64) (quarterSamples * (double) quartersPerStep);
+        };
+        switch (r)
+        {
+            case SnapResolution::Bar:             return musical ((float) juce::jmax (1, beatsPerBar));
+            case SnapResolution::Half:            return musical (2.0f);
+            case SnapResolution::Quarter:         return musical (1.0f);
+            case SnapResolution::Eighth:          return musical (0.5f);
+            case SnapResolution::Sixteenth:       return musical (0.25f);
+            case SnapResolution::ThirtySecond:    return musical (0.125f);
+            case SnapResolution::SixtyFourth:     return musical (0.0625f);
+            case SnapResolution::OneTwentyEighth: return musical (0.03125f);
+            case SnapResolution::HalfTriplet:     return musical (2.0f      * 2.0f / 3.0f);
+            case SnapResolution::QuarterTriplet:  return musical (1.0f      * 2.0f / 3.0f);
+            case SnapResolution::EighthTriplet:   return musical (0.5f      * 2.0f / 3.0f);
+            case SnapResolution::SixteenthTriplet: return musical (0.25f     * 2.0f / 3.0f);
+            case SnapResolution::ThirtySecondTrip: return musical (0.125f    * 2.0f / 3.0f);
+            case SnapResolution::HalfDotted:      return musical (2.0f      * 1.5f);
+            case SnapResolution::QuarterDotted:   return musical (1.5f);
+            case SnapResolution::EighthDotted:    return musical (0.75f);
+            case SnapResolution::SixteenthDotted: return musical (0.375f);
+            case SnapResolution::Timecode:        return (juce::int64) (sampleRate / 25.0);
+            case SnapResolution::MinSec:          return (juce::int64) sampleRate;
+            case SnapResolution::CDFrames:        return (juce::int64) (sampleRate / 75.0);
+        }
+        return 0;
+    }
+
     // Convenience: gate the delta-snap on session.snapToGrid using the
-    // beat-or-second step model. Matches the four sites in TapeStrip.cpp.
+    // session's active SnapResolution. Falls back to a 1-second step when
+    // the resolution is musical but no tempo is set, preserving the prior
+    // "snap to something" guarantee callers relied on.
     inline juce::int64 snapDeltaToGrid (juce::int64 delta, const Session& s,
                                         double sampleRate) noexcept
     {
         if (! s.snapToGrid) return delta;
-        return snapDelta (delta, beatOrSecondSamples (sampleRate,
-                                                     s.tempoBpm.load (std::memory_order_relaxed)));
+        const auto bpm = s.tempoBpm.load (std::memory_order_relaxed);
+        const auto bpb = s.beatsPerBar.load (std::memory_order_relaxed);
+        auto step = stepForResolution (s.snapResolution, sampleRate, bpm, bpb);
+        if (step <= 0 && sampleRate > 0.0) step = (juce::int64) sampleRate;  // 1-second fallback
+        return snapDelta (delta, step);
     }
 
     // Convenience: gate the absolute-snap on session.snapToGrid using the
-    // beat-only step model. Matches the new-MIDI-region site in TapeStrip.cpp.
+    // session's active SnapResolution. Skips snapping entirely when no
+    // valid step is available (matches prior new-region behaviour).
     inline juce::int64 snapAbsoluteToGrid (juce::int64 sample, const Session& s,
                                            double sampleRate) noexcept
     {
         if (! s.snapToGrid) return sample;
-        return snapAbsolute (sample, beatSamples (sampleRate,
-                                                 s.tempoBpm.load (std::memory_order_relaxed)));
+        const auto bpm = s.tempoBpm.load (std::memory_order_relaxed);
+        const auto bpb = s.beatsPerBar.load (std::memory_order_relaxed);
+        return snapAbsolute (sample,
+                              stepForResolution (s.snapResolution, sampleRate, bpm, bpb));
     }
 }

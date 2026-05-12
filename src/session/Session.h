@@ -285,6 +285,54 @@ inline juce::int64 ticksToSamples (juce::int64 ticks,
 // transport-bar's toggle button (Bars first since it's the default).
 enum class TimeDisplayMode : int { Bars = 0, Time = 1 };
 
+// Ardour-style edit mode. Click + drag semantics on the arrange surface
+// (TapeStrip) and inside the region editor branch on this. Grab is the
+// historical default — same gestures Focal had before the mode palette
+// landed. Range, Cut, Grid, Draw are layered on top: each one specialises
+// what a body-click does. Stretch is deliberately absent (Focal spec
+// forbids time-stretching).
+enum class EditMode : int
+{
+    Grab  = 0,   // default: click = cursor, body drag = move region
+    Range = 1,   // any body drag = time-range selection
+    Cut   = 2,   // single click on region body = split at cursor
+    Grid  = 3,   // ruler click adds/edits a tempo-map event (Phase 3c)
+    Draw  = 4    // MIDI: note pencil; Audio: gain envelope breakpoints (3d)
+};
+
+// Snap denomination. The Ardour-style snap UX is two orthogonal controls:
+//   • session.snapToGrid (bool, declared below) — on/off master switch.
+//     SnapHelpers no-op when this is false regardless of the resolution.
+//   • session.snapResolution (this enum) — grid size used when snapping
+//     is on. Musical resolutions (Bar..1/128) are relative to the current
+//     tempo + time-signature. Triplets are ×2/3 of the base, dotted are
+//     ×3/2. Non-musical modes — Timecode (25 fps frame), MinSec (1 second),
+//     CD-Frames (75 fps frame) — ignore tempo entirely. Quarter is the
+//     default and matches the historical "one beat" behaviour.
+enum class SnapResolution : int
+{
+    Bar              =  0,
+    Half             =  1,
+    Quarter          =  2,
+    Eighth           =  3,
+    Sixteenth        =  4,
+    ThirtySecond     =  5,
+    SixtyFourth      =  6,
+    OneTwentyEighth  =  7,
+    HalfTriplet      =  8,
+    QuarterTriplet   =  9,
+    EighthTriplet    = 10,
+    SixteenthTriplet = 11,
+    ThirtySecondTrip = 12,
+    HalfDotted       = 13,
+    QuarterDotted    = 14,
+    EighthDotted     = 15,
+    SixteenthDotted  = 16,
+    Timecode         = 17,
+    MinSec           = 18,
+    CDFrames         = 19
+};
+
 // Shared sample-position formatter. Every surface that displays a
 // playhead / cursor position routes through this so flipping
 // Session::timeDisplayMode swaps the whole app's representation
@@ -470,6 +518,17 @@ struct AudioRegion
     // toward the unity / silent end respectively.
     FadeShape fadeInShape  = FadeShape::Linear;
     FadeShape fadeOutShape = FadeShape::Linear;
+
+    // True when this fade was created by the editor's auto-crossfade
+    // path (i.e. a move-drag produced an overlap with a neighbour).
+    // The next move re-syncs these auto fades to the current overlap
+    // length and clears them entirely when the overlap is gone, so a
+    // region dragged out of overlap doesn't keep a stray ramp. Cleared
+    // whenever the user manually drags the fade handle, picks a shape
+    // explicitly, or runs "Reset fades" — those gestures promote the
+    // fade to user-owned and pin it against future auto-retraction.
+    bool fadeInAuto  = false;
+    bool fadeOutAuto = false;
 
     // Per-region gain in dB. Default 0.0 = unity (no change). Applied
     // multiplicatively in PlaybackEngine's per-sample loop, on top of
@@ -661,10 +720,15 @@ struct BusParams
 
     // Metering - written from the audio thread, read from UI. mutable for
     // const-DSP-pointer write semantics (same pattern as MasterBusParams).
-    // Stereo L+R for the bus LED meter.
-    mutable std::atomic<float> meterPostBusLDb { -100.0f };
-    mutable std::atomic<float> meterPostBusRDb { -100.0f };
-    mutable std::atomic<float> meterGrDb       { 0.0f };
+    // Stereo L+R for the bus LED meter. dB atoms are peak-of-block, used by
+    // LED meters. RMS atoms are linear amplitude smoothed at 300 ms tau on
+    // the audio thread, used by the analog VU - same signal TapeMachine's
+    // VU integrates internally so mixer + TapeMachine VUs track together.
+    mutable std::atomic<float> meterPostBusLDb  { -100.0f };
+    mutable std::atomic<float> meterPostBusRDb  { -100.0f };
+    mutable std::atomic<float> meterPostBusRmsL { 0.0f };
+    mutable std::atomic<float> meterPostBusRmsR { 0.0f };
+    mutable std::atomic<float> meterGrDb        { 0.0f };
 };
 
 struct Bus
@@ -760,10 +824,15 @@ struct MasterBusParams
     // Metering - written from the audio thread each block, polled by UI.
     // `mutable` so DSP code holding a `const MasterBusParams*` can update
     // these even through a const surface (write-by-DSP semantics). Stereo
-    // L+R so the master LED can render two channels side by side.
-    mutable std::atomic<float> meterPostMasterLDb { -100.0f };
-    mutable std::atomic<float> meterPostMasterRDb { -100.0f };
-    mutable std::atomic<float> meterGrDb          { 0.0f };
+    // L+R so the master LED can render two channels side by side. dB atoms
+    // are peak-of-block (LED meter); RMS atoms are linear amplitude
+    // smoothed at 300 ms tau on the audio thread (analog VU - matches the
+    // TapeMachine plugin's internal VU integrator so meters track together).
+    mutable std::atomic<float> meterPostMasterLDb  { -100.0f };
+    mutable std::atomic<float> meterPostMasterRDb  { -100.0f };
+    mutable std::atomic<float> meterPostMasterRmsL { 0.0f };
+    mutable std::atomic<float> meterPostMasterRmsR { 0.0f };
+    mutable std::atomic<float> meterGrDb           { 0.0f };
 };
 
 // Mastering-stage chain parameters. Independent of MasterBusParams so the
@@ -809,9 +878,13 @@ struct MasteringParams
     std::atomic<float> limiterCeilingDb{ -0.3f };
     std::atomic<float> limiterReleaseMs{ 100.0f };
 
-    // Output meters - mutable for write-by-DSP semantics.
-    mutable std::atomic<float> meterPostMasterLDb { -100.0f };
-    mutable std::atomic<float> meterPostMasterRDb { -100.0f };
+    // Output meters - mutable for write-by-DSP semantics. dB atoms = peak
+    // (LED), RMS atoms = linear amplitude smoothed at 300 ms tau on the
+    // audio thread (analog VU - matches TapeMachine's internal integrator).
+    mutable std::atomic<float> meterPostMasterLDb  { -100.0f };
+    mutable std::atomic<float> meterPostMasterRDb  { -100.0f };
+    mutable std::atomic<float> meterPostMasterRmsL { 0.0f };
+    mutable std::atomic<float> meterPostMasterRmsR { 0.0f };
     mutable std::atomic<float> meterCompGrDb     { 0.0f };
     mutable std::atomic<float> meterLimiterGrDb  { 0.0f };
 
@@ -907,11 +980,26 @@ public:
     juce::int64 savedPunchOut     = 0;
     bool        savedPunchEnabled = false;
 
-    // Region-edit snap. When true, region drags (move + trim) round to
-    // beat boundaries (1 beat = 60 / tempoBpm seconds) when tempoBpm > 0,
-    // or to 1-second boundaries otherwise. Touched only on the message
-    // thread.
-    bool snapToGrid = false;
+    // Snap-to-grid is two orthogonal fields by design, matching the
+    // Ardour Snap toggle + Snap-denomination dropdown UX:
+    //   snapToGrid     - master enable/disable. SnapHelpers no-ops when
+    //                    false regardless of the resolution. Toggled by
+    //                    the EditModeToolbar "Snap" button.
+    //   snapResolution - which grid the snap rounds to (Bar / Half /
+    //                    Quarter / triplets / dotted / Timecode / etc.).
+    //                    Lives independently so toggling the master off
+    //                    and back on preserves the user's denomination
+    //                    pick. Toggled by the EditModeToolbar dropdown.
+    // Both touched only on the message thread.
+    bool           snapToGrid     = false;
+    SnapResolution snapResolution = SnapResolution::Quarter;
+
+    // Ardour-style edit mode. Determines what a click/drag on the arrange
+    // surface (TapeStrip) or the region editor does. Mouse handlers in
+    // both components branch on this at the top of mouseDown. Persisted
+    // in the transport block of session.json so the user's mode stays
+    // across sessions. Touched only on the message thread.
+    EditMode editMode = EditMode::Grab;
 
     // Global oversampling factor applied to effects that support it (master
     // tape sat, master/aux bus comp). Per-channel comp + EQ run at native

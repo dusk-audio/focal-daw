@@ -10,29 +10,38 @@ namespace focal
 {
 class PluginSlot;
 class AuxLaneStrip;
+class AudioEngine;
+class AuxEditorHost;
 
 // One AUX return lane. Mute, return-level fader, name + colour, plus
-// AuxLaneParams::kMaxLanePlugins plugin slots stacked vertically. Each slot
-// embeds the loaded plugin's full juce::AudioProcessorEditor inline (no
-// popup) - users see the plugin's own UI directly in the lane, which is why
-// we cap slot count at 1-2.
+// AuxLaneParams::kMaxLanePlugins plugin slots. The slot's plugin editor
+// is hosted by an AuxEditorHost - a borderless X11 toplevel positioned
+// over the lane's slot rect so the user perceives it as embedded. The
+// editor cannot be a true Component child of the lane on Wayland because
+// X11 plugin windows can't reparent into a wl_surface.
 class AuxLaneComponent final : public juce::Component, private juce::Timer
 {
 public:
-    AuxLaneComponent (AuxLane& laneRef, AuxLaneStrip& strip, int laneIndex);
+    AuxLaneComponent (AuxLane& laneRef, AuxLaneStrip& strip, int laneIndex,
+                       AudioEngine& engineRef);
     ~AuxLaneComponent() override;
 
     void paint (juce::Graphics&) override;
     void resized() override;
 
-    // Tear down every aux-slot popout window owned by this lane,
-    // routing each through focal::platform::prepareForTopLevelDestruction
-    // first so the X-protocol focus is transferred BEFORE the
-    // unique_ptr.reset(). Called from AuxView::closeAllAuxPopouts at
-    // app shutdown - without this, an open Diva popout cascading
-    // through ~MainWindow → ~AuxLaneComponent destroyed an X11
-    // toplevel that mutter still considered focused, aborting the
-    // Wayland session at meta_window_unmanage.
+    // Push the current slot screen-rect to every loaded slot's
+    // AuxEditorHost so the host tracks main-window movement and lane
+    // re-layout. Called from MainComponent's movement watcher.
+    void repositionEditorHosts();
+
+    // Hide / show every loaded slot's AuxEditorHost without destroying
+    // them. Used when AUX view is swapped out (MIXING / RECORDING /
+    // MASTERING) or another AUX lane becomes active.
+    void setEditorHostsHidden (bool hidden);
+
+    // Tear down every editor host owned by this lane through the
+    // X-focus-safe path. Called from AuxView::closeAllAuxPopouts at app
+    // shutdown.
     void closeAllPopoutsForShutdown();
 
     static constexpr int kMinLaneWidth = 220;
@@ -46,12 +55,13 @@ private:
     void unloadSlot (int slotIdx);
     void toggleEditorForSlot (int slotIdx);
     void refreshSlotControls (int slotIdx);
-    void togglePopoutForSlot (int slotIdx);
-    void closePopoutForSlot (int slotIdx);
-    void attachEditorInline (int slotIdx);
+    void createEditorHostForSlot (int slotIdx);
+    void destroyEditorHostForSlot (int slotIdx);
+    juce::Rectangle<int> computeSlotScreenRect (int slotIdx) const;
 
     AuxLane& lane;
     AuxLaneStrip& strip;
+    AudioEngine& engine;
     int laneIndex;
 
     juce::Label   nameLabel;
@@ -60,37 +70,18 @@ private:
 
     struct SlotUI
     {
-        juce::TextButton openOrAddButton;     // "+ Plugin" when empty; plugin name + click-to-toggle-editor when loaded
+        juce::TextButton openOrAddButton;     // "+ Plugin" when empty; plugin name + click-to-toggle when loaded
         juce::TextButton bypassButton;
         juce::TextButton removeButton;
-        juce::TextButton popoutButton;        // ↗ - opens the editor in a separate floating window
 
-        // Editor is parented directly to AuxLaneComponent. We tried wrapping
-        // it in a juce::Viewport for inline scrolling but that broke LV2
-        // (Suil-hosted X11 child windows lose their visual parent across
-        // Viewport contentHolder reparenting → black editor) and didn't
-        // help most commercial plugins anyway (mouse-wheel events get
-        // consumed by the plugin's own controls). Plugins that don't fit
-        // get clipped at the slot bounds; users can pop the editor out
-        // into a floating window for the full UI.
+        // Editor lives inside an AuxEditorHost (borderless X11 toplevel
+        // tracked to the slot's screen rect), not as a Component child
+        // of the lane. The unique_ptr keeps the editor alive across
+        // load/replace cycles; AuxEditorHost holds a non-owning content
+        // pointer.
         std::unique_ptr<juce::AudioProcessorEditor> editor;
+        std::unique_ptr<AuxEditorHost>              editorHost;
         juce::String displayedName;
-        int editorNativeW = 0;
-        int editorNativeH = 0;
-
-        // When non-null, the editor lives inside this floating window
-        // instead of being a child of the lane. Closing the window snaps
-        // the editor back inline.
-        //
-        // Uses a unique_ptr to a custom DocumentWindow subclass instead
-        // of juce::DialogWindow::launchAsync's auto-deleting raw pointer:
-        // the auto-delete + manual delete race was racing the windowing
-        // system's destroy/unmap ordering and on Linux/Wayland (Mutter)
-        // could take down the desktop session. The custom subclass calls
-        // back to AuxLaneComponent when the user clicks the X button so
-        // every close path converges on a single deferred destruction.
-        class AuxPopoutWindow;
-        std::unique_ptr<AuxPopoutWindow> popoutWindow;
     };
     std::array<SlotUI, AuxLaneParams::kMaxLanePlugins> slots;
     std::unique_ptr<juce::FileChooser> activePluginChooser;

@@ -640,7 +640,8 @@ ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
     // 1 px border drew on top of the textbox edge, looking like overlap.
     inputPeakLabel.setColour (juce::Label::outlineColourId,    juce::Colours::transparentBlack);
     inputPeakLabel.setFont (juce::Font (juce::FontOptions (juce::Font::getDefaultMonospacedFontName(),
-                                                            13.0f, juce::Font::bold)));
+                                                            10.0f, juce::Font::bold)));
+    inputPeakLabel.setMinimumHorizontalScale (1.0f);   // never truncate to "..."
     inputPeakLabel.setText ("-inf", juce::dontSendNotification);
     addAndMakeVisible (inputPeakLabel);
 
@@ -1149,17 +1150,29 @@ void ChannelStripComponent::openPluginPicker()
                                         // Replace plugin... action from crashing the DAW (or
                                         // the entire compositor).
                                         //
-                                        // Do NOT auto-open the new plugin's editor. The user
-                                        // can right-click -> Open editor when ready; pairing
-                                        // a destroy-old-editor with an immediate
-                                        // create-new-editor is exactly the rapid lifecycle
-                                        // churn that some plugins (Diva, MininnDrum) crash on.
+                                        // Auto-open the new plugin's editor so a pick / replace
+                                        // immediately surfaces the GUI. Sequence each step on its
+                                        // own message-loop tick: close (now) → refresh (next
+                                        // tick) → open (the tick after that). The two-tick gap
+                                        // separates the old editor's destruction from the new
+                                        // editor's construction so plugins with fragile lifecycle
+                                        // teardown (Diva, MininnDrum) don't see destroy+create
+                                        // collapse into a single frame.
                                         self->closePluginEditor();
                                         juce::Component::SafePointer<ChannelStripComponent> deferred (self);
                                         juce::MessageManager::callAsync ([deferred]
                                         {
-                                            if (auto* s = deferred.getComponent())
-                                                s->refreshPluginSlotButton();
+                                            auto* s = deferred.getComponent();
+                                            if (s == nullptr) return;
+                                            s->refreshPluginSlotButton();
+                                            juce::Component::SafePointer<ChannelStripComponent> openLater (s);
+                                            juce::MessageManager::callAsync ([openLater]
+                                            {
+                                                auto* ss = openLater.getComponent();
+                                                if (ss == nullptr) return;
+                                                if (ss->pluginSlot.isLoaded() && ! ss->isPluginEditorOpen())
+                                                    ss->openPluginEditor();
+                                            });
                                         });
                                     },
                                     kind);
@@ -1259,7 +1272,8 @@ void ChannelStripComponent::togglePluginEditor()
 // own renderer (GL / Cairo / VSTGUI). Owned by ChannelStripComponent;
 // closeButtonPressed forwards back so the strip can drop our unique_ptr
 // when the user clicks X.
-class ChannelStripComponent::PluginEditorWindow final : public juce::DocumentWindow
+class ChannelStripComponent::PluginEditorWindow final : public juce::DocumentWindow,
+                                                          private juce::ComponentListener
 {
 public:
     // Body is taken as a juce::Component& rather than the more specific
@@ -1272,7 +1286,8 @@ public:
     // (getWidth/getHeight/setSize/setContentNonOwned).
     PluginEditorWindow (const juce::String& title,
                         juce::Component& editor,
-                        std::function<void()> onCloseButton)
+                        std::function<void()> onCloseButton,
+                        AudioEngine* engineForTransport = nullptr)
         : juce::DocumentWindow (([&]
                                   {
                                       // Plugin editors are X11 children
@@ -1292,9 +1307,12 @@ public:
                                   juce::Colour (0xff202024),
                                   juce::DocumentWindow::closeButton,
                                   /*addToDesktop*/ true),
-          onClose (std::move (onCloseButton))
+          onClose (std::move (onCloseButton)),
+          enginePtr (engineForTransport),
+          trackedEditor (&editor)
     {
         setUsingNativeTitleBar (true);
+        editor.addComponentListener (this);
 
         // Force a size on the editor BEFORE we touch the window so the
         // window can be sized correctly even before content-set. Some
@@ -1348,6 +1366,33 @@ public:
             self->setContentNonOwned (ed, /*resizeToFitContent*/ true);
         });
 
+        // Staged re-fits. LV2 plugin UIs (Antress 4K_EQ being the canonical
+        // offender) finalize their preferred geometry after the first few
+        // X11 idle pumps - the bounds reported at createEditorIfNeeded()
+        // time are stale. ComponentListener catches resizes that go through
+        // Editor::setSize but plugins that grow their internal X11 widget
+        // without re-issuing ui_resize don't trigger that path. Re-pull
+        // the editor's current size and inflate the window to match at
+        // 100 / 350 / 800 ms; cheap, no Timer churn, covers slow plugins.
+        for (int delayMs : { 100, 350, 800 })
+        {
+            juce::Component::SafePointer<PluginEditorWindow> refit (this);
+            juce::Component::SafePointer<juce::Component> rEditor (&editor);
+            juce::Timer::callAfterDelay (delayMs, [refit, rEditor]
+            {
+                auto* self = refit.getComponent();
+                auto* ed   = rEditor.getComponent();
+                if (self == nullptr || ed == nullptr) return;
+                const int ew = ed->getWidth();
+                const int eh = ed->getHeight();
+                if (ew <= 0 || eh <= 0) return;
+                auto* content = self->getContentComponent();
+                if (content == nullptr) return;
+                if (content->getWidth() == ew && content->getHeight() == eh) return;
+                self->setContentComponentSize (ew, eh);
+            });
+        }
+
         // Same foreground-promotion as FocalApp's MainWindow: without
         // it Mutter on Linux/XWayland may open this editor iconified,
         // leaving the user to Alt+Tab to find it. No-op on Mac/Win.
@@ -1365,10 +1410,21 @@ public:
         focal::platform::clearPreferX11ForNativeWindow();
     }
 
+    ~PluginEditorWindow() override
+    {
+        if (trackedEditor != nullptr)
+            trackedEditor->removeComponentListener (this);
+    }
+
     void closeButtonPressed() override
     {
         // Detach the borrowed editor before we go away so this window's
         // destructor doesn't touch it, then ask the host to drop us.
+        if (trackedEditor != nullptr)
+        {
+            trackedEditor->removeComponentListener (this);
+            trackedEditor = nullptr;
+        }
         setContentNonOwned (nullptr, false);
         // EWMH-activate a sibling top-level so mutter's focus_window is
         // off this peer before the deferred destroy lands - else
@@ -1377,8 +1433,47 @@ public:
         if (onClose) onClose();
     }
 
+    // Transport keys still work when a plugin editor has window focus.
+    // Without this the user has to click back into the main window
+    // before Space starts/stops playback. We only handle the most
+    // common transport bindings here (Space = play/stop, R = record,
+    // C = metronome) and route everything else through the default so
+    // the plugin's own UI keeps its hotkeys.
+    bool keyPressed (const juce::KeyPress& k) override
+    {
+        if (enginePtr == nullptr) return false;
+        const bool noMods = ! k.getModifiers().isAnyModifierKeyDown();
+        if (noMods && k == juce::KeyPress::spaceKey)
+        {
+            auto& transport = enginePtr->getTransport();
+            if (transport.isStopped()) enginePtr->play();
+            else                       enginePtr->stop();
+            return true;
+        }
+        return false;
+    }
+
+    // Plugin editors that finalize their size after construction (LV2 X11
+    // UIs whose actual widget size is reported only once the LV2 UI has
+    // realized — Antress 4K_EQ and similar) self-resize on a later tick.
+    // Without this listener, the wrapper window stays at the initial
+    // construction-time size and the user has to drag-resize. Re-inflate
+    // the window to fit whenever the borrowed editor reports a size
+    // change.
+    void componentMovedOrResized (juce::Component& c, bool /*wasMoved*/, bool wasResized) override
+    {
+        if (! wasResized) return;
+        if (&c != trackedEditor) return;
+        const int ew = c.getWidth();
+        const int eh = c.getHeight();
+        if (ew <= 0 || eh <= 0) return;
+        setContentComponentSize (ew, eh);
+    }
+
 private:
     std::function<void()> onClose;
+    AudioEngine* enginePtr = nullptr;
+    juce::Component* trackedEditor = nullptr;
 };
 
 bool ChannelStripComponent::isPluginEditorOpen() const noexcept
@@ -1427,7 +1522,8 @@ void ChannelStripComponent::openPluginEditor()
                     if (auto* self = safe.getComponent())
                         self->closePluginEditor();
                 });
-            });
+            },
+            &engine);
         return;
     }
    #endif
@@ -1446,7 +1542,21 @@ void ChannelStripComponent::openPluginEditor()
         // createEditorIfNeeded returns a newly-created editor that the
         // caller owns. We hold it here for the lifetime of the loaded
         // plugin rather than destroying it on every close.
+        //
+        // LV2 plugin editors eager-create an embedded X11 sub-window
+        // inside their Editor constructor (juce_LV2PluginFormat.cpp
+        // Inner::Inner → addToDesktop(0)). On the JUCE-wayland fork
+        // that addToDesktop call lands on a Wayland peer by default,
+        // which then can't host an X11 child window — the LV2 UI
+        // renders blank. Setting the X11 latch BEFORE the
+        // createEditorIfNeeded call routes the nested peer
+        // creation to LinuxComponentPeer (X11), so the LV2's reparent
+        // target is a valid X11 host. VST3 doesn't need this (it
+        // defers attach to visibility-change) but the latch is a no-op
+        // for non-LV2 paths.
+        focal::platform::preferX11ForNextNativeWindow();
         std::unique_ptr<juce::AudioProcessorEditor> fresh (instance->createEditorIfNeeded());
+        focal::platform::clearPreferX11ForNativeWindow();
         if (fresh == nullptr) return;
         pluginEditor      = std::move (fresh);
         pluginEditorOwner = instance;
@@ -1466,7 +1576,8 @@ void ChannelStripComponent::openPluginEditor()
                 if (auto* self = safe.getComponent())
                     self->pluginEditorWindow.reset();
             });
-        });
+        },
+        &engine);
 }
 
 void ChannelStripComponent::closePluginEditor()
@@ -1667,6 +1778,32 @@ void ChannelStripComponent::timerCallback()
             compOnButton.setToggleState (engineCompOn, juce::dontSendNotification);
     }
 
+    // Sync the inline COMP knobs with their underlying atoms so writes
+    // from the meter-strip threshold drag or the popout editor reflect
+    // here without the user having to reload. Skip a knob the user is
+    // actively dragging — otherwise their drag would snap back to the
+    // stored value mid-motion.
+    {
+        auto syncKnob = [] (juce::Slider& k, float target)
+        {
+            if (k.isMouseButtonDown()) return;
+            if (std::abs ((float) k.getValue() - target) < 1.0e-4f) return;
+            k.setValue (target, juce::dontSendNotification);
+        };
+        const auto& sp = track.strip;
+        syncKnob (optoPeakRedKnob, sp.compOptoPeakRed.load (std::memory_order_relaxed));
+        syncKnob (optoGainKnob,    sp.compOptoGain.load    (std::memory_order_relaxed));
+        syncKnob (fetInputKnob,    sp.compFetInput.load    (std::memory_order_relaxed));
+        syncKnob (fetOutputKnob,   sp.compFetOutput.load   (std::memory_order_relaxed));
+        syncKnob (fetAttackKnob,   sp.compFetAttack.load   (std::memory_order_relaxed));
+        syncKnob (fetReleaseKnob,  sp.compFetRelease.load  (std::memory_order_relaxed));
+        syncKnob (fetRatioKnob,    (float) sp.compFetRatio.load (std::memory_order_relaxed));
+        syncKnob (vcaRatioKnob,    sp.compVcaRatio.load    (std::memory_order_relaxed));
+        syncKnob (vcaAttackKnob,   sp.compVcaAttack.load   (std::memory_order_relaxed));
+        syncKnob (vcaReleaseKnob,  sp.compVcaRelease.load  (std::memory_order_relaxed));
+        syncKnob (vcaOutputKnob,   sp.compVcaOutput.load   (std::memory_order_relaxed));
+    }
+
     // SUMMARY-mode compact buttons get an on-air indicator so the user
     // knows whether EQ / COMP is engaged without having to open the
     // popup. Bullet character + brighter background when on.
@@ -1764,10 +1901,14 @@ void ChannelStripComponent::timerCallback()
     if (! inputMeterArea.isEmpty())  repaint (inputMeterArea);
 
     // Update the numeric readout below the meter.
+    // Integer dB readout — narrow column doesn't fit "-60.0" at a
+    // readable font size; one decimal of precision wasn't actionable
+    // anyway since the meter ballistics smear sub-dB changes.
     if (inputPeakHoldDb <= -60.0f)
         inputPeakLabel.setText ("-inf", juce::dontSendNotification);
     else
-        inputPeakLabel.setText (juce::String (inputPeakHoldDb, 1), juce::dontSendNotification);
+        inputPeakLabel.setText (juce::String ((int) std::round (inputPeakHoldDb)),
+                                  juce::dontSendNotification);
 
     // Tint the readout when peaks get hot.
     inputPeakLabel.setColour (juce::Label::textColourId,
@@ -2261,11 +2402,16 @@ void ChannelStripComponent::refreshInputSelectorVisibility()
     const bool isStereo = (mode == 1);
     const bool isMidi   = (mode == 2);
 
-    inputSelector      .setVisible (isMono || isStereo);
-    inputSelectorR     .setVisible (isStereo);
-    midiInputSelector  .setVisible (isMidi);
-    midiChannelSelector.setVisible (isMidi);
-    midiActivityLed    .setVisible (isMidi);
+    // Tracking-stage selectors hide entirely when the strip is in
+    // Mixing mode — without this gate, post-setMixingMode calls (track
+    // mode change, plugin load triggering a re-layout) flip them back
+    // on and leave stale rows above the EQ on MIDI / stereo strips.
+    const bool trackingVisible = ! mixingMode;
+    inputSelector      .setVisible (trackingVisible && (isMono || isStereo));
+    inputSelectorR     .setVisible (trackingVisible && isStereo);
+    midiInputSelector  .setVisible (trackingVisible && isMidi);
+    midiChannelSelector.setVisible (trackingVisible && isMidi);
+    midiActivityLed    .setVisible (trackingVisible && isMidi);
 }
 
 void ChannelStripComponent::onHpfKnobChanged()
@@ -2371,7 +2517,7 @@ void ChannelStripComponent::paint (juce::Graphics& g)
     //    Threshold + GR meters live INSIDE the COMP section now, so this is
     //    just a clean input bar with a peak-hold tick.
     constexpr float kFloorDb   = -60.0f;
-    constexpr float kCeilingDb =   0.0f;
+    constexpr float kCeilingDb =  +6.0f;   // match kFaderTicks's top label
     auto dbToFrac = [] (float db) {
         return juce::jlimit (0.0f, 1.0f, (db - kFloorDb) / (kCeilingDb - kFloorDb));
     };
@@ -2391,6 +2537,20 @@ void ChannelStripComponent::paint (juce::Graphics& g)
             g.setColour (juce::Colour (0xff2a2a30));
             g.drawRoundedRectangle (bar, 1.5f, 0.5f);
 
+            // LED-style colour zones — hard transitions at -5 dB (green ->
+            // yellow) and +5 dB (yellow -> red). Bright saturated values
+            // matching the reference image's hardware-LED look instead of
+            // the prior soft gradient.
+            const juce::Colour kLedGreen  (0xff20d040);
+            const juce::Colour kLedYellow (0xfff0e020);
+            const juce::Colour kLedRed    (0xffff2020);
+            auto colourForDb = [&] (float db) -> juce::Colour
+            {
+                if (db >=  5.0f) return kLedRed;
+                if (db >= -5.0f) return kLedYellow;
+                return kLedGreen;
+            };
+
             const float frac = dbToFrac (dispDb);
             if (frac > 0.001f)
             {
@@ -2399,31 +2559,48 @@ void ChannelStripComponent::paint (juce::Graphics& g)
                 const float w = bar.getWidth() - 2.0f;
                 const float y = bar.getBottom() - 1.0f - fillH;
                 const auto fillRect = juce::Rectangle<float> (x, y, w, fillH);
-                // Soft outer glow under the fill - matches the bus/master
-                // meters so the colour vocabulary reads consistently.
-                const auto tipCol = (frac > dbToFrac (-3.0f))   ? juce::Colour (0xffe05050)
-                                    : (frac > dbToFrac (-12.0f)) ? juce::Colour (0xffe0c050)
-                                                                  : juce::Colour (0xff44d058);
-                g.setColour (tipCol.withAlpha (0.18f));
+
+                // Soft outer glow under the fill — tip-colour driven so the
+                // glow shifts with the meter peak.
+                const auto tipCol = colourForDb (dispDb);
+                g.setColour (tipCol.withAlpha (0.20f));
                 g.fillRect (fillRect.expanded (1.5f));
                 g.setColour (tipCol.withAlpha (0.10f));
                 g.fillRect (fillRect.expanded (3.0f));
 
-                juce::ColourGradient grad (juce::Colour (0xffe05050), x, bar.getY(),
-                                             juce::Colour (0xff44d058), x, bar.getBottom(),
-                                             false);
-                grad.addColour (dbToFrac (-12.0f), juce::Colour (0xffe0c050));
-                grad.addColour (dbToFrac  (-3.0f), juce::Colour (0xffd07040));
-                g.setGradientFill (grad);
-                g.fillRect (fillRect);
+                // Three hard zones stacked from the top of the fill down.
+                // Each zone's pixel range = clip(filled vs zone boundary).
+                const float yRedTop    = bar.getBottom() - 1.0f - dbToFrac ( 5.0f) * (bar.getHeight() - 2.0f);
+                const float yYellowTop = bar.getBottom() - 1.0f - dbToFrac (-5.0f) * (bar.getHeight() - 2.0f);
+                const float yFillTop   = y;
+                const float yFillBot   = bar.getBottom() - 1.0f;
+
+                auto fillBand = [&] (float top, float bottom, juce::Colour col)
+                {
+                    if (bottom <= top) return;
+                    g.setColour (col);
+                    g.fillRect (juce::Rectangle<float> (x, top, w, bottom - top));
+                };
+                // Red band: fill top -> min(yRedTop, fillBot)
+                fillBand (juce::jmax (yFillTop, bar.getY()),
+                            juce::jmin (yRedTop, yFillBot),
+                            kLedRed);
+                // Yellow band: max(fillTop, yRedTop) -> min(yYellowTop, fillBot)
+                fillBand (juce::jmax (yFillTop, yRedTop),
+                            juce::jmin (yYellowTop, yFillBot),
+                            kLedYellow);
+                // Green band: max(fillTop, yYellowTop) -> fillBot
+                fillBand (juce::jmax (yFillTop, yYellowTop),
+                            yFillBot,
+                            kLedGreen);
             }
 
             const float peakFrac = dbToFrac (peakDb);
             if (peakFrac > 0.001f)
             {
                 const float y = bar.getBottom() - 1.0f - peakFrac * (bar.getHeight() - 2.0f);
-                g.setColour (peakFrac > dbToFrac (-3.0f) ? juce::Colour (0xffff8080)
-                                                          : juce::Colour (0xfff0f0f0));
+                g.setColour (peakDb >= 5.0f ? juce::Colour (0xffff8080)
+                                              : juce::Colour (0xfff0f0f0));
                 g.fillRect (juce::Rectangle<float> (bar.getX() + 1.0f, y - 0.5f,
                                                       bar.getWidth() - 2.0f, 1.4f));
             }
@@ -2480,12 +2657,12 @@ void ChannelStripComponent::paint (juce::Graphics& g)
             if (t.db < range.start - 0.01f || t.db > range.end + 0.01f) continue;
             const float y = faderYForDb (faderSlider, t.db);
             const bool isZero = (std::abs (t.db) < 0.01f);
-            g.setColour (isZero ? juce::Colour (0xffe0e0e0) : juce::Colour (0xff909094));
-            g.setFont (juce::Font (juce::FontOptions (isZero ? 9.5f : 8.5f,
+            g.setColour (isZero ? juce::Colour (0xffffffff) : juce::Colour (0xffc0c0c8));
+            g.setFont (juce::Font (juce::FontOptions (isZero ? 11.5f : 10.5f,
                                                         isZero ? juce::Font::bold
                                                                 : juce::Font::plain)));
-            const auto rect = juce::Rectangle<float> ((float) scale.getX(), y - 5.0f,
-                                                        (float) scale.getWidth(), 10.0f);
+            const auto rect = juce::Rectangle<float> ((float) scale.getX(), y - 7.0f,
+                                                        (float) scale.getWidth(), 14.0f);
             g.drawText (t.label, rect, juce::Justification::centredRight, false);
         }
     }

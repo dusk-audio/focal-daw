@@ -85,5 +85,11 @@ private:
 #endif
 
     int preparedBlockSize = 0;
+
+    // VU-RMS smoother state - 300 ms tau on the audio thread, same as
+    // BusStrip / MasterBus. Drives the mastering analog VU.
+    double sampleRateForMeter = 44100.0;
+    float  vuRmsLinL = 0.0f;
+    float  vuRmsLinR = 0.0f;
 };
 } // namespace focal

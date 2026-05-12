@@ -1,4 +1,5 @@
 #include "PianoRollComponent.h"
+#include "EditModeToolbar.h"
 #include "../engine/AudioEngine.h"
 #include "../engine/Transport.h"
 #include "../session/RegionEditActions.h"
@@ -256,9 +257,23 @@ PianoRollComponent::PianoRollComponent (Session& s, AudioEngine& e, int t, int r
     propertiesButton.setTooltip ("Region properties...");
     propertiesButton.onClick = [this] { showRegionPropertiesPopup(); };
 
+    addAndMakeVisible (zoomOutButton);
+    zoomOutButton.setTooltip ("Zoom out (-)");
+    zoomOutButton.onClick = [this] { zoomByFactor (1.0f / 1.15f); };
+
+    addAndMakeVisible (zoomInButton);
+    zoomInButton.setTooltip ("Zoom in (=)");
+    zoomInButton.onClick = [this] { zoomByFactor (1.15f); };
+
     addAndMakeVisible (zoomFitButton);
     zoomFitButton.setTooltip ("Zoom to fit region");
     zoomFitButton.onClick = [this] { zoomFit(); };
+
+    // Edit-mode palette (shared with AudioRegionEditor + TapeStrip).
+    // PianoRoll uses Grab vs Draw as the meaningful distinction for
+    // empty-grid clicks; Range / Cut / Grid are inert here.
+    editModeToolbar = std::make_unique<EditModeToolbar> (engine);
+    addAndMakeVisible (editModeToolbar.get());
 
     addAndMakeVisible (toggleCcButton);
     toggleCcButton.setTooltip ("Show / hide CC lane");
@@ -341,6 +356,20 @@ void PianoRollComponent::layoutIconRow (juce::Rectangle<int> area)
                           .withSizeKeepingCentre (dia, dia));
         inner.removeFromLeft (gap);
     };
+    auto placeRight = [&] (IconButton& b)
+    {
+        b.setBounds (inner.removeFromRight (dia)
+                          .withSizeKeepingCentre (dia, dia));
+        inner.removeFromRight (gap);
+    };
+    // Zoom cluster glued to the far right.
+    placeRight (zoomFitButton);
+    placeRight (zoomInButton);
+    placeRight (zoomOutButton);
+    inner.removeFromRight (gap);
+    placeRight (toggleCcButton);
+    inner.removeFromRight (8);
+
     place (undoButton);
     place (redoButton);
     inner.removeFromLeft (gap);          // small group separator
@@ -348,9 +377,20 @@ void PianoRollComponent::layoutIconRow (juce::Rectangle<int> area)
     place (glueButton);
     place (quantizeButton);
     place (propertiesButton);
-    inner.removeFromLeft (gap);
-    place (zoomFitButton);
-    place (toggleCcButton);
+
+    // Edit-mode palette sized to its internal layout (5 buttons + Snap
+    // toggle + denomination dropdown).
+    if (editModeToolbar != nullptr && inner.getWidth() > 0)
+    {
+        constexpr int kToolbarWidth = 390;
+        const int w = juce::jmin (kToolbarWidth, inner.getWidth());
+        editModeToolbar->setBounds (inner.removeFromLeft (w));
+    }
+}
+
+void PianoRollComponent::syncEditModeToolbar()
+{
+    if (editModeToolbar != nullptr) editModeToolbar->syncFromSession();
 }
 
 void PianoRollComponent::layoutStatusBar (juce::Rectangle<int> area)
@@ -1945,9 +1985,11 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
         return;
     }
 
-    // Empty-grid hit. Two paths:
-    //   - Shift / Cmd held: start a rubber-band box-select drag.
-    //   - Otherwise: create a new note (existing pencil-on-default).
+    // Empty-grid hit. Paths depend on edit mode:
+    //   - Shift / Cmd held: box-select drag (regardless of mode).
+    //   - Draw mode: create a new note at the click (legacy pencil).
+    //   - Grab mode: clear selection + drop cursor, no creation.
+    //     Click-and-drag on empty space promotes to a box-select.
     if (e.x < kKeyboardWidth || e.y < kToolbarHeight + kHeaderHeight) return;
 
     // Drop the edit cursor at the snapped click tick, regardless of
@@ -1966,6 +2008,18 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
         // ADDS to the current selection on mouseUp. Plain Cmd/Shift-
         // empty-click can't reach here without a drag, so this is the
         // right behaviour for the only path that fires it.
+        repaint();
+        return;
+    }
+
+    // Grab mode: don't create a note on empty-grid clicks. Clear the
+    // current selection (matches Reaper/Ardour Grab semantics) and
+    // start a box-select drag if the user drags away from the click.
+    if (session.editMode == EditMode::Grab)
+    {
+        clearSelection();
+        rubberBand = juce::Rectangle<int> (e.x, e.y, 0, 0);
+        dragMode   = DragMode::BoxSelect;
         repaint();
         return;
     }
@@ -2223,6 +2277,22 @@ void PianoRollComponent::mouseUp (const juce::MouseEvent&)
 
 bool PianoRollComponent::keyPressed (const juce::KeyPress& k)
 {
+    // Edit-mode shortcuts. The modal grabs keyboard focus on open so
+    // MainComponent::keyPressed doesn't see these — handle locally.
+    if (! k.getModifiers().isAnyModifierKeyDown())
+    {
+        const auto ch = k.getTextCharacter();
+        const bool isG = (ch == 'g' || ch == 'G');
+        const bool isD = (ch == 'd' || ch == 'D');
+        if (isG || isD)
+        {
+            session.editMode = isG ? EditMode::Grab : EditMode::Draw;
+            syncEditModeToolbar();
+            repaint();
+            return true;
+        }
+    }
+
     if (k == juce::KeyPress::backspaceKey || k == juce::KeyPress::deleteKey)
     {
         auto* r = region();
@@ -2268,7 +2338,7 @@ bool PianoRollComponent::keyPressed (const juce::KeyPress& k)
     {
         const bool cmdOrCtrl = k.getModifiers().isCommandDown()
                                   || k.getModifiers().isCtrlDown();
-        if (cmdOrCtrl && (k.getTextCharacter() == 'z' || k.getTextCharacter() == 'Z'))
+        if (cmdOrCtrl && (k.getKeyCode() == 'Z' || k.getKeyCode() == 'z'))
         {
             if (k.getModifiers().isShiftDown()) engine.getUndoManager().redo();
             else                                  engine.getUndoManager().undo();
@@ -2292,7 +2362,7 @@ bool PianoRollComponent::keyPressed (const juce::KeyPress& k)
         // selection so a follow-up Delete or transpose acts on every
         // note at once. Clears the time range so it doesn't compete
         // with the new full-region selection.
-        if (cmdOrCtrl && (k.getTextCharacter() == 'a' || k.getTextCharacter() == 'A'))
+        if (cmdOrCtrl && (k.getKeyCode() == 'A' || k.getKeyCode() == 'a'))
         {
             auto* r = region();
             if (r == nullptr) return true;
@@ -2308,7 +2378,7 @@ bool PianoRollComponent::keyPressed (const juce::KeyPress& k)
         // startTicks stored RELATIVE to the earliest selected note so
         // paste lands the cluster at editCursorTick regardless of the
         // source region's anchor (matches Logic / Reaper behaviour).
-        if (cmdOrCtrl && (k.getTextCharacter() == 'c' || k.getTextCharacter() == 'C'))
+        if (cmdOrCtrl && (k.getKeyCode() == 'C' || k.getKeyCode() == 'c'))
         {
             auto* r = region();
             if (r == nullptr || selectedNotes.empty()) return true;
@@ -2326,7 +2396,7 @@ bool PianoRollComponent::keyPressed (const juce::KeyPress& k)
             }
             return true;
         }
-        if (cmdOrCtrl && (k.getTextCharacter() == 'x' || k.getTextCharacter() == 'X'))
+        if (cmdOrCtrl && (k.getKeyCode() == 'X' || k.getKeyCode() == 'x'))
         {
             auto* r = region();
             if (r == nullptr || selectedNotes.empty()) return true;
@@ -2353,7 +2423,7 @@ bool PianoRollComponent::keyPressed (const juce::KeyPress& k)
             repaint();
             return true;
         }
-        if (cmdOrCtrl && (k.getTextCharacter() == 'v' || k.getTextCharacter() == 'V'))
+        if (cmdOrCtrl && (k.getKeyCode() == 'V' || k.getKeyCode() == 'v'))
         {
             auto* r = region();
             if (r == nullptr || sNoteClipboard.empty()) return true;
@@ -2493,6 +2563,22 @@ bool PianoRollComponent::keyPressed (const juce::KeyPress& k)
         repaint();
         return true;
     }
+
+    // Zoom shortcuts: '=' / '+' zoom in, '-' zoom out. Anchor on the
+    // centre of the visible grid via zoomByFactor.
+    {
+        const auto ch = k.getTextCharacter();
+        if (ch == '=' || ch == '+')
+        {
+            zoomByFactor (1.15f);
+            return true;
+        }
+        if (ch == '-')
+        {
+            zoomByFactor (1.0f / 1.15f);
+            return true;
+        }
+    }
     return false;
 }
 
@@ -2573,6 +2659,10 @@ PianoRollComponent::IconButton::IconButton (const juce::String& name, Glyph g)
     : juce::Button (name), glyph (g)
 {
     setClickingTogglesState (false);
+    // Don't steal keyboard focus from the host modal so hotkeys keep
+    // routing to PianoRollComponent::keyPressed after a button click.
+    setMouseClickGrabsKeyboardFocus (false);
+    setWantsKeyboardFocus (false);
 }
 
 void PianoRollComponent::IconButton::paintButton (juce::Graphics& g,
@@ -2732,6 +2822,29 @@ void PianoRollComponent::IconButton::paintButton (juce::Graphics& g,
             g.fillEllipse (centre.x - 1.5f, centre.y - 1.5f, 3.0f, 3.0f);
             break;
         }
+        case Glyph::ZoomIn:
+        {
+            const float rad = r * 0.62f;
+            const float cx  = centre.x - r * 0.18f;
+            const float cy  = centre.y - r * 0.18f;
+            g.drawEllipse (cx - rad, cy - rad, rad * 2.0f, rad * 2.0f, 1.4f);
+            g.drawLine (cx + rad * 0.55f, cy + rad * 0.55f,
+                          centre.x + r * 0.85f, centre.y + r * 0.85f, 1.8f);
+            g.drawLine (cx - rad * 0.5f, cy, cx + rad * 0.5f, cy, 1.4f);
+            g.drawLine (cx, cy - rad * 0.5f, cx, cy + rad * 0.5f, 1.4f);
+            break;
+        }
+        case Glyph::ZoomOut:
+        {
+            const float rad = r * 0.62f;
+            const float cx  = centre.x - r * 0.18f;
+            const float cy  = centre.y - r * 0.18f;
+            g.drawEllipse (cx - rad, cy - rad, rad * 2.0f, rad * 2.0f, 1.4f);
+            g.drawLine (cx + rad * 0.55f, cy + rad * 0.55f,
+                          centre.x + r * 0.85f, centre.y + r * 0.85f, 1.8f);
+            g.drawLine (cx - rad * 0.5f, cy, cx + rad * 0.5f, cy, 1.4f);
+            break;
+        }
         case Glyph::ToggleCc:
         {
             // Three vertical bars of varying heights (CC envelope).
@@ -2786,6 +2899,20 @@ void PianoRollComponent::zoomFit()
     pixelsPerTick = juce::jlimit (0.005f, 1.0f,
                                        (float) gridW / (float) r->lengthInTicks);
     scrollX = 0;
+    repaint();
+}
+
+void PianoRollComponent::zoomByFactor (float factor)
+{
+    // Anchor zoom on the visible centre so the user's working area stays
+    // under the eye across a step. Mirrors the Cmd+wheel ramp.
+    const int gridLeft = kKeyboardWidth;
+    const int viewportW = juce::jmax (1, getWidth() - gridLeft);
+    const int centreX = gridLeft + viewportW / 2;
+    const auto centreTickBefore = tickForX (centreX);
+    pixelsPerTick = juce::jlimit (0.005f, 1.0f, pixelsPerTick * factor);
+    const int newCentrePx = (int) std::round ((double) centreTickBefore * pixelsPerTick);
+    scrollX = juce::jmax (0, newCentrePx - (centreX - gridLeft));
     repaint();
 }
 

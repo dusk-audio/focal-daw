@@ -203,6 +203,7 @@ target_sources(Focal PRIVATE
     src/ui/AppConfig.cpp
     src/ui/AudioRegionEditor.cpp
     src/ui/AudioSettingsPanel.cpp
+    src/ui/AuxEditorHost.cpp
     src/ui/AuxLaneComponent.cpp
     src/ui/AuxView.cpp
     src/ui/BusComponent.cpp
@@ -224,6 +225,7 @@ target_sources(Focal PRIVATE
     src/ui/PianoRollComponent.cpp
     src/ui/PluginPickerHelpers.cpp
     src/ui/SystemStatusBar.cpp
+    src/ui/EditModeToolbar.cpp
     src/ui/TapeStrip.cpp
     src/ui/TransportBar.cpp
     src/ui/VirtualKeyboardComponent.cpp

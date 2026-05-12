@@ -13,6 +13,8 @@ void MasterBus::bind (const MasterBusParams& params) noexcept
 
 void MasterBus::prepare (double sampleRate, int blockSize, int oversamplingFactor)
 {
+    sampleRateForMeter = sampleRate > 0.0 ? sampleRate : 44100.0;
+    vuRmsLinL = vuRmsLinR = 0.0f;
     faderGain.reset (sampleRate, 0.020);
     faderGain.setCurrentAndTargetValue (1.0f);
 
@@ -259,6 +261,7 @@ void MasterBus::processInPlace (float* L, float* R, int numSamples) noexcept
 #endif
 
     float postPeakL = 0.0f, postPeakR = 0.0f;
+    float sumSqL = 0.0f, sumSqR = 0.0f;
     for (int i = 0; i < numSamples; ++i)
     {
         const float g = faderGain.getNextValue();
@@ -268,6 +271,8 @@ void MasterBus::processInPlace (float* L, float* R, int numSamples) noexcept
         const float aR = std::fabs (R[i]);
         if (aL > postPeakL) postPeakL = aL;
         if (aR > postPeakR) postPeakR = aR;
+        sumSqL += L[i] * L[i];
+        sumSqR += R[i] * R[i];
     }
 
     if (paramsRef != nullptr)
@@ -276,6 +281,16 @@ void MasterBus::processInPlace (float* L, float* R, int numSamples) noexcept
             ? juce::Decibels::gainToDecibels (a, -100.0f) : -100.0f; };
         paramsRef->meterPostMasterLDb.store (toDb (postPeakL), std::memory_order_relaxed);
         paramsRef->meterPostMasterRDb.store (toDb (postPeakR), std::memory_order_relaxed);
+
+        const float invN    = 1.0f / (float) juce::jmax (1, numSamples);
+        const float rmsBlkL = std::sqrt (sumSqL * invN);
+        const float rmsBlkR = std::sqrt (sumSqR * invN);
+        const float dt      = (float) numSamples / (float) sampleRateForMeter;
+        const float alpha   = std::exp (-dt / 0.3f);
+        vuRmsLinL = alpha * vuRmsLinL + (1.0f - alpha) * rmsBlkL;
+        vuRmsLinR = alpha * vuRmsLinR + (1.0f - alpha) * rmsBlkR;
+        paramsRef->meterPostMasterRmsL.store (vuRmsLinL, std::memory_order_relaxed);
+        paramsRef->meterPostMasterRmsR.store (vuRmsLinR, std::memory_order_relaxed);
     }
 }
 } // namespace focal

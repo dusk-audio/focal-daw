@@ -3,6 +3,9 @@
 #include "../engine/PlaybackEngine.h"
 #include "../engine/Transport.h"
 
+#include <juce_audio_formats/juce_audio_formats.h>
+#include <algorithm>
+
 namespace focal
 {
 namespace
@@ -521,6 +524,219 @@ bool CloneTrackAction::undo()
     if (beforeState == nullptr) return false;
     if (dstIdx < 0 || dstIdx >= Session::kNumTracks) return false;
     applyTrack (session.track (dstIdx), engine, dstIdx, *beforeState);
+    rebuildPlaybackIfStopped (engine);
+    return true;
+}
+
+// ── JoinRegionsAction ─────────────────────────────────────────────────────
+
+JoinRegionsAction::JoinRegionsAction (Session& s, AudioEngine& e,
+                                       int t, const std::vector<int>& idxs)
+    : session (s), engine (e), trackIdx (t), indices (idxs)
+{
+    // Deduplicate + sort by timelineStart so the action records a stable
+    // order independent of the user's click sequence.
+    std::sort (indices.begin(), indices.end());
+    indices.erase (std::unique (indices.begin(), indices.end()), indices.end());
+    if (trackIdx >= 0 && trackIdx < Session::kNumTracks)
+    {
+        auto& regs = session.track (trackIdx).regions;
+        std::sort (indices.begin(), indices.end(),
+                    [&] (int a, int b)
+                    {
+                        if (a < 0 || a >= (int) regs.size()) return false;
+                        if (b < 0 || b >= (int) regs.size()) return true;
+                        return regs[(size_t) a].timelineStart
+                             < regs[(size_t) b].timelineStart;
+                    });
+    }
+}
+
+bool JoinRegionsAction::perform()
+{
+    if (trackIdx < 0 || trackIdx >= Session::kNumTracks) return false;
+    auto& regs = session.track (trackIdx).regions;
+    if (indices.size() < 2) return false;
+
+    if (! firstPerformDone)
+    {
+        beforeRegions.clear();
+        beforeRegions.reserve (indices.size());
+        for (int idx : indices)
+        {
+            if (idx < 0 || idx >= (int) regs.size()) return false;
+            beforeRegions.push_back (regs[(size_t) idx]);
+        }
+        firstPerformDone = true;
+    }
+    else if (beforeRegions.size() != indices.size())
+    {
+        return false;   // shouldn't happen, defensive
+    }
+
+    // Fast-path eligibility: every selected region references the same
+    // file, the sourceOffsets form a contiguous run, and timelinePositions
+    // abut. "Abut" tolerates a 1-sample rounding gap so a series of splits
+    // that snapped to slightly different sub-sample boundaries still
+    // collapse cleanly.
+    constexpr juce::int64 kAbutTolerance = 1;
+    auto abs64 = [] (juce::int64 v) noexcept -> juce::int64
+    { return v < 0 ? -v : v; };
+    bool sameFile = true, abuts = true;
+    for (size_t i = 1; i < beforeRegions.size(); ++i)
+    {
+        const auto& prev = beforeRegions[i - 1];
+        const auto& cur  = beforeRegions[i];
+        if (cur.file != prev.file) { sameFile = false; break; }
+        const auto prevEnd = prev.timelineStart + prev.lengthInSamples;
+        const auto gap = cur.timelineStart - prevEnd;
+        const auto srcDelta = cur.sourceOffset
+                                - (prev.sourceOffset + prev.lengthInSamples);
+        if (abs64 (gap) > kAbutTolerance) { abuts = false; break; }
+        if (abs64 (srcDelta) > kAbutTolerance) { abuts = false; break; }
+    }
+
+    const auto firstStart = beforeRegions.front().timelineStart;
+    const auto firstSrcOffset = beforeRegions.front().sourceOffset;
+    const auto lastEnd = beforeRegions.back().timelineStart
+                         + beforeRegions.back().lengthInSamples;
+    const auto totalLen = lastEnd - firstStart;
+
+    // Sort descending so the larger indices erase first and the smaller
+    // index that holds the merged region stays valid.
+    std::vector<int> sortedDesc = indices;
+    std::sort (sortedDesc.begin(), sortedDesc.end(), std::greater<int>());
+
+    if (sameFile && abuts)
+    {
+        // Cheap merge: keep the leading region, extend its length, drop
+        // the rest. Outer fadeIn / fadeOutShape from first / last are
+        // preserved; inner fades vanish along with the joints.
+        AudioRegion merged = beforeRegions.front();
+        merged.timelineStart   = firstStart;
+        merged.sourceOffset    = firstSrcOffset;
+        merged.lengthInSamples = totalLen;
+        merged.fadeOutSamples  = beforeRegions.back().fadeOutSamples;
+        merged.fadeOutShape    = beforeRegions.back().fadeOutShape;
+        merged.previousTakes   = beforeRegions.front().previousTakes;
+
+        const int leadIdx = indices.front();
+        for (int idx : sortedDesc)
+            if (idx != leadIdx)
+                regs.erase (regs.begin() + idx);
+        resultInsertedAt = leadIdx;
+        if (resultInsertedAt >= 0 && resultInsertedAt < (int) regs.size())
+            regs[(size_t) resultInsertedAt] = merged;
+        rebuildPlaybackIfStopped (engine);
+        return true;
+    }
+
+    // Slow path: render to a new WAV in <session>/takes/. Mix every
+    // selected region into one buffer at its proper timeline offset
+    // (gaps become silence; overlaps sum). Uses the source files'
+    // sample rate / channel count from the leading region.
+    juce::AudioFormatManager fm;
+    fm.registerBasicFormats();
+    auto firstReader = std::unique_ptr<juce::AudioFormatReader> (
+        fm.createReaderFor (beforeRegions.front().file));
+    if (firstReader == nullptr) return false;
+    const double sr   = firstReader->sampleRate;
+    const int    bits = juce::jmax (16, (int) firstReader->bitsPerSample);
+    const int    chs  = juce::jmax (1, (int) beforeRegions.front().numChannels);
+
+    const auto totalSamples = (int) juce::jlimit<juce::int64> (
+        1, std::numeric_limits<int>::max(), totalLen);
+    juce::AudioBuffer<float> mixBuf (chs, totalSamples);
+    mixBuf.clear();
+
+    for (const auto& reg : beforeRegions)
+    {
+        std::unique_ptr<juce::AudioFormatReader> rdr (fm.createReaderFor (reg.file));
+        if (rdr == nullptr) continue;
+        const int regSamples = (int) juce::jlimit<juce::int64> (
+            0, std::numeric_limits<int>::max(), reg.lengthInSamples);
+        if (regSamples == 0) continue;
+        juce::AudioBuffer<float> tmp (chs, regSamples);
+        tmp.clear();
+        rdr->read (&tmp, 0, regSamples, reg.sourceOffset, true, chs > 1);
+        const int destOffset = (int) (reg.timelineStart - firstStart);
+        for (int c = 0; c < chs; ++c)
+            mixBuf.addFrom (c, destOffset, tmp, c, 0, regSamples);
+    }
+
+    auto takesDir = session.getSessionDirectory().getChildFile ("takes");
+    if (! takesDir.exists())
+    {
+        const auto res = takesDir.createDirectory();
+        if (res.failed()) return false;
+    }
+    auto outFile = takesDir.getNonexistentChildFile (
+        beforeRegions.front().file.getFileNameWithoutExtension() + "-joined",
+        ".wav", false);
+    juce::WavAudioFormat wav;
+    std::unique_ptr<juce::FileOutputStream> out (outFile.createOutputStream());
+    if (out == nullptr) return false;
+    std::unique_ptr<juce::AudioFormatWriter> writer (
+        wav.createWriterFor (out.get(), sr, (juce::uint32) chs, bits, {}, 0));
+    if (writer == nullptr) { out.reset(); outFile.deleteFile(); return false; }
+    out.release();   // ownership transferred to writer
+    if (! writer->writeFromAudioSampleBuffer (mixBuf, 0, totalSamples))
+    {
+        writer.reset();
+        outFile.deleteFile();
+        return false;
+    }
+    writer.reset();
+    renderedFile = outFile;
+
+    AudioRegion merged = beforeRegions.front();
+    merged.file            = outFile;
+    merged.timelineStart   = firstStart;
+    merged.sourceOffset    = 0;
+    merged.lengthInSamples = totalLen;
+    merged.numChannels     = chs;
+    merged.fadeInSamples   = beforeRegions.front().fadeInSamples;
+    merged.fadeInShape     = beforeRegions.front().fadeInShape;
+    merged.fadeOutSamples  = beforeRegions.back().fadeOutSamples;
+    merged.fadeOutShape    = beforeRegions.back().fadeOutShape;
+    merged.previousTakes.clear();
+
+    const int leadIdx = indices.front();
+    for (int idx : sortedDesc)
+        if (idx != leadIdx)
+            regs.erase (regs.begin() + idx);
+    resultInsertedAt = leadIdx;
+    if (resultInsertedAt >= 0 && resultInsertedAt < (int) regs.size())
+        regs[(size_t) resultInsertedAt] = merged;
+    rebuildPlaybackIfStopped (engine);
+    return true;
+}
+
+bool JoinRegionsAction::undo()
+{
+    if (trackIdx < 0 || trackIdx >= Session::kNumTracks) return false;
+    if (resultInsertedAt < 0) return false;
+    auto& regs = session.track (trackIdx).regions;
+    if (resultInsertedAt >= (int) regs.size()) return false;
+
+    // Pair every original index with its captured region snapshot, sort by
+    // ASCENDING numeric index, and re-insert in that order. `indices` is
+    // sorted by timelineStart (set in the ctor); using timeline order here
+    // would shift later inserts off-by-N every time an earlier insert
+    // landed past a low-numbered slot.
+    std::vector<std::pair<int, AudioRegion>> pairs;
+    pairs.reserve (indices.size());
+    for (size_t i = 0; i < indices.size() && i < beforeRegions.size(); ++i)
+        pairs.emplace_back (indices[i], beforeRegions[i]);
+    std::sort (pairs.begin(), pairs.end(),
+                [] (const auto& a, const auto& b) { return a.first < b.first; });
+
+    regs.erase (regs.begin() + resultInsertedAt);
+    for (const auto& [idx, reg] : pairs)
+    {
+        if (idx < 0 || idx > (int) regs.size()) return false;
+        regs.insert (regs.begin() + idx, reg);
+    }
     rebuildPlaybackIfStopped (engine);
     return true;
 }

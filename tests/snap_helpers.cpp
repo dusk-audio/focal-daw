@@ -78,6 +78,71 @@ TEST_CASE ("snapAbsolute: rounds to nearest grid point", "[SnapHelpers]")
     REQUIRE (focal::snap::snapAbsolute ((juce::int64) 1500, step) == 2000);
 }
 
+TEST_CASE ("stepForResolution: musical resolutions at 120 BPM / 48 kHz",
+          "[SnapHelpers]")
+{
+    using focal::SnapResolution;
+    constexpr double kSrFast = 48000.0;
+    constexpr float  kBpm    = 120.0f;
+    constexpr int    kBpb    = 4;
+    // Quarter note = 24000 samples (one beat).
+    const auto q = focal::snap::stepForResolution (SnapResolution::Quarter,
+                                                    kSrFast, kBpm, kBpb);
+    REQUIRE (q == 24000);
+    REQUIRE (focal::snap::stepForResolution (SnapResolution::Bar,    kSrFast, kBpm, kBpb) == q * 4);
+    REQUIRE (focal::snap::stepForResolution (SnapResolution::Half,   kSrFast, kBpm, kBpb) == q * 2);
+    REQUIRE (focal::snap::stepForResolution (SnapResolution::Eighth, kSrFast, kBpm, kBpb) == q / 2);
+    REQUIRE (focal::snap::stepForResolution (SnapResolution::Sixteenth,    kSrFast, kBpm, kBpb) == q / 4);
+    REQUIRE (focal::snap::stepForResolution (SnapResolution::ThirtySecond, kSrFast, kBpm, kBpb) == q / 8);
+    REQUIRE (focal::snap::stepForResolution (SnapResolution::SixtyFourth,  kSrFast, kBpm, kBpb) == q / 16);
+}
+
+TEST_CASE ("stepForResolution: triplets are 2/3 of the base", "[SnapHelpers]")
+{
+    using focal::SnapResolution;
+    constexpr double kSrFast = 48000.0;
+    constexpr float  kBpm    = 120.0f;
+    const auto q = focal::snap::stepForResolution (SnapResolution::Quarter, kSrFast, kBpm, 4);
+    const auto qt = focal::snap::stepForResolution (SnapResolution::QuarterTriplet, kSrFast, kBpm, 4);
+    // 24000 * 2/3 = 16000.
+    REQUIRE (qt == 16000);
+    REQUIRE (focal::snap::stepForResolution (SnapResolution::EighthTriplet, kSrFast, kBpm, 4) == q / 2 * 2 / 3);
+}
+
+TEST_CASE ("stepForResolution: dotted resolutions are 3/2 of the base", "[SnapHelpers]")
+{
+    using focal::SnapResolution;
+    constexpr double kSrFast = 48000.0;
+    constexpr float  kBpm    = 120.0f;
+    // Quarter dotted = 24000 * 1.5 = 36000.
+    REQUIRE (focal::snap::stepForResolution (SnapResolution::QuarterDotted, kSrFast, kBpm, 4) == 36000);
+    REQUIRE (focal::snap::stepForResolution (SnapResolution::EighthDotted,  kSrFast, kBpm, 4) == 18000);
+}
+
+TEST_CASE ("stepForResolution: timecode/minsec/cd-frames are tempo-independent",
+          "[SnapHelpers]")
+{
+    using focal::SnapResolution;
+    constexpr double kSrFast = 48000.0;
+    REQUIRE (focal::snap::stepForResolution (SnapResolution::Timecode, kSrFast, 0.0f, 0) == 1920);  // 48000/25
+    REQUIRE (focal::snap::stepForResolution (SnapResolution::MinSec,   kSrFast, 0.0f, 0) == 48000);
+    REQUIRE (focal::snap::stepForResolution (SnapResolution::CDFrames, kSrFast, 0.0f, 0) == 640);   // 48000/75
+    // bpm = 0 only zeros the musical resolutions.
+    REQUIRE (focal::snap::stepForResolution (SnapResolution::Quarter,  kSrFast, 0.0f, 4) == 0);
+}
+
+TEST_CASE ("stepForResolution: Bar respects beatsPerBar", "[SnapHelpers]")
+{
+    using focal::SnapResolution;
+    constexpr double kSrFast = 48000.0;
+    constexpr float  kBpm    = 120.0f;
+    const auto q = focal::snap::stepForResolution (SnapResolution::Quarter, kSrFast, kBpm, 4);
+    REQUIRE (focal::snap::stepForResolution (SnapResolution::Bar, kSrFast, kBpm, 3) == q * 3);
+    REQUIRE (focal::snap::stepForResolution (SnapResolution::Bar, kSrFast, kBpm, 7) == q * 7);
+    // beatsPerBar <= 0 clamps up to 1.
+    REQUIRE (focal::snap::stepForResolution (SnapResolution::Bar, kSrFast, kBpm, 0) == q);
+}
+
 TEST_CASE ("snap math agrees with the legacy TapeStrip inline expression",
           "[SnapHelpers]")
 {

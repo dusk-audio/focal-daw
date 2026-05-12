@@ -263,10 +263,12 @@ static void writeThresholdForMode (Track& t, float threshDb)
         }
         case 1:
         {
+            // Drag the THR marker DOWN the input bar -> more drive into the
+            // FET's fixed-threshold detector. OUTPUT is independent and is
+            // NOT auto-attenuated to compensate (real 1176 has separate
+            // Input and Output knobs).
             const float drive = juce::jlimit (0.0f, 40.0f, -threshDb);
-            t.strip.compFetInput .store (drive, std::memory_order_relaxed);
-            t.strip.compFetOutput.store (juce::jlimit (-20.0f, 0.0f, -drive),
-                                          std::memory_order_relaxed);
+            t.strip.compFetInput.store (drive, std::memory_order_relaxed);
             break;
         }
         case 2:

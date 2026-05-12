@@ -7,6 +7,7 @@
 namespace focal
 {
 class AudioEngine;
+class EditModeToolbar;
 // Piano-roll editor for one MidiRegion. Anchored on a (track, region) pair
 // at construction; the component validates indices each paint so a
 // concurrent record / delete that mutates the regions vector doesn't crash
@@ -420,7 +421,7 @@ private:
     class IconButton final : public juce::Button
     {
     public:
-        enum class Glyph { Undo, Redo, Split, Glue, Quantize, Properties, ZoomFit, ToggleCc };
+        enum class Glyph { Undo, Redo, Split, Glue, Quantize, Properties, ZoomFit, ZoomIn, ZoomOut, ToggleCc };
         IconButton (const juce::String& name, Glyph g);
         void paintButton (juce::Graphics&, bool isMouseOver, bool isButtonDown) override;
     private:
@@ -432,8 +433,23 @@ private:
     IconButton glueButton       { "Glue",       IconButton::Glyph::Glue };
     IconButton quantizeButton   { "Quantize",   IconButton::Glyph::Quantize };
     IconButton propertiesButton { "Properties", IconButton::Glyph::Properties };
-    IconButton zoomFitButton    { "Zoom fit",   IconButton::Glyph::ZoomFit };
     IconButton toggleCcButton   { "Toggle CC",  IconButton::Glyph::ToggleCc };
+    IconButton zoomOutButton    { "Zoom out",   IconButton::Glyph::ZoomOut };
+    IconButton zoomInButton     { "Zoom in",    IconButton::Glyph::ZoomIn };
+    IconButton zoomFitButton    { "Zoom fit",   IconButton::Glyph::ZoomFit };
+
+    // Ardour-style edit-mode palette (Grab / Range / Cut / Grid / Draw +
+    // Snap + denomination). Shared with AudioRegionEditor + TapeStrip
+    // via session.editMode. Only Grab and Draw modify PianoRoll
+    // behavior today; the other modes are no-ops on the roll surface.
+    std::unique_ptr<EditModeToolbar> editModeToolbar;
+
+public:
+    // Called by MainComponent when a global hotkey flips
+    // session.editMode while the modal is open, so the toolbar
+    // repaints with the new active state.
+    void syncEditModeToolbar();
+private:
 
     // Lay the icon row out in the kToolbarHeight band at the top.
     void layoutIconRow (juce::Rectangle<int> area);
@@ -446,6 +462,10 @@ private:
     // zoomFit rescales pixelsPerTick so the entire region length fits
     // the visible grid width.
     void zoomFit();
+    // Multiplicative zoom anchored on the centre of the visible grid.
+    // factor > 1 zooms in, < 1 zooms out. Shared by the icon buttons
+    // and the '=' / '-' keypress shortcuts.
+    void zoomByFactor (float factor);
     // toggleCcLane flips ccStripH between 0 (lane hidden) and
     // kCcStripHDefault (lane shown).
     void toggleCcLane();

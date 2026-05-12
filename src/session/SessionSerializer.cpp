@@ -198,6 +198,8 @@ juce::DynamicObject::Ptr trackToObject (const Track& t)
         // diff-clean. Stored as the int enum value (0..4) matching FadeShape.
         if (r.fadeInShape  != FadeShape::Linear) rObj->setProperty ("fade_in_shape",  (int) r.fadeInShape);
         if (r.fadeOutShape != FadeShape::Linear) rObj->setProperty ("fade_out_shape", (int) r.fadeOutShape);
+        if (r.fadeInAuto)  rObj->setProperty ("fade_in_auto",  true);
+        if (r.fadeOutAuto) rObj->setProperty ("fade_out_auto", true);
         // Skip gain_db when at unity to keep older sessions diff-clean
         // and avoid bloating the JSON for unedited regions. Float
         // exact-zero comparison is fine because the field is set
@@ -607,6 +609,8 @@ void restoreTrack (Track& t, const juce::var& v)
                                  ? loadShape (rv["fade_in_shape"])  : FadeShape::Linear;
             r.fadeOutShape    = rv.hasProperty ("fade_out_shape")
                                  ? loadShape (rv["fade_out_shape"]) : FadeShape::Linear;
+            r.fadeInAuto      = rv.hasProperty ("fade_in_auto")  && (bool) rv["fade_in_auto"];
+            r.fadeOutAuto     = rv.hasProperty ("fade_out_auto") && (bool) rv["fade_out_auto"];
             r.numChannels     = rv.hasProperty ("num_channels") ? (int) rv["num_channels"] : 1;
             r.gainDb          = rv.hasProperty ("gain_db")  ? (float) (double) rv["gain_db"] : 0.0f;
             r.customColour    = rv.hasProperty ("custom_colour")
@@ -835,6 +839,8 @@ bool SessionSerializer::save (const Session& s, const juce::File& target)
     tport->setProperty ("punch_in",      (juce::int64) s.savedPunchIn);
     tport->setProperty ("punch_out",     (juce::int64) s.savedPunchOut);
     tport->setProperty ("snap_to_grid",      s.snapToGrid);
+    tport->setProperty ("snap_resolution",   (int) s.snapResolution);
+    tport->setProperty ("edit_mode",         (int) s.editMode);
     tport->setProperty ("tempo_bpm",         s.tempoBpm.load());
     tport->setProperty ("beats_per_bar",     s.beatsPerBar.load());
     tport->setProperty ("beat_unit",         s.beatUnit.load());
@@ -1001,6 +1007,16 @@ bool SessionSerializer::load (Session& s, const juce::File& source)
         if (tport.hasProperty ("punch_in"))      s.savedPunchIn      = (juce::int64) tport["punch_in"];
         if (tport.hasProperty ("punch_out"))     s.savedPunchOut     = (juce::int64) tport["punch_out"];
         if (tport.hasProperty ("snap_to_grid"))  s.snapToGrid        = (bool) tport["snap_to_grid"];
+        if (tport.hasProperty ("snap_resolution"))
+        {
+            const int i = (int) tport["snap_resolution"];
+            if (i >= 0 && i <= (int) SnapResolution::CDFrames) s.snapResolution = (SnapResolution) i;
+        }
+        if (tport.hasProperty ("edit_mode"))
+        {
+            const int i = (int) tport["edit_mode"];
+            if (i >= 0 && i <= (int) EditMode::Draw) s.editMode = (EditMode) i;
+        }
         if (tport.hasProperty ("tempo_bpm"))         s.tempoBpm.store         ((float) (double) tport["tempo_bpm"]);
         if (tport.hasProperty ("beats_per_bar"))     s.beatsPerBar.store      ((int)    tport["beats_per_bar"]);
         if (tport.hasProperty ("beat_unit"))         s.beatUnit.store         ((int)    tport["beat_unit"]);

@@ -3,8 +3,6 @@
 
 #include "session/Session.h"
 
-#include <cmath>
-
 using Catch::Matchers::WithinAbs;
 using focal::FadeShape;
 using focal::applyFadeShape;

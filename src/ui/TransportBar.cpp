@@ -157,6 +157,63 @@ void TransportIconButton::paintButton (juce::Graphics& g, bool isMouseOver,
                                                      keyW, keyH));
             break;
         }
+        case Icon::Bars:
+        {
+            // Bars/beats glyph: four ascending vertical bars representing a
+            // bar count graphic — quick read as "musical time".
+            const float w = iconBox.getWidth();
+            const float h = iconBox.getHeight();
+            const float bw = w * 0.16f;
+            const float baseY = iconBox.getBottom();
+            const float left = iconBox.getX() + w * 0.06f;
+            const float stride = w * 0.22f;
+            const float hs[4] = { h * 0.45f, h * 0.65f, h * 0.85f, h * 1.00f };
+            for (int i = 0; i < 4; ++i)
+                g.fillRect (juce::Rectangle<float> (left + i * stride,
+                                                      baseY - hs[i],
+                                                      bw, hs[i]));
+            break;
+        }
+        case Icon::TimeClock:
+        {
+            // Clock face: circle outline + two hands (12 → up, 3 → right).
+            g.drawEllipse (iconBox.reduced (0.5f), 1.4f);
+            const auto c = iconBox.getCentre();
+            const float r1 = iconBox.getWidth() * 0.34f;   // hour hand length
+            const float r2 = iconBox.getWidth() * 0.42f;   // minute hand length
+            g.drawLine (c.x, c.y, c.x, c.y - r1, 1.4f);    // 12 o'clock
+            g.drawLine (c.x, c.y, c.x + r2, c.y, 1.4f);    // 3 o'clock
+            g.fillEllipse (c.x - 1.2f, c.y - 1.2f, 2.4f, 2.4f);
+            break;
+        }
+        case Icon::Metronome:
+        {
+            // Metronome silhouette: trapezoid body + a swinging arm
+            // crossed up-right with a small pendulum bob at the tip.
+            const float w = iconBox.getWidth();
+            const float h = iconBox.getHeight();
+            const float cx = iconBox.getCentreX();
+            const float topY = iconBox.getY() + h * 0.10f;
+            const float botY = iconBox.getBottom();
+            juce::Path body;
+            body.startNewSubPath (cx - w * 0.12f, topY);
+            body.lineTo          (cx + w * 0.12f, topY);
+            body.lineTo          (cx + w * 0.42f, botY);
+            body.lineTo          (cx - w * 0.42f, botY);
+            body.closeSubPath();
+            g.strokePath (body, juce::PathStrokeType (1.4f));
+            // Swinging arm + bob.
+            const float armBaseX = cx;
+            const float armBaseY = botY - h * 0.18f;
+            const float armTipX  = cx + w * 0.22f;
+            const float armTipY  = topY + h * 0.05f;
+            g.drawLine (armBaseX, armBaseY, armTipX, armTipY, 1.4f);
+            g.fillEllipse (armTipX - 2.0f, armTipY - 2.0f, 4.0f, 4.0f);
+            // Base line.
+            g.drawLine (iconBox.getX() + w * 0.10f, botY,
+                          iconBox.getRight() - w * 0.10f, botY, 1.4f);
+            break;
+        }
     }
 }
 
@@ -322,8 +379,6 @@ TransportBar::TransportBar (AudioEngine& engineRef) : engine (engineRef)
     timeFormatToggle.setTooltip ("Flip display between Bars/Beats and mm:ss.ms. "
                                    "Affects the clock, tape ruler, and editor rulers. "
                                    "Right-click the clock to flip when this button is hidden.");
-    timeFormatToggle.setColour (juce::TextButton::buttonColourId,  juce::Colour (0xff202024));
-    timeFormatToggle.setColour (juce::TextButton::textColourOffId, juce::Colour (0xff909094));
     auto flipTimeMode = [this]
     {
         auto& mode = engine.getSession().timeDisplayMode;
@@ -364,7 +419,8 @@ TransportBar::TransportBar (AudioEngine& engineRef) : engine (engineRef)
     };
 
     styleModeToggle (snapToggle,  juce::Colour (0xffd0a040));   // amber when on
-    styleModeToggle (clickToggle,   juce::Colour (0xff60c060));   // green when on
+    // clickToggle is now a TransportIconButton — paints from its ctor
+    // colour, no TextButton styling needed.
     styleModeToggle (countInToggle, juce::Colour (0xff60c060));   // green: same family as CLICK
 
     snapToggle.setTooltip ("Snap region drags to 1-second boundaries.");
@@ -403,7 +459,8 @@ TransportBar::TransportBar (AudioEngine& engineRef) : engine (engineRef)
     keyboardButton.onClick = [this] { if (onVirtualKeyboardToggle) onVirtualKeyboardToggle(); };
     addAndMakeVisible (keyboardButton);
 
-    // CLICK toggle + BPM editable display.
+    // Metronome toggle + BPM editable display.
+    clickToggle.setClickingTogglesState (true);
     clickToggle.setTooltip ("Toggle the metronome click. The click is mixed into the "
                              "master output but never recorded - it's a monitoring aid.");
     clickToggle.setToggleState (engine.getSession().metronomeEnabled.load(),
@@ -576,10 +633,13 @@ void TransportBar::timerCallback()
                                                         engine.getCurrentSampleRate(),
                                                         bpm, bpb, mode),
                                  juce::dontSendNotification);
-            // Toggle label shows the format the user will see NEXT click —
-            // matches the convention used by Reaper / Pro Tools secondary
-            // time-scale buttons.
-            timeFormatToggle.setButtonText (mode == TimeDisplayMode::Bars ? "TIME" : "BARS");
+            // Icon shows what the next click will switch TO — matches the
+            // convention used by Reaper / Pro Tools secondary time-scale
+            // buttons. Bars-mode shows the clock (click → time); Time-mode
+            // shows the bars glyph (click → bars).
+            timeFormatToggle.setIcon (mode == TimeDisplayMode::Bars
+                                          ? TransportIconButton::Icon::TimeClock
+                                          : TransportIconButton::Icon::Bars);
         }
     }
 

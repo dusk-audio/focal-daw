@@ -1708,7 +1708,19 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             const float peak = juce::jmax (
                 juce::jmax (std::abs (rngL.getStart()), std::abs (rngL.getEnd())),
                 juce::jmax (std::abs (rngR.getStart()), std::abs (rngR.getEnd())));
-            if (peak <= 1e-6f) continue;
+            if (peak <= 1e-6f)
+            {
+                // Bus pass is being skipped (no audio routed). Reset the
+                // post-bus meter to silence so the UI doesn't keep showing
+                // the last-played level — otherwise the LED freezes at
+                // whatever value the meter held right before the skip
+                // engaged.
+                params.meterPostBusLDb.store (-100.0f, std::memory_order_relaxed);
+                params.meterPostBusRDb.store (-100.0f, std::memory_order_relaxed);
+                params.meterPostBusRmsL.store (0.0f, std::memory_order_relaxed);
+                params.meterPostBusRmsR.store (0.0f, std::memory_order_relaxed);
+                continue;
+            }
         }
 
         busStrips[(size_t) a].processInPlace (busL[(size_t) a].data(),
@@ -1739,7 +1751,16 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             const float peak = juce::jmax (
                 juce::jmax (std::abs (rngL.getStart()), std::abs (rngL.getEnd())),
                 juce::jmax (std::abs (rngR.getStart()), std::abs (rngR.getEnd())));
-            if (peak <= 1e-6f) continue;
+            if (peak <= 1e-6f)
+            {
+                // Reset the aux-lane meter on skip — same rationale as the
+                // bus-pass skip above. Without this the lane LED freezes
+                // at the last-played level.
+                auto& auxLaneRef = session.auxLane (a);
+                auxLaneRef.params.meterPostL.store (-100.0f, std::memory_order_relaxed);
+                auxLaneRef.params.meterPostR.store (-100.0f, std::memory_order_relaxed);
+                continue;
+            }
         }
 
         auxLaneStrips[(size_t) a].processStereoBlock (auxLaneL[(size_t) a].data(),

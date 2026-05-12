@@ -2,7 +2,8 @@
 
 namespace focal
 {
-DimOverlay::DimOverlay()
+DimOverlay::DimOverlay (float alpha)
+    : fillAlpha (juce::jlimit (0.0f, 1.0f, alpha))
 {
     setInterceptsMouseClicks (true, false);
     setWantsKeyboardFocus (false);
@@ -11,7 +12,7 @@ DimOverlay::DimOverlay()
 
 void DimOverlay::paint (juce::Graphics& g)
 {
-    g.fillAll (juce::Colours::black.withAlpha (0.55f));
+    g.fillAll (juce::Colours::black.withAlpha (fillAlpha));
 }
 
 void DimOverlay::mouseDown (const juce::MouseEvent&)

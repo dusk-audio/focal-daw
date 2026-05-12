@@ -89,5 +89,12 @@ private:
     // at native rate AFTER this wrap.
     std::unique_ptr<juce::dsp::Oversampling<float>> oversampler;
     int oversamplerStages    = 0;
+
+    // VU-RMS smoother state - 300 ms tau on the audio thread so the
+    // analog VU on the master strip reads the same level TapeMachine's
+    // own VU shows on identical signals.
+    double sampleRateForMeter = 44100.0;
+    float  vuRmsLinL = 0.0f;
+    float  vuRmsLinR = 0.0f;
 };
 } // namespace focal

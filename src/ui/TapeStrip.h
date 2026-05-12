@@ -30,6 +30,8 @@ public:
     void mouseUp          (const juce::MouseEvent&) override;
     void mouseMove        (const juce::MouseEvent&) override;
     void mouseDoubleClick (const juce::MouseEvent&) override;
+    void mouseWheelMove   (const juce::MouseEvent&,
+                              const juce::MouseWheelDetails&) override;
 
     static constexpr int kTrackLabelW = 44;
     // Ruler is split into three vertical bands:
@@ -92,6 +94,15 @@ public:
     // region-specific. Repaints so the highlighted row updates.
     void setSelectedTrack (int t) noexcept;
 
+    // User-controlled horizontal zoom.
+    //   • zoomByFactor multiplies the current factor. If `anchorX` is
+    //     supplied (>= 0) the zoom anchors on that x-pixel so the
+    //     sample currently under that cursor stays put.
+    //   • zoomFit resets factor to 1.0 + scroll to 0 so the whole
+    //     timeline auto-fits.
+    void zoomByFactor (float factor, int anchorX = -1);
+    void zoomFit() noexcept;
+
 private:
     void timerCallback() override;
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
@@ -149,6 +160,20 @@ private:
     AudioEngine& engine;
 
     juce::int64 lastPlayhead = -1;
+
+    // Horizontal zoom factor. 1.0 = auto-fit-all-content (legacy behaviour).
+    // > 1 magnifies. zoomFit resets to 1.0 and zeroes scroll.
+    float userZoomFactor = 1.0f;
+    // Horizontal scroll offset in samples. The leftmost visible sample
+    // when zoomed in. Always 0 when zoom = 1 (full content visible).
+    // Wheel + zoom interactions clamp it so the visible window stays
+    // inside the content range.
+    juce::int64 scrollSamples = 0;
+
+    // Tiny zoom HUD glued to the top-right of the ruler band.
+    juce::TextButton zoomOutButton { "-" };
+    juce::TextButton zoomInButton  { "+" };
+    juce::TextButton zoomFitButton { "Fit" };
 
     // Caches so the timer can detect track color / name changes and repaint.
     // Without these, the strip's only repaint trigger is playhead motion, so
@@ -222,7 +247,14 @@ private:
         juce::int64 origTimelineStart = 0;
         MidiRegion  origState;
         bool active() const noexcept { return track >= 0 && regionIdx >= 0; }
-        void clear() { track = -1; regionIdx = -1; }
+        void clear() noexcept
+        {
+            track = -1;
+            regionIdx = -1;
+            mouseDownSample = 0;
+            origTimelineStart = 0;
+            origState = MidiRegion{};
+        }
     };
     MidiActiveDrag midiDrag;
 
@@ -273,6 +305,15 @@ private:
     // action might have shifted indices.
     int selectedTrack    = -1;
     int selectedRegion   = -1;
+
+    // MIDI region selection. Mirrors selectedTrack / selectedRegion but
+    // for the MIDI side, so clicking a MIDI region paints it highlighted
+    // the same way an audio region does. Held separately because audio
+    // and MIDI regions share the same vector index space within a track
+    // but are distinct types — folding them into one slot would make
+    // "which type is index 3?" ambiguous. -1 / -1 = nothing selected.
+    int selectedMidiTrack  = -1;
+    int selectedMidiRegion = -1;
 
     // Extra regions selected via Shift / Cmd-click on top of the
     // primary. The primary is NOT included in this vector - the full

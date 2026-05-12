@@ -148,7 +148,21 @@ void openPickerMenu (PluginSlot& slot,
                 submenu = juce::PopupMenu();
                 currentManufacturer = d.manufacturerName;
             }
-            submenu.addItem (i + 1, d.name);
+            // Append format in parens so the user can distinguish
+            // VST3 vs LV2 vs AU when the same plugin exists in multiple
+            // formats (common for cross-platform vendors). LV2 plugin
+            // UIs currently don't render on this Linux build (JUCE
+            // LV2-UI bridge limitation on the wayland fork) — flag
+            // them so the user picks the VST3 variant when both
+            // exist.
+            juce::String label = d.name;
+            if (d.pluginFormatName.isNotEmpty())
+                label += "  (" + d.pluginFormatName + ")";
+           #if JUCE_LINUX
+            if (d.pluginFormatName.compareIgnoreCase ("LV2") == 0)
+                label += "  — no UI";
+           #endif
+            submenu.addItem (i + 1, label);
         }
         if (currentManufacturer.isNotEmpty())
             menu.addSubMenu (currentManufacturer, submenu);
