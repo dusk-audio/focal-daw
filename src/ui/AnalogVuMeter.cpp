@@ -122,6 +122,14 @@ void AnalogVuMeter::setReferenceLevelDb (float refDb)
     repaint();
 }
 
+void AnalogVuMeter::setCompactScale (bool compact)
+{
+    if (compactScale == compact) return;
+    compactScale = compact;
+    rebuildCachedFace();
+    repaint();
+}
+
 void AnalogVuMeter::resized()
 {
     // Aspect-locked dial with a wide hardware-style sweep (150° total).
@@ -132,14 +140,22 @@ void AnalogVuMeter::resized()
     const auto safe = getLocalBounds().toFloat().reduced (6.0f, 4.0f);
     pivot.x = safe.getCentreX();
     pivot.y = safe.getBottom() - 4.0f;
-    halfArcDeg = 75.0f;   // 150° total sweep
+    // Compact-scale (bus) faces are wide-short - a slightly wider total
+    // sweep makes the arc fan further across the face so the contents
+    // read at a useful size instead of cowering in the middle. Master
+    // faces stay at 150° so the numbered labels keep their breathing room.
+    halfArcDeg = compactScale ? 80.0f : 75.0f;
 
     const float halfArcRad = juce::degreesToRadians (halfArcDeg);
     const float sinH = std::sin (halfArcRad);
     const float cosH = std::cos (halfArcRad);
-    // Label margin reserved past arc tips when labels render; effectively
-    // zero when narrow strips drop labels.
-    const float lblMargin = (getWidth() >= kLabelMinWidth) ? 14.0f : 2.0f;
+    // Label margin reserved past arc tips. Numeric labels need ~14 px;
+    // compact-mode "-" / "+" endpoint glyphs need only ~4 px. Wider
+    // labels are also suppressed under kLabelMinWidth on the master
+    // face for narrow strips.
+    const float lblMargin = compactScale
+                              ? 4.0f
+                              : (getWidth() >= kLabelMinWidth ? 14.0f : 2.0f);
     const float rByWidth  = (safe.getWidth() * 0.5f - lblMargin)
                              / juce::jmax (0.001f, sinH);
     const float rByHeight = (safe.getHeight() - 4.0f)
@@ -246,7 +262,12 @@ void AnalogVuMeter::rebuildCachedFace()
     //   baselineRad   curved scale arc + bottom of every tick
     //   tick top       baselineRad + tickLenMaj  (numbered) / + tickLenMin (sub)
     //   labelRad       baselineRad + tickLenMaj + labelInset
-    const bool showLabels   = w >= kLabelMinWidth;
+    //
+    // Compact-scale mode (bus VUs, Mixbus / Sifam-style): force-off
+    // numeric labels + shrink ticks regardless of face width so the bus
+    // face reads as the simpler member of the visual family. The
+    // master VU keeps the full numbered scale.
+    const bool  showLabels  = (! compactScale) && (w >= kLabelMinWidth);
     const float labelFont   = juce::jlimit (7.0f, 14.0f, arcRadius * 0.16f);
     const float tickLenMaj  = arcRadius * 0.12f;
     const float tickLenMin  = arcRadius * 0.06f;
@@ -320,6 +341,29 @@ void AnalogVuMeter::rebuildCachedFace()
                                                     boxW, boxH),
                          juce::Justification::centredBottom, false);
         }
+    }
+
+    // Compact-scale (bus VU) endpoint glyphs: "-" at the left endstop and
+    // "+" at the right. Mixbus / Sifam meters use these as a minimal
+    // sense-of-direction cue in place of full numbered scales.
+    if (compactScale)
+    {
+        const float glyphFont = juce::jlimit (7.0f, 12.0f, arcRadius * 0.18f);
+        g.setFont (juce::Font (juce::FontOptions (glyphFont, juce::Font::bold)));
+        const float boxW = glyphFont * 1.6f;
+        const float boxH = glyphFont * 1.2f;
+        auto drawEnd = [&] (float af, const char* glyph, juce::Colour col)
+        {
+            const auto pTickTop = pointOnArc (af, baselineRad + tickLenMaj);
+            g.setColour (col);
+            g.drawText (juce::String (glyph),
+                         juce::Rectangle<float> (pTickTop.x - boxW * 0.5f,
+                                                    pTickTop.y - boxH,
+                                                    boxW, boxH),
+                         juce::Justification::centredBottom, false);
+        };
+        drawEnd (-1.0f, "\xe2\x88\x92", juce::Colours::black);   // U+2212 minus
+        drawEnd ( 1.0f, "+",            juce::Colours::red);
     }
 
     // Semicircular pivot hub centred exactly on (pivot.x, pivot.y) — the

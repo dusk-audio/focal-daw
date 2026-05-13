@@ -67,6 +67,11 @@ BusComponent::BusComponent (Bus& b, Session& s, int idx)
     // one face (L = black, R = oxblood).
     vuMeter = std::make_unique<AnalogVuMeter> (
         &bus.strip.meterPostBusRmsL, &bus.strip.meterPostBusRmsR);
+    // Bus VUs use the compact Sifam / Mixbus-style scale (no numerals, "-"
+    // and "+" endpoint glyphs). Same white face as the master VU keeps the
+    // visual family consistent; the compact scale just removes the noise
+    // that crowds a small bus face.
+    vuMeter->setCompactScale (true);
     addAndMakeVisible (*vuMeter);
 
     const auto eqGreen = juce::Colour (0xff80c090);
@@ -120,8 +125,38 @@ BusComponent::BusComponent (Bus& b, Session& s, int idx)
     compThresh .onValueChange = [this] { bus.strip.compThreshDb .store ((float) compThresh .getValue(), std::memory_order_relaxed); };
     compRatio  .onValueChange = [this] { bus.strip.compRatio    .store ((float) compRatio  .getValue(), std::memory_order_relaxed); };
     compAttack .onValueChange = [this] { bus.strip.compAttackMs .store ((float) compAttack .getValue(), std::memory_order_relaxed); };
-    compRelease.onValueChange = [this] { bus.strip.compReleaseMs.store ((float) compRelease.getValue(), std::memory_order_relaxed); };
     compMakeup .onValueChange = [this] { bus.strip.compMakeupDb .store ((float) compMakeup .getValue(), std::memory_order_relaxed); };
+
+    // SSL-style release: top of the knob's travel = AUTO. Display reads
+    // "AUTO" only at the top detent; everywhere else shows the ms value.
+    // Threshold is the slider's max with a tiny eps so floating-point
+    // rounding can't accidentally drop a typed 999.8 into AUTO.
+    constexpr double kAutoThreshold = 1000.0;
+    constexpr double kAutoEps       = 1.0e-3;
+    compRelease.textFromValueFunction = [] (double v) -> juce::String
+    {
+        return std::abs (v - kAutoThreshold) <= kAutoEps
+                 ? juce::String ("AUTO")
+                 : juce::String ((int) std::round (v));
+    };
+    compRelease.valueFromTextFunction = [] (const juce::String& s) -> double
+    {
+        if (s.trim().equalsIgnoreCase ("auto")) return kAutoThreshold;
+        const double parsed = (double) s.getDoubleValue();
+        return parsed >= kAutoThreshold - kAutoEps ? kAutoThreshold : parsed;
+    };
+    compRelease.onValueChange = [this]
+    {
+        const double v = compRelease.getValue();
+        const bool autoOn = std::abs (v - kAutoThreshold) <= kAutoEps;
+        bus.strip.compReleaseAuto.store (autoOn, std::memory_order_relaxed);
+        if (! autoOn)
+            bus.strip.compReleaseMs.store ((float) v, std::memory_order_relaxed);
+    };
+    if (bus.strip.compReleaseAuto.load (std::memory_order_relaxed))
+        compRelease.setValue (kAutoThreshold, juce::dontSendNotification);
+    compRelease.updateText();
+
     addAndMakeVisible (compThresh); addAndMakeVisible (compRatio);
     addAndMakeVisible (compAttack); addAndMakeVisible (compRelease);
     addAndMakeVisible (compMakeup);
@@ -442,7 +477,7 @@ void BusComponent::resized()
     // user reads level first (the most common monitoring task).
     if (vuMeter != nullptr)
     {
-        const int vuH = juce::jmax (28, area.getWidth() * 5 / 12);
+        const int vuH = juce::jmax (36, area.getWidth() * 7 / 12);
         vuMeter->setBounds (area.removeFromTop (vuH));
         area.removeFromTop (3);
     }

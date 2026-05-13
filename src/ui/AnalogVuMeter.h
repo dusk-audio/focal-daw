@@ -36,6 +36,13 @@ public:
     // re-rendered when this changes so the labels remain consistent.
     void setReferenceLevelDb (float refDb);
 
+    // Compact-scale mode for bus / per-channel VUs: drops the numeric scale
+    // labels and the "VU" badge regardless of width, shrinks the tick
+    // marks, and paints "-" / "+" glyphs at the scale endpoints in the
+    // Sifam / Harrison Mixbus style. The face background stays consistent
+    // with the master VU so the visual family reads as one unit.
+    void setCompactScale (bool compact);
+
     void paint (juce::Graphics&) override;
     void resized() override;
 
@@ -46,6 +53,7 @@ private:
     const std::atomic<float>* leftRms  = nullptr;
     const std::atomic<float>* rightRms = nullptr;
     float referenceDbFs = -18.0f;
+    bool  compactScale  = false;
 
     // Needle position per channel as an angleFrac in [-1, +1] — -1 is the
     // resting left endstop (-20 VU), +1 is the +3 VU endstop. Mapped to a

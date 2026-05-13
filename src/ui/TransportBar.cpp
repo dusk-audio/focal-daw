@@ -844,19 +844,21 @@ void TransportBar::resized()
     syncCompactLabels (compact);
 
     area.removeFromLeft (12);
+    // Time/Bars toggle sits BETWEEN the transport buttons and the clock.
+    // The bank-button overlay was moved right of the stage tabs in
+    // MainComponent so it no longer covers this x-band - the toggle now
+    // stays visible at every window width.
+    timeFormatToggle.setVisible (true);
+    {
+        auto tfRect = area.removeFromLeft (kBtnDia);
+        const int tfPad = juce::jmax (0, (tfRect.getHeight() - kBtnDia) / 2);
+        timeFormatToggle.setBounds (tfRect.reduced (0, tfPad));
+        area.removeFromLeft (6);
+    }
     // Compact clock fits "00:00.000" at 18 px bold mono with ~2 px slack;
     // gains ~20 px back so the bank-button overlay (positioned by
     // MainComponent in the same x-range) has more room before colliding.
     clockLabel.setBounds (area.removeFromLeft (compact ? 110 : 130));
-    // Time/Bars toggle directly to the right of the clock. Hidden in
-    // compact mode because the bank-button overlay claims this x-band
-    // at narrow widths; right-click on clockLabel is the fallback.
-    timeFormatToggle.setVisible (! compact);
-    if (! compact)
-    {
-        area.removeFromLeft (4);
-        timeFormatToggle.setBounds (area.removeFromLeft (44).reduced (1, 4));
-    }
 
     // TAPE toggle on the right edge of the bar; chevron-only in compact.
     tapeToggle.setBounds (area.removeFromRight (compact ? 32 : 84).reduced (1));
@@ -865,7 +867,14 @@ void TransportBar::resized()
     // BPM editor + CLICK + C/I toggles.
     countInToggle.setBounds (area.removeFromRight (44).reduced (1, 4));
     area.removeFromRight (4);
-    clickToggle.setBounds (area.removeFromRight (60).reduced (1, 4));
+    // clickToggle is a TransportIconButton (drawn as a circular disc).
+    // Keep its bounds SQUARE so the ellipse renders round, matching the
+    // left-side transport buttons rather than looking like a wide oval.
+    {
+        auto rect = area.removeFromRight (kBtnDia);
+        const int pad = juce::jmax (0, (rect.getHeight() - kBtnDia) / 2);
+        clickToggle.setBounds (rect.reduced (0, pad));
+    }
     area.removeFromRight (4);
     tapButton.setBounds  (area.removeFromRight (40).reduced (1, 4));
     area.removeFromRight (4);
