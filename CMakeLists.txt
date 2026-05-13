@@ -177,6 +177,7 @@ target_sources(Focal PRIVATE
     src/FocalApp.cpp
     src/engine/AudioEngine.cpp
     src/engine/BounceEngine.cpp
+    src/engine/FileImporter.cpp
     src/engine/MasteringPlayer.cpp
     src/engine/PlaybackEngine.cpp
     src/engine/PluginManager.cpp
@@ -217,6 +218,7 @@ target_sources(Focal PRIVATE
     src/engine/AudioPipelineSelfTest.cpp
     src/ui/ConsoleView.cpp
     src/ui/DimOverlay.cpp
+    src/ui/ImportTargetPicker.cpp
     src/ui/MainComponent.cpp
     src/ui/MasteringEqEditor.cpp
     src/ui/MasteringLimiterEditor.cpp

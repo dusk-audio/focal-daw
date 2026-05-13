@@ -16,7 +16,9 @@ add_executable(focal-tests
     snap_helpers.cpp
     fade_shapes.cpp
     crossfade.cpp
-    ${CMAKE_SOURCE_DIR}/src/dsp/BrickwallLimiter.cpp)
+    file_importer_audio.cpp
+    ${CMAKE_SOURCE_DIR}/src/dsp/BrickwallLimiter.cpp
+    ${CMAKE_SOURCE_DIR}/src/engine/FileImporter.cpp)
 
 target_include_directories(focal-tests PRIVATE
     ${CMAKE_SOURCE_DIR}/src
@@ -31,6 +33,7 @@ target_compile_definitions(focal-tests PRIVATE
 target_link_libraries(focal-tests PRIVATE
     Catch2::Catch2WithMain
     juce::juce_audio_basics
+    juce::juce_audio_formats
     juce::juce_core
     juce::juce_graphics
     juce::juce_recommended_config_flags

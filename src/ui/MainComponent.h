@@ -91,6 +91,15 @@ private:
     void openFromFilePrompt();                           // file picker for session.json
     void newSessionPrompt();                             // dir picker + setSessionDirectory + immediate save
 
+    // File » Import Audio... / Import MIDI... entry points. Each opens a
+    // juce::FileChooser, then a target-picker modal (ImportTargetPicker)
+    // listing all 16 tracks with smart-sort ranking + recommendation.
+    // On commit, runs FileImporter on the message thread and appends the
+    // resulting region to the chosen track (flipping track.mode first if
+    // a mismatched-mode track was picked).
+    void importAudioPrompt();
+    void importMidiPrompt();
+
     // Autosave: a juce::Timer fires every 30s and writes a session.json.autosave
     // sibling using the same atomic temp+rename pattern as the manual save. On
     // session load (loadSessionFromJson) we check whether the autosave is newer
@@ -140,6 +149,7 @@ private:
 
     std::unique_ptr<juce::FileChooser> bounceFileChooser;
     std::unique_ptr<juce::FileChooser> sessionFileChooser;
+    std::unique_ptr<juce::FileChooser> importFileChooser;
     std::unique_ptr<class MasteringView> masteringView;
     std::unique_ptr<class AuxView>       auxView;
 
@@ -167,6 +177,7 @@ private:
     // styling.
     EmbeddedModal recoveryModal;
     EmbeddedModal virtualKeyboardModal;
+    EmbeddedModal importTargetModal;
     void toggleVirtualKeyboard();
 
     // True once the audio callback has been removed in preparation for

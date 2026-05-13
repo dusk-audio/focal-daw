@@ -17,6 +17,9 @@
 #include "../session/MarkerEditActions.h"
 #include "../session/RecentSessions.h"
 #include "../session/SessionSerializer.h"
+#include "../engine/FileImporter.h"
+#include "ImportTargetPicker.h"
+#include <juce_audio_formats/juce_audio_formats.h>
 #include "ConsoleView.h"  // (already included transitively, kept explicit)
 #include "PlatformWindowing.h"
 
@@ -270,9 +273,14 @@ MainComponent::MainComponent()
         b.setColour (juce::TextButton::textColourOffId,  juce::Colour (0xff909094));
         b.setColour (juce::TextButton::textColourOnId,   juce::Colours::white);
     };
+    // Stage tab accent colours. Saturations chosen so each active tab
+    // has comparable visual weight - the prior aux 0xff9080c0 read as
+    // washed-out next to the saturated red / blue / purple of the other
+    // three, making the AUX active state look like an outline rather
+    // than a filled tab.
     styleStageButton (recordingStageBtn, juce::Colour (0xffd03030));   // red, like REC
     styleStageButton (mixingStageBtn,    juce::Colour (0xff5a8ad0));   // mix-desk blue
-    styleStageButton (auxStageBtn,       juce::Colour (0xff9080c0));   // aux purple-grey
+    styleStageButton (auxStageBtn,       juce::Colour (0xff6e5ad0));   // aux indigo-violet
     styleStageButton (masteringStageBtn, juce::Colour (0xff8a5ad0));   // mastering purple
     recordingStageBtn.setConnectedEdges (juce::Button::ConnectedOnRight);
     mixingStageBtn   .setConnectedEdges (juce::Button::ConnectedOnLeft | juce::Button::ConnectedOnRight);
@@ -868,7 +876,34 @@ void MainComponent::resized()
     constexpr int kStageBtnH = 28;
     const int stageBlockW = stageW * 4;
     const int stageY = rowBounds.getY() + (rowBounds.getHeight() - kStageBtnH) / 2;
-    const int stageX = rowBounds.getX() + (rowBounds.getWidth() - stageBlockW) / 2;
+
+    // Banking decision (kept before stageX so the stage block can flow
+    // right of the bank overlay when banks are visible).
+    const bool needsBanking = (consoleView != nullptr) && (! inFullscreenView)
+                             && (area.getWidth() < consoleView->fixedWidthFor16Tracks());
+    const bool transportCompact = rowBounds.getWidth() < TransportBar::kCompactTransportWidth;
+    const int  kBankBtnW   = transportCompact ? 90 : 130;
+    constexpr int kBankBtnGap = 6;
+
+    // Width of the transport bar's left block (transport buttons + time
+    // toggle + clock), tracked here so the stage tabs can sit just right
+    // of it when banks are showing. Numbers match TransportBar::resized.
+    const int kTransportLeftEnd = transportCompact ? 480 : 500;
+    const int kPostClockGap     = 16;
+
+    int stageX;
+    if (needsBanking)
+    {
+        const int bankWidth   = kBankBtnW * 2 + kBankBtnGap;
+        const int stageStartX = rowBounds.getX() + kTransportLeftEnd
+                                 + kPostClockGap + bankWidth + kPostClockGap;
+        stageX = stageStartX;
+    }
+    else
+    {
+        stageX = rowBounds.getX() + (rowBounds.getWidth() - stageBlockW) / 2;
+    }
+
     recordingStageBtn.setBounds (stageX,                stageY, stageW, kStageBtnH);
     mixingStageBtn   .setBounds (stageX + stageW,       stageY, stageW, kStageBtnH);
     auxStageBtn      .setBounds (stageX + 2 * stageW,   stageY, stageW, kStageBtnH);
@@ -882,25 +917,19 @@ void MainComponent::resized()
     masteringStageBtn.toFront (false);
 
     // Banking decision: console can't fit all 16 strips at reference width.
-    // Hidden in mastering / aux (no console there). Banks slot in just to
-    // the left of the centred stage block.
-    const bool needsBanking = (consoleView != nullptr) && (! inFullscreenView)
-                             && (area.getWidth() < consoleView->fixedWidthFor16Tracks());
+    // Hidden in mastering / aux (no console there). Banks now sit between
+    // the transport-bar clock and the stage-tab block (transport row
+    // reads left-to-right: transport buttons | time toggle | clock |
+    // BANK A | BANK B | RECORDING | MIXING | AUX | MASTERING).
     bankAButton.setVisible (needsBanking);
     bankBButton.setVisible (needsBanking);
     if (needsBanking)
     {
-        // Match TransportBar's compact threshold so bank shrink and clock
-        // shrink fire at the same window width.
-        const bool compact = rowBounds.getWidth() < TransportBar::kCompactTransportWidth;
-        const int  kBankBtnW   = compact ? 90 : 130;
-        constexpr int kBankBtnGap = 6;
         constexpr int kBankBtnH = 26;
-        bankAButton.setButtonText (compact ? "1-8"  : "BANK A  (1-8)");
-        bankBButton.setButtonText (compact ? "9-16" : "BANK B  (9-16)");
+        bankAButton.setButtonText (transportCompact ? "1-8"  : "BANK A  (1-8)");
+        bankBButton.setButtonText (transportCompact ? "9-16" : "BANK B  (9-16)");
         const int bankY = rowBounds.getY() + (rowBounds.getHeight() - kBankBtnH) / 2;
-        const int bankBlockEndX = stageX - 16;        // 16 px gap from stage block
-        const int bankX         = bankBlockEndX - (kBankBtnW * 2 + kBankBtnGap);
+        const int bankX = rowBounds.getX() + kTransportLeftEnd + kPostClockGap;
         bankAButton.setBounds (bankX, bankY, kBankBtnW, kBankBtnH);
         bankBButton.setBounds (bankX + kBankBtnW + kBankBtnGap, bankY,
                                 kBankBtnW, kBankBtnH);
@@ -1761,6 +1790,222 @@ void MainComponent::openBounceDialog()
     });
 }
 
+namespace
+{
+juce::AudioFormatManager& importAudioFormatManager()
+{
+    // AudioFormatManager is non-copyable; constexpr-init isn't an option.
+    // Cheap to construct + register; share a static instance and lazily
+    // register on first use via the flag below.
+    static juce::AudioFormatManager fm;
+    static bool registered = false;
+    if (! registered)
+    {
+        fm.registerBasicFormats();
+        registered = true;
+    }
+    return fm;
+}
+
+void showImportError (const juce::String& title, const juce::String& message)
+{
+    juce::AlertWindow::showAsync (
+        juce::MessageBoxOptions()
+            .withIconType (juce::MessageBoxIconType::WarningIcon)
+            .withTitle (title)
+            .withMessage (message)
+            .withButton ("OK"),
+        nullptr);
+}
+} // namespace
+
+void MainComponent::importAudioPrompt()
+{
+    if (! engine.getTransport().isStopped())
+    {
+        showImportError ("Import audio", "Stop playback before importing files.");
+        return;
+    }
+
+    const auto startDir = juce::File::getSpecialLocation (juce::File::userMusicDirectory);
+    importFileChooser = std::make_unique<juce::FileChooser> (
+        "Import audio file",
+        startDir,
+        "*.wav;*.aiff;*.aif;*.flac");
+
+    const auto chooserFlags = juce::FileBrowserComponent::openMode
+                            | juce::FileBrowserComponent::canSelectFiles;
+
+    importFileChooser->launchAsync (chooserFlags, [this] (const juce::FileChooser& fc)
+    {
+        const auto chosen = fc.getResult();
+        if (chosen == juce::File()) return;
+
+        // Peek the source file's properties so the picker can show them
+        // and the smart-sort can rank tracks by channel layout.
+        std::unique_ptr<juce::AudioFormatReader> reader (
+            importAudioFormatManager().createReaderFor (chosen));
+        if (reader == nullptr)
+        {
+            showImportError ("Import audio",
+                              "Unsupported or unreadable audio file: " + chosen.getFileName());
+            return;
+        }
+
+        ImportTargetPicker::FileSummary summary;
+        summary.file          = chosen;
+        summary.sampleRate    = reader->sampleRate;
+        summary.numChannels   = juce::jmin (2, (int) reader->numChannels);
+        summary.lengthSamples = (juce::int64) reader->lengthInSamples;
+        summary.isMidi        = false;
+        reader.reset();   // close before the picker calls FileImporter
+
+        const auto playhead = engine.getTransport().getPlayhead();
+
+        auto picker = std::make_unique<ImportTargetPicker> (
+            session,
+            std::move (summary),
+            playhead,
+            engine.getCurrentSampleRate(),
+            session.tempoBpm.load (std::memory_order_relaxed),
+            session.beatsPerBar.load (std::memory_order_relaxed),
+            session.timeDisplayMode.load (std::memory_order_relaxed),
+            [this, chosen, playhead] (int trackIndex)
+            {
+                importTargetModal.close();
+
+                auto& track = session.track (trackIndex);
+                const auto mode = (Track::Mode) track.mode.load (std::memory_order_relaxed);
+
+                focal::fileimport::AudioImportRequest req;
+                req.source            = chosen;
+                req.audioDir          = session.getAudioDirectory();
+                req.trackIndex        = trackIndex;
+                req.sessionSampleRate = engine.getCurrentSampleRate();
+                req.targetChannels    = (mode == Track::Mode::Stereo) ? 2 : 1;
+                req.timelineStart     = playhead;
+
+                auto res = focal::fileimport::importAudio (req);
+                if (! res.ok)
+                {
+                    showImportError ("Import audio failed", res.errorMessage);
+                    return;
+                }
+
+                // Transport is stopped (gated above), so PlaybackEngine
+                // is not iterating Track::regions on the audio thread -
+                // mutating in place is safe; the next play() pulls the
+                // new layout via preparePlayback.
+                track.regions.push_back (std::move (res.region));
+                if (tapeStrip != nullptr) tapeStrip->repaint();
+            },
+            [this] { importTargetModal.close(); });
+
+        importTargetModal.show (*this, std::move (picker));
+    });
+}
+
+void MainComponent::importMidiPrompt()
+{
+    if (! engine.getTransport().isStopped())
+    {
+        showImportError ("Import MIDI", "Stop playback before importing files.");
+        return;
+    }
+
+    const auto startDir = juce::File::getSpecialLocation (juce::File::userMusicDirectory);
+    importFileChooser = std::make_unique<juce::FileChooser> (
+        "Import MIDI file",
+        startDir,
+        "*.mid;*.midi");
+
+    const auto chooserFlags = juce::FileBrowserComponent::openMode
+                            | juce::FileBrowserComponent::canSelectFiles;
+
+    importFileChooser->launchAsync (chooserFlags, [this] (const juce::FileChooser& fc)
+    {
+        const auto chosen = fc.getResult();
+        if (chosen == juce::File()) return;
+
+        // Peek the MIDI file for a quick summary (note count + length).
+        juce::MidiFile peek;
+        {
+            juce::FileInputStream in (chosen);
+            if (! in.openedOk() || ! peek.readFrom (in))
+            {
+                showImportError ("Import MIDI", "Could not read MIDI file.");
+                return;
+            }
+        }
+        ImportTargetPicker::FileSummary summary;
+        summary.file        = chosen;
+        summary.isMidi      = true;
+        summary.numChannels = -1;
+
+        int noteCount = 0;
+        juce::int64 maxTick = 0;
+        const int ppq = (int) peek.getTimeFormat();
+        for (int t = 0; t < peek.getNumTracks(); ++t)
+        {
+            if (const auto* trk = peek.getTrack (t))
+            {
+                for (int i = 0; i < trk->getNumEvents(); ++i)
+                {
+                    const auto& m = trk->getEventPointer (i)->message;
+                    if (m.isNoteOn() && m.getVelocity() > 0) ++noteCount;
+                    maxTick = juce::jmax (maxTick,
+                                            (juce::int64) std::llround (m.getTimeStamp()));
+                }
+            }
+        }
+        summary.numMidiNotes = noteCount;
+        // Rescale to Focal's canonical PPQ for the header display.
+        summary.lengthTicks  = (ppq > 0 && ppq != kMidiTicksPerQuarter)
+                                  ? (juce::int64) std::llround ((double) maxTick
+                                       * (double) kMidiTicksPerQuarter / (double) ppq)
+                                  : maxTick;
+
+        const auto playhead = engine.getTransport().getPlayhead();
+
+        auto picker = std::make_unique<ImportTargetPicker> (
+            session,
+            std::move (summary),
+            playhead,
+            engine.getCurrentSampleRate(),
+            session.tempoBpm.load (std::memory_order_relaxed),
+            session.beatsPerBar.load (std::memory_order_relaxed),
+            session.timeDisplayMode.load (std::memory_order_relaxed),
+            [this, chosen, playhead] (int trackIndex)
+            {
+                importTargetModal.close();
+
+                auto& track = session.track (trackIndex);
+
+                focal::fileimport::MidiImportRequest req;
+                req.source            = chosen;
+                req.sessionSampleRate = engine.getCurrentSampleRate();
+                req.sessionBpm        = session.tempoBpm.load (std::memory_order_relaxed);
+                req.timelineStart     = playhead;
+
+                auto res = focal::fileimport::importMidi (req);
+                if (! res.ok)
+                {
+                    showImportError ("Import MIDI failed", res.errorMessage);
+                    return;
+                }
+
+                track.midiRegions.mutate ([&] (std::vector<MidiRegion>& v)
+                {
+                    v.push_back (std::move (res.region));
+                });
+                if (tapeStrip != nullptr) tapeStrip->repaint();
+            },
+            [this] { importTargetModal.close(); });
+
+        importTargetModal.show (*this, std::move (picker));
+    });
+}
+
 // ── MenuBarModel ─────────────────────────────────────────────────────────
 //
 // Two top-level menus drive every header action that used to be a separate
@@ -1775,6 +2020,8 @@ enum MenuItemId
     kMenuFileOpen     = 1002,
     kMenuFileSave     = 1003,
     kMenuFileSaveAs   = 1004,
+    kMenuFileImportAudio = 1006,
+    kMenuFileImportMidi  = 1007,
     kMenuFileMixdown  = 1010,
     kMenuFileBounce   = 1011,
     kMenuFileCleanOut = 1012,
@@ -1815,6 +2062,9 @@ juce::PopupMenu MainComponent::getMenuForIndex (int topLevelMenuIndex,
         menu.addItem (kMenuFileSave,   "Save");
         menu.addItem (kMenuFileSaveAs, "Save as...");
         menu.addSeparator();
+        menu.addItem (kMenuFileImportAudio, "Import audio...");
+        menu.addItem (kMenuFileImportMidi,  "Import MIDI...");
+        menu.addSeparator();
         menu.addItem (kMenuFileMixdown, "Mixdown");
         menu.addItem (kMenuFileBounce,  "Bounce...");
         menu.addSeparator();
@@ -1851,6 +2101,8 @@ void MainComponent::menuItemSelected (int menuItemID, int /*topLevelMenuIndex*/)
             break;
         }
         case kMenuFileSaveAs: saveAsPrompt();           break;
+        case kMenuFileImportAudio: importAudioPrompt(); break;
+        case kMenuFileImportMidi:  importMidiPrompt();  break;
         case kMenuFileMixdown: doMixdown();             break;
         case kMenuFileBounce:  openBounceDialog();      break;
         case kMenuFileCleanOut: cleanOutUnreferencedFiles(); break;
