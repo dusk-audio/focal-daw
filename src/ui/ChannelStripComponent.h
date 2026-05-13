@@ -216,7 +216,10 @@ private:
     // the channel signal into the matching AUX strip's plugin chain. The
     // PRE/POST tap point is per-channel-per-aux (auxSendPreFader[i]) and
     // gets its UI in Phase D.
-    juce::Label  auxRowLabel;
+    // One small index label ("1".."4") per aux send, coloured per
+    // kAuxColours so the user can tell at a glance which knob feeds AUX
+    // N without looking up the colour against the AUX-page tab strip.
+    std::array<juce::Label, ChannelStripParams::kNumAuxSends> auxIndexLabels;
     std::array<std::unique_ptr<juce::Slider>, ChannelStripParams::kNumAuxSends> auxKnobs;
     std::array<juce::Label,                  ChannelStripParams::kNumAuxSends> auxKnobLabels;
     bool mixingMode = false;

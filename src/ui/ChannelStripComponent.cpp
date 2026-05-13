@@ -843,18 +843,22 @@ ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
     // Phase A: knobs + atomics only - audio routing through the aux buses
     // happens in Phase B. The four send levels feed AUX 1..4's plugin chain
     // (reverb / delay / etc.). Default -inf (no send).
-    auxRowLabel.setText ("AUX", juce::dontSendNotification);
-    auxRowLabel.setJustificationType (juce::Justification::centred);
-    auxRowLabel.setColour (juce::Label::textColourId, juce::Colour (0xff9080c0));
-    auxRowLabel.setFont (juce::Font (juce::FontOptions (8.5f, juce::Font::bold)));
-    addChildComponent (auxRowLabel);
-
     static const juce::Colour kAuxColours[ChannelStripParams::kNumAuxSends] = {
         juce::Colour (0xff5a8ad0),    // AUX 1 - blue
         juce::Colour (0xff9080c0),    // AUX 2 - violet
         juce::Colour (0xffe0c050),    // AUX 3 - amber
         juce::Colour (0xff60c060),    // AUX 4 - green
     };
+
+    for (int i = 0; i < ChannelStripParams::kNumAuxSends; ++i)
+    {
+        auto& lbl = auxIndexLabels[(size_t) i];
+        lbl.setText (juce::String ("AUX") + juce::String (i + 1), juce::dontSendNotification);
+        lbl.setJustificationType (juce::Justification::centred);
+        lbl.setColour (juce::Label::textColourId, kAuxColours[i].brighter (0.2f));
+        lbl.setFont (juce::Font (juce::FontOptions (8.5f, juce::Font::bold)));
+        addChildComponent (lbl);
+    }
 
     auto formatAuxSend = [] (float dB)
     {
@@ -1095,7 +1099,7 @@ void ChannelStripComponent::setMixingMode (bool mixing)
     armButton          .setVisible (! mixing);
     printButton        .setVisible (! mixing);
 
-    auxRowLabel.setVisible (mixing);
+    for (auto& l : auxIndexLabels)  l.setVisible (mixing);
     for (auto& k : auxKnobs)        if (k != nullptr) k->setVisible (mixing);
     for (auto& l : auxKnobLabels)   l.setVisible (mixing);
 
@@ -2954,7 +2958,7 @@ void ChannelStripComponent::resized()
         // Lay out the label + knob block inside the box, with a small
         // horizontal padding so the SEND knobs don't kiss the frame.
         auto inner = auxRowArea.reduced (3, 0);
-        auxRowLabel.setBounds (inner.removeFromTop (kAuxLabelH));
+        auto headerRow = inner.removeFromTop (kAuxLabelH);
         inner.removeFromTop (kAuxLabelGap);
 
         auto block = inner.removeFromTop (kAuxBlockH);
@@ -2964,15 +2968,19 @@ void ChannelStripComponent::resized()
         {
             auto col = juce::Rectangle<int> (block.getX() + i * colW, block.getY(),
                                                 colW, block.getHeight());
+
+            // Index numeral sits centred above its knob column, painted
+            // in the matching kAuxColours tint. Same X-grid as the knob
+            // below, so it scans as a header for that knob.
+            auxIndexLabels[(size_t) i].setBounds (col.getX(), headerRow.getY(),
+                                                    col.getWidth(), kAuxLabelH);
+
             const int knobX = col.getX() + (col.getWidth() - kAuxKnobSize) / 2;
             const int knobY = col.getY() + ((i % 2 == 0) ? 0 : kAuxStaggerY);
             if (auxKnobs[(size_t) i] != nullptr)
                 auxKnobs[(size_t) i]->setBounds (knobX, knobY,
                                                   kAuxKnobSize, kAuxKnobSize);
 
-            // Labels share the same Y at the bottom of the block, regardless
-            // of the knob's vertical offset - keeps them aligned for easy
-            // scanning even though the knobs zig-zag.
             const int labelY = col.getBottom() - kAuxValueH;
             auxKnobLabels[(size_t) i].setBounds (col.getX(), labelY,
                                                    col.getWidth(), kAuxValueH);
