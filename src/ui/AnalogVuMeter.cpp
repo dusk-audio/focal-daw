@@ -412,10 +412,14 @@ void AnalogVuMeter::paint (juce::Graphics& g)
     drawNeedle (needlePosL, kNeedle, 1.4f);
 
     // PEAK LED overlay - lit while the hold timer is still in the future.
+    // Wrap-safe compare: juce::Time::getMillisecondCounter wraps every ~49
+    // days; a plain `now < peakHoldUntilMs` would briefly lie when the
+    // deadline straddles the wrap. Casting the diff to int32 gives a
+    // signed remaining-ms that handles the wrap correctly.
     if (peakHoldUntilMs != 0 && ! peakLedRect.isEmpty())
     {
         const auto now = juce::Time::getMillisecondCounter();
-        if (now < peakHoldUntilMs)
+        if ((juce::int32) (peakHoldUntilMs - now) > 0)
         {
             g.setColour (kPeakLedOn);
             g.fillEllipse (peakLedRect);
