@@ -42,6 +42,7 @@ public:
                          float       sessionBpm,
                          int         beatsPerBar,
                          int         timeDisplayMode,
+                         int         preferredTrackIndex,
                          std::function<void (int trackIndex)> onCommit,
                          std::function<void()> onCancel);
     ~ImportTargetPicker() override;

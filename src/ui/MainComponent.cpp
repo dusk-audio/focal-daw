@@ -20,6 +20,41 @@
 #include "../engine/FileImporter.h"
 #include "ImportTargetPicker.h"
 #include <juce_audio_formats/juce_audio_formats.h>
+
+namespace focal
+{
+namespace
+{
+// Shared helpers for the file-import flow (both menu-driven and
+// drag-and-drop). Lives at file scope so the TapeStrip drop callback
+// wired up in the MainComponent ctor can reference them.
+juce::AudioFormatManager& importAudioFormatManager()
+{
+    // AudioFormatManager is non-copyable; constexpr-init isn't an option.
+    // Cheap to construct + register; share a static instance and lazily
+    // register on first use via the flag below.
+    static juce::AudioFormatManager fm;
+    static bool registered = false;
+    if (! registered)
+    {
+        fm.registerBasicFormats();
+        registered = true;
+    }
+    return fm;
+}
+
+void showImportError (const juce::String& title, const juce::String& message)
+{
+    juce::AlertWindow::showAsync (
+        juce::MessageBoxOptions()
+            .withIconType (juce::MessageBoxIconType::WarningIcon)
+            .withTitle (title)
+            .withMessage (message)
+            .withButton ("OK"),
+        nullptr);
+}
+} // namespace
+} // namespace focal
 #include "ConsoleView.h"  // (already included transitively, kept explicit)
 #include "PlatformWindowing.h"
 
@@ -356,6 +391,22 @@ MainComponent::MainComponent()
     tapeStrip->setVisible (tapeStripExpanded);
     tapeStrip->onMidiRegionDoubleClicked  = [this] (int t, int r) { openPianoRoll   (t, r); };
     tapeStrip->onAudioRegionDoubleClicked = [this] (int t, int r) { openAudioEditor (t, r); };
+    tapeStrip->onFileDropped = [this] (juce::File file,
+                                         juce::int64 timelineStart,
+                                         int trackHint)
+    {
+        if (! engine.getTransport().isStopped())
+        {
+            showImportError ("Import",
+                              "Stop playback before importing files.");
+            return;
+        }
+        const auto ext = file.getFileExtension().toLowerCase();
+        if (ext == ".mid" || ext == ".midi")
+            runMidiImportFlow (file, timelineStart, trackHint);
+        else
+            runAudioImportFlow (file, timelineStart, trackHint);
+    };
     addAndMakeVisible (tapeStrip.get());
 
     // Sync the transport-bar TAPE toggle with the collapsed default.
@@ -1790,34 +1841,173 @@ void MainComponent::openBounceDialog()
     });
 }
 
-namespace
+void MainComponent::runAudioImportFlow (juce::File source,
+                                            juce::int64 timelineStart,
+                                            int trackHint)
 {
-juce::AudioFormatManager& importAudioFormatManager()
-{
-    // AudioFormatManager is non-copyable; constexpr-init isn't an option.
-    // Cheap to construct + register; share a static instance and lazily
-    // register on first use via the flag below.
-    static juce::AudioFormatManager fm;
-    static bool registered = false;
-    if (! registered)
+    std::unique_ptr<juce::AudioFormatReader> reader (
+        importAudioFormatManager().createReaderFor (source));
+    if (reader == nullptr)
     {
-        fm.registerBasicFormats();
-        registered = true;
+        showImportError ("Import audio",
+                          "Unsupported or unreadable audio file: " + source.getFileName());
+        return;
     }
-    return fm;
+
+    ImportTargetPicker::FileSummary summary;
+    summary.file          = source;
+    summary.sampleRate    = reader->sampleRate;
+    summary.numChannels   = juce::jmin (2, (int) reader->numChannels);
+    summary.lengthSamples = (juce::int64) reader->lengthInSamples;
+    summary.isMidi        = false;
+    reader.reset();   // close before the picker calls FileImporter
+
+    auto picker = std::make_unique<ImportTargetPicker> (
+        session,
+        std::move (summary),
+        timelineStart,
+        engine.getCurrentSampleRate(),
+        session.tempoBpm.load (std::memory_order_relaxed),
+        session.beatsPerBar.load (std::memory_order_relaxed),
+        session.timeDisplayMode.load (std::memory_order_relaxed),
+        trackHint,
+        [safeThis = juce::Component::SafePointer<MainComponent> (this),
+         source, timelineStart] (int trackIndex)
+        {
+            auto* self = safeThis.getComponent();
+            if (self == nullptr) return;
+            self->importTargetModal.close();
+
+            // Re-check transport state — the user could have hit Play
+            // between opening the picker and confirming a target. The
+            // success path mutates Track::regions in place, which is
+            // only safe with playback halted.
+            if (! self->engine.getTransport().isStopped())
+            {
+                showImportError ("Import audio",
+                                         "Stop playback before importing files.");
+                return;
+            }
+
+            auto& track = self->session.track (trackIndex);
+            const auto mode = (Track::Mode) track.mode.load (std::memory_order_relaxed);
+
+            focal::fileimport::AudioImportRequest req;
+            req.source            = source;
+            req.audioDir          = self->session.getAudioDirectory();
+            req.trackIndex        = trackIndex;
+            req.sessionSampleRate = self->engine.getCurrentSampleRate();
+            req.targetChannels    = (mode == Track::Mode::Stereo) ? 2 : 1;
+            req.timelineStart     = timelineStart;
+
+            auto res = focal::fileimport::importAudio (req);
+            if (! res.ok)
+            {
+                showImportError ("Import audio failed", res.errorMessage);
+                return;
+            }
+
+            // Transport is stopped (re-checked above), so PlaybackEngine
+            // isn't iterating Track::regions on the audio thread - mutating
+            // in place is safe; the next play() pulls the new layout via
+            // preparePlayback.
+            track.regions.push_back (std::move (res.region));
+            if (self->tapeStrip != nullptr) self->tapeStrip->repaint();
+        },
+        [safeThis = juce::Component::SafePointer<MainComponent> (this)]
+        {
+            if (auto* self = safeThis.getComponent())
+                self->importTargetModal.close();
+        });
+
+    importTargetModal.show (*this, std::move (picker));
 }
 
-void showImportError (const juce::String& title, const juce::String& message)
+void MainComponent::runMidiImportFlow (juce::File source,
+                                          juce::int64 timelineStart,
+                                          int trackHint)
 {
-    juce::AlertWindow::showAsync (
-        juce::MessageBoxOptions()
-            .withIconType (juce::MessageBoxIconType::WarningIcon)
-            .withTitle (title)
-            .withMessage (message)
-            .withButton ("OK"),
-        nullptr);
+    juce::MidiFile peek;
+    {
+        juce::FileInputStream in (source);
+        if (! in.openedOk() || ! peek.readFrom (in))
+        {
+            showImportError ("Import MIDI", "Could not read MIDI file.");
+            return;
+        }
+    }
+    ImportTargetPicker::FileSummary summary;
+    summary.file        = source;
+    summary.isMidi      = true;
+    summary.numChannels = -1;
+
+    int noteCount = 0;
+    juce::int64 maxTick = 0;
+    const int ppq = (int) peek.getTimeFormat();
+    for (int t = 0; t < peek.getNumTracks(); ++t)
+    {
+        if (const auto* trk = peek.getTrack (t))
+        {
+            for (int i = 0; i < trk->getNumEvents(); ++i)
+            {
+                const auto& m = trk->getEventPointer (i)->message;
+                if (m.isNoteOn() && m.getVelocity() > 0) ++noteCount;
+                maxTick = juce::jmax (maxTick,
+                                        (juce::int64) std::llround (m.getTimeStamp()));
+            }
+        }
+    }
+    summary.numMidiNotes = noteCount;
+    summary.lengthTicks  = (ppq > 0 && ppq != kMidiTicksPerQuarter)
+                              ? (juce::int64) std::llround ((double) maxTick
+                                   * (double) kMidiTicksPerQuarter / (double) ppq)
+                              : maxTick;
+
+    auto picker = std::make_unique<ImportTargetPicker> (
+        session,
+        std::move (summary),
+        timelineStart,
+        engine.getCurrentSampleRate(),
+        session.tempoBpm.load (std::memory_order_relaxed),
+        session.beatsPerBar.load (std::memory_order_relaxed),
+        session.timeDisplayMode.load (std::memory_order_relaxed),
+        trackHint,
+        [safeThis = juce::Component::SafePointer<MainComponent> (this),
+         source, timelineStart] (int trackIndex)
+        {
+            auto* self = safeThis.getComponent();
+            if (self == nullptr) return;
+            self->importTargetModal.close();
+
+            auto& track = self->session.track (trackIndex);
+
+            focal::fileimport::MidiImportRequest req;
+            req.source            = source;
+            req.sessionSampleRate = self->engine.getCurrentSampleRate();
+            req.sessionBpm        = self->session.tempoBpm.load (std::memory_order_relaxed);
+            req.timelineStart     = timelineStart;
+
+            auto res = focal::fileimport::importMidi (req);
+            if (! res.ok)
+            {
+                showImportError ("Import MIDI failed", res.errorMessage);
+                return;
+            }
+
+            track.midiRegions.mutate ([&] (std::vector<MidiRegion>& v)
+            {
+                v.push_back (std::move (res.region));
+            });
+            if (self->tapeStrip != nullptr) self->tapeStrip->repaint();
+        },
+        [safeThis = juce::Component::SafePointer<MainComponent> (this)]
+        {
+            if (auto* self = safeThis.getComponent())
+                self->importTargetModal.close();
+        });
+
+    importTargetModal.show (*this, std::move (picker));
 }
-} // namespace
 
 void MainComponent::importAudioPrompt()
 {
@@ -1836,72 +2026,17 @@ void MainComponent::importAudioPrompt()
     const auto chooserFlags = juce::FileBrowserComponent::openMode
                             | juce::FileBrowserComponent::canSelectFiles;
 
-    importFileChooser->launchAsync (chooserFlags, [this] (const juce::FileChooser& fc)
+    importFileChooser->launchAsync (chooserFlags,
+        [safeThis = juce::Component::SafePointer<MainComponent> (this)]
+        (const juce::FileChooser& fc)
     {
+        auto* self = safeThis.getComponent();
+        if (self == nullptr) return;
         const auto chosen = fc.getResult();
         if (chosen == juce::File()) return;
-
-        // Peek the source file's properties so the picker can show them
-        // and the smart-sort can rank tracks by channel layout.
-        std::unique_ptr<juce::AudioFormatReader> reader (
-            importAudioFormatManager().createReaderFor (chosen));
-        if (reader == nullptr)
-        {
-            showImportError ("Import audio",
-                              "Unsupported or unreadable audio file: " + chosen.getFileName());
-            return;
-        }
-
-        ImportTargetPicker::FileSummary summary;
-        summary.file          = chosen;
-        summary.sampleRate    = reader->sampleRate;
-        summary.numChannels   = juce::jmin (2, (int) reader->numChannels);
-        summary.lengthSamples = (juce::int64) reader->lengthInSamples;
-        summary.isMidi        = false;
-        reader.reset();   // close before the picker calls FileImporter
-
-        const auto playhead = engine.getTransport().getPlayhead();
-
-        auto picker = std::make_unique<ImportTargetPicker> (
-            session,
-            std::move (summary),
-            playhead,
-            engine.getCurrentSampleRate(),
-            session.tempoBpm.load (std::memory_order_relaxed),
-            session.beatsPerBar.load (std::memory_order_relaxed),
-            session.timeDisplayMode.load (std::memory_order_relaxed),
-            [this, chosen, playhead] (int trackIndex)
-            {
-                importTargetModal.close();
-
-                auto& track = session.track (trackIndex);
-                const auto mode = (Track::Mode) track.mode.load (std::memory_order_relaxed);
-
-                focal::fileimport::AudioImportRequest req;
-                req.source            = chosen;
-                req.audioDir          = session.getAudioDirectory();
-                req.trackIndex        = trackIndex;
-                req.sessionSampleRate = engine.getCurrentSampleRate();
-                req.targetChannels    = (mode == Track::Mode::Stereo) ? 2 : 1;
-                req.timelineStart     = playhead;
-
-                auto res = focal::fileimport::importAudio (req);
-                if (! res.ok)
-                {
-                    showImportError ("Import audio failed", res.errorMessage);
-                    return;
-                }
-
-                // Transport is stopped (gated above), so PlaybackEngine
-                // is not iterating Track::regions on the audio thread -
-                // mutating in place is safe; the next play() pulls the
-                // new layout via preparePlayback.
-                track.regions.push_back (std::move (res.region));
-                if (tapeStrip != nullptr) tapeStrip->repaint();
-            },
-            [this] { importTargetModal.close(); });
-
-        importTargetModal.show (*this, std::move (picker));
+        self->runAudioImportFlow (chosen,
+                                     self->engine.getTransport().getPlayhead(),
+                                     -1);
     });
 }
 
@@ -1922,87 +2057,17 @@ void MainComponent::importMidiPrompt()
     const auto chooserFlags = juce::FileBrowserComponent::openMode
                             | juce::FileBrowserComponent::canSelectFiles;
 
-    importFileChooser->launchAsync (chooserFlags, [this] (const juce::FileChooser& fc)
+    importFileChooser->launchAsync (chooserFlags,
+        [safeThis = juce::Component::SafePointer<MainComponent> (this)]
+        (const juce::FileChooser& fc)
     {
+        auto* self = safeThis.getComponent();
+        if (self == nullptr) return;
         const auto chosen = fc.getResult();
         if (chosen == juce::File()) return;
-
-        // Peek the MIDI file for a quick summary (note count + length).
-        juce::MidiFile peek;
-        {
-            juce::FileInputStream in (chosen);
-            if (! in.openedOk() || ! peek.readFrom (in))
-            {
-                showImportError ("Import MIDI", "Could not read MIDI file.");
-                return;
-            }
-        }
-        ImportTargetPicker::FileSummary summary;
-        summary.file        = chosen;
-        summary.isMidi      = true;
-        summary.numChannels = -1;
-
-        int noteCount = 0;
-        juce::int64 maxTick = 0;
-        const int ppq = (int) peek.getTimeFormat();
-        for (int t = 0; t < peek.getNumTracks(); ++t)
-        {
-            if (const auto* trk = peek.getTrack (t))
-            {
-                for (int i = 0; i < trk->getNumEvents(); ++i)
-                {
-                    const auto& m = trk->getEventPointer (i)->message;
-                    if (m.isNoteOn() && m.getVelocity() > 0) ++noteCount;
-                    maxTick = juce::jmax (maxTick,
-                                            (juce::int64) std::llround (m.getTimeStamp()));
-                }
-            }
-        }
-        summary.numMidiNotes = noteCount;
-        // Rescale to Focal's canonical PPQ for the header display.
-        summary.lengthTicks  = (ppq > 0 && ppq != kMidiTicksPerQuarter)
-                                  ? (juce::int64) std::llround ((double) maxTick
-                                       * (double) kMidiTicksPerQuarter / (double) ppq)
-                                  : maxTick;
-
-        const auto playhead = engine.getTransport().getPlayhead();
-
-        auto picker = std::make_unique<ImportTargetPicker> (
-            session,
-            std::move (summary),
-            playhead,
-            engine.getCurrentSampleRate(),
-            session.tempoBpm.load (std::memory_order_relaxed),
-            session.beatsPerBar.load (std::memory_order_relaxed),
-            session.timeDisplayMode.load (std::memory_order_relaxed),
-            [this, chosen, playhead] (int trackIndex)
-            {
-                importTargetModal.close();
-
-                auto& track = session.track (trackIndex);
-
-                focal::fileimport::MidiImportRequest req;
-                req.source            = chosen;
-                req.sessionSampleRate = engine.getCurrentSampleRate();
-                req.sessionBpm        = session.tempoBpm.load (std::memory_order_relaxed);
-                req.timelineStart     = playhead;
-
-                auto res = focal::fileimport::importMidi (req);
-                if (! res.ok)
-                {
-                    showImportError ("Import MIDI failed", res.errorMessage);
-                    return;
-                }
-
-                track.midiRegions.mutate ([&] (std::vector<MidiRegion>& v)
-                {
-                    v.push_back (std::move (res.region));
-                });
-                if (tapeStrip != nullptr) tapeStrip->repaint();
-            },
-            [this] { importTargetModal.close(); });
-
-        importTargetModal.show (*this, std::move (picker));
+        self->runMidiImportFlow (chosen,
+                                    self->engine.getTransport().getPlayhead(),
+                                    -1);
     });
 }
 

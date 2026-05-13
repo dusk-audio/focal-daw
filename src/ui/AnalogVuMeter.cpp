@@ -140,11 +140,13 @@ void AnalogVuMeter::resized()
     const auto safe = getLocalBounds().toFloat().reduced (6.0f, 4.0f);
     pivot.x = safe.getCentreX();
     pivot.y = safe.getBottom() - 4.0f;
-    // Compact-scale (bus) faces are wide-short - a slightly wider total
-    // sweep makes the arc fan further across the face so the contents
-    // read at a useful size instead of cowering in the middle. Master
-    // faces stay at 150° so the numbered labels keep their breathing room.
-    halfArcDeg = compactScale ? 80.0f : 75.0f;
+    // Shallow arc - matches Sifam/TEAC hardware VU geometry where the
+    // arc occupies a thin band near the top of the face and most of
+    // the visible area below the arc is empty (mechanical galvo).
+    // 55-60° half-sweep gives the right vertical depth = r * (1 - cos)
+    // ≈ 35-50 % of the radius. Tighter sweep on the master so its
+    // numbered labels keep their breathing room.
+    halfArcDeg = compactScale ? 60.0f : 55.0f;
 
     const float halfArcRad = juce::degreesToRadians (halfArcDeg);
     const float sinH = std::sin (halfArcRad);

@@ -171,6 +171,7 @@ ImportTargetPicker::ImportTargetPicker (Session& s,
                                             float       bpm,
                                             int         bpb,
                                             int         displayMode,
+                                            int         preferredTrackIndex,
                                             std::function<void (int)> commit,
                                             std::function<void()> cancel)
     : session (s),
@@ -262,9 +263,24 @@ ImportTargetPicker::ImportTargetPicker (Session& s,
 
     if (! rows.empty())
     {
+        // Default recommendation: top of the best bucket. If the caller
+        // supplied a preferred track index (e.g. user drop-on-track),
+        // override the recommendation to that row when it's present in
+        // the list so the visual cue + Import button match user intent.
         recommendedRowIdx = 0;
-        rows[0]->recommended = true;
-        selectedRowIdx = 0;
+        if (preferredTrackIndex >= 0 && preferredTrackIndex < Session::kNumTracks)
+        {
+            for (size_t i = 0; i < rows.size(); ++i)
+            {
+                if (rows[i]->trackIndex == preferredTrackIndex)
+                {
+                    recommendedRowIdx = (int) i;
+                    break;
+                }
+            }
+        }
+        rows[(size_t) recommendedRowIdx]->recommended = true;
+        selectedRowIdx = recommendedRowIdx;
     }
 
     listViewport.setViewedComponent (&listContainer, false);

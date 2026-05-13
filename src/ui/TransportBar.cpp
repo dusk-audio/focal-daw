@@ -864,8 +864,10 @@ void TransportBar::resized()
     tapeToggle.setBounds (area.removeFromRight (compact ? 32 : 84).reduced (1));
     area.removeFromRight (12);
 
-    // BPM editor + CLICK + C/I toggles.
-    countInToggle.setBounds (area.removeFromRight (44).reduced (1, 4));
+    // BPM editor + CLICK + C/I toggles. Compact-mode widths trim the
+    // right-cluster footprint so the middle band (banks + stage tabs
+    // overlay) gets more elbow room at the smallest legal window width.
+    countInToggle.setBounds (area.removeFromRight (compact ? 34 : 44).reduced (1, 4));
     area.removeFromRight (4);
     // clickToggle is a TransportIconButton (drawn as a circular disc).
     // Keep its bounds SQUARE so the ellipse renders round, matching the
@@ -876,16 +878,28 @@ void TransportBar::resized()
         clickToggle.setBounds (rect.reduced (0, pad));
     }
     area.removeFromRight (4);
-    tapButton.setBounds  (area.removeFromRight (40).reduced (1, 4));
+    tapButton.setBounds  (area.removeFromRight (compact ? 42 : 48).reduced (1, 4));
     area.removeFromRight (4);
-    bpmValue.setBounds   (area.removeFromRight (52).reduced (1, 4));
-    bpmCaption.setBounds (area.removeFromRight (32).reduced (1, 4));
-    area.removeFromRight (8);
-    tuneButton.setBounds     (area.removeFromRight (50).reduced (1, 4));
-    area.removeFromRight (12);
+    bpmValue.setBounds   (area.removeFromRight (compact ? 44 : 52).reduced (1, 4));
+    // BPM caption ("BPM") suppressed in compact mode — the value field
+    // alone reads as tempo at a glance (mono digits, tooltip explains
+    // double-click-to-edit). Saves ~40 px in the band that's already
+    // fighting with the bank-button overlay.
+    bpmCaption.setVisible (! compact);
+    if (! compact)
+    {
+        bpmCaption.setBounds (area.removeFromRight (32).reduced (1, 4));
+        area.removeFromRight (8);
+    }
+    else
+    {
+        area.removeFromRight (4);
+    }
+    tuneButton.setBounds     (area.removeFromRight (compact ? 54 : 60).reduced (1, 4));
+    area.removeFromRight (compact ? 8 : 12);
 
     snapToggle.setBounds  (area.removeFromRight (compact ? 30 : 54).reduced (1, 4));
-    area.removeFromRight (12);
+    area.removeFromRight (compact ? 8 : 12);
 
     area.removeFromLeft (12);
     hintLabel.setBounds (area);

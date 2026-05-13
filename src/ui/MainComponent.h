@@ -100,6 +100,18 @@ private:
     void importAudioPrompt();
     void importMidiPrompt();
 
+    // Shared import-flow plumbing reused by both the File-menu prompts
+    // and the TapeStrip drag-and-drop callback. Each opens the
+    // target-picker modal with the given source + timeline position;
+    // trackHint (>=0) biases the picker's recommendation to that row
+    // when the dropped file is compatible.
+    void runAudioImportFlow (juce::File source,
+                              juce::int64 timelineStart,
+                              int trackHint);
+    void runMidiImportFlow  (juce::File source,
+                              juce::int64 timelineStart,
+                              int trackHint);
+
     // Autosave: a juce::Timer fires every 30s and writes a session.json.autosave
     // sibling using the same atomic temp+rename pattern as the manual save. On
     // session load (loadSessionFromJson) we check whether the autosave is newer

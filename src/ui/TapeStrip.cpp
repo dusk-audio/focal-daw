@@ -2764,6 +2764,23 @@ void TapeStrip::paint (juce::Graphics& g)
         g.setColour (highlight.withAlpha (0.85f));
         g.drawRect (rubberBand, 1);
     }
+
+    // File-drop visual feedback. Painted last so it overlays everything.
+    if (dropAccepted)
+    {
+        const auto accent = juce::Colour (0xff70b0e0);
+        if (dropHoverTrack >= 0)
+        {
+            const auto row = rowBounds (dropHoverTrack);
+            g.setColour (accent.withAlpha (0.18f));
+            g.fillRect (row);
+        }
+        if (dropHoverX >= 0)
+        {
+            g.setColour (accent.withAlpha (0.85f));
+            g.drawVerticalLine (dropHoverX, (float) kRulerH, (float) getHeight());
+        }
+    }
 }
 
 TapeStrip::BracketHit TapeStrip::hitTestBracket (int x, int y) const noexcept
@@ -3066,5 +3083,78 @@ bool TapeStrip::splitSelectedAtPlayhead()
     }
     repaint();
     return true;
+}
+
+bool TapeStrip::isInterestedInFileDrag (const juce::StringArray& files)
+{
+    for (const auto& path : files)
+    {
+        const auto ext = juce::File (path).getFileExtension().toLowerCase();
+        if (ext == ".wav" || ext == ".aiff" || ext == ".aif"
+            || ext == ".flac" || ext == ".mid" || ext == ".midi")
+            return true;
+    }
+    return false;
+}
+
+void TapeStrip::fileDragEnter (const juce::StringArray& files, int x, int y)
+{
+    dropAccepted = isInterestedInFileDrag (files);
+    fileDragMove (files, x, y);
+}
+
+void TapeStrip::fileDragMove (const juce::StringArray&, int x, int y)
+{
+    if (! dropAccepted) return;
+    int hoveredTrack = -1;
+    for (int t = 0; t < Session::kNumTracks; ++t)
+        if (rowBounds (t).contains (x, y)) { hoveredTrack = t; break; }
+    if (hoveredTrack != dropHoverTrack || x != dropHoverX)
+    {
+        dropHoverTrack = hoveredTrack;
+        dropHoverX     = x;
+        repaint();
+    }
+}
+
+void TapeStrip::fileDragExit (const juce::StringArray&)
+{
+    dropAccepted   = false;
+    dropHoverTrack = -1;
+    dropHoverX     = -1;
+    repaint();
+}
+
+void TapeStrip::filesDropped (const juce::StringArray& files, int x, int y)
+{
+    dropAccepted   = false;
+    dropHoverTrack = -1;
+    dropHoverX     = -1;
+    repaint();
+
+    if (files.isEmpty() || ! onFileDropped) return;
+
+    int trackHint = -1;
+    for (int t = 0; t < Session::kNumTracks; ++t)
+        if (rowBounds (t).contains (x, y)) { trackHint = t; break; }
+
+    const auto col = tracksColumnBounds();
+    const int clampedX = juce::jmax (col.getX(), x);
+    const auto timelineStart = sampleAtX (clampedX);
+
+    // Route the first compatible file. Multi-file drop is out of scope
+    // for the initial drag-and-drop iteration; we ignore everything past
+    // the first WAV/AIFF/FLAC/MID in the drop list.
+    for (const auto& path : files)
+    {
+        const juce::File f (path);
+        const auto ext = f.getFileExtension().toLowerCase();
+        if (ext == ".wav" || ext == ".aiff" || ext == ".aif"
+            || ext == ".flac" || ext == ".mid" || ext == ".midi")
+        {
+            onFileDropped (f, timelineStart, trackHint);
+            return;
+        }
+    }
 }
 } // namespace focal

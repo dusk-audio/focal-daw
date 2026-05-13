@@ -15,6 +15,7 @@ namespace focal
 // Region drag/split/trim, markers, loop brackets, and horizontal scroll all
 // arrive in later phases per the spec; this component focuses on visibility.
 class TapeStrip final : public juce::Component,
+                         public juce::FileDragAndDropTarget,
                          private juce::Timer,
                          private juce::ChangeListener
 {
@@ -81,6 +82,28 @@ public:
     // ("double-click any region to edit it").
     std::function<void (int trackIdx, int regionIdx)> onMidiRegionDoubleClicked;
     std::function<void (int trackIdx, int regionIdx)> onAudioRegionDoubleClicked;
+
+    // File drag-and-drop callback. Fires when the user drops an audio /
+    // MIDI file onto the strip. trackHint is the row under the drop
+    // (0..15) or -1 if dropped on the ruler / outside any row; the host
+    // can use it to bias the import-target picker's pre-selection.
+    // timelineStart is the timeline sample the drop X-coordinate maps to.
+    std::function<void (juce::File file,
+                         juce::int64 timelineStart,
+                         int trackHint)> onFileDropped;
+
+    // juce::FileDragAndDropTarget. Accept any file whose extension is
+    // in the WAV / AIFF / FLAC / MID set; filesDropped routes to
+    // onFileDropped after computing timelineStart + trackHint.
+    // Multi-file drops: only the FIRST compatible file in the array is
+    // forwarded — the rest are silently ignored. Picking one file per
+    // drop keeps the import-target picker modal usable; batch-import
+    // would need a different UI flow.
+    bool isInterestedInFileDrag (const juce::StringArray& files) override;
+    void fileDragEnter (const juce::StringArray& files, int x, int y) override;
+    void fileDragMove  (const juce::StringArray& files, int x, int y) override;
+    void fileDragExit  (const juce::StringArray& files) override;
+    void filesDropped  (const juce::StringArray& files, int x, int y) override;
 
     // Selected track index (the track that owns the most-recently-clicked
     // region) or -1 if nothing is selected. Used by keyboard shortcuts in
@@ -305,6 +328,13 @@ private:
     // action might have shifted indices.
     int selectedTrack    = -1;
     int selectedRegion   = -1;
+
+    // File-drop visual feedback. Highlighted row repaints with a soft
+    // accent so the user sees which track + timeline position the drop
+    // would land at. Reset on fileDragExit / filesDropped.
+    int  dropHoverTrack = -1;
+    int  dropHoverX     = -1;
+    bool dropAccepted   = false;
 
     // MIDI region selection. Mirrors selectedTrack / selectedRegion but
     // for the MIDI side, so clicking a MIDI region paints it highlighted
