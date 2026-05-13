@@ -9,6 +9,170 @@
 
 namespace focal
 {
+namespace
+{
+constexpr float kMeterMinDb = -60.0f;
+constexpr float kMeterMaxDb =   6.0f;
+
+float dbToMeterFrac (float db) noexcept
+{
+    if (db <= kMeterMinDb) return 0.0f;
+    if (db >= kMeterMaxDb) return 1.0f;
+    return (db - kMeterMinDb) / (kMeterMaxDb - kMeterMinDb);
+}
+
+juce::Colour meterColourForFrac (float frac) noexcept
+{
+    // Green up to 0 dB (frac ~0.91), yellow into +3, red into clipping.
+    if (frac >= 0.97f) return juce::Colour (0xffd04040);
+    if (frac >= 0.91f) return juce::Colour (0xffd0a040);
+    return juce::Colour (0xff60c060);
+}
+} // namespace
+
+class AuxLaneComponent::StripMeter final : public juce::Component
+{
+public:
+    explicit StripMeter (const AuxLaneParams& p) : params (p) {}
+
+    void paint (juce::Graphics& g) override
+    {
+        auto r = getLocalBounds().toFloat();
+        g.setColour (juce::Colour (0xff1c1c22));
+        g.fillRoundedRectangle (r, 2.0f);
+        g.setColour (juce::Colour (0xff34343c));
+        g.drawRoundedRectangle (r.reduced (0.5f), 2.0f, 1.0f);
+
+        const float lDb = params.meterPostL.load (std::memory_order_relaxed);
+        const float rDb = params.meterPostR.load (std::memory_order_relaxed);
+        const float lFrac = dbToMeterFrac (lDb);
+        const float rFrac = dbToMeterFrac (rDb);
+
+        const float w = r.getWidth();
+        const float h = r.getHeight();
+        const float colW = (w - 2.0f) / 2.0f;
+
+        auto drawCol = [&] (float x, float frac)
+        {
+            const float fillH = h * frac;
+            juce::Rectangle<float> bar (x, h - fillH, colW, fillH);
+            g.setColour (meterColourForFrac (frac));
+            g.fillRect (bar);
+        };
+
+        drawCol (1.0f,          lFrac);
+        drawCol (1.0f + colW,   rFrac);
+
+        // Zero-dB tick + -20 dB tick.
+        const float zeroY = h * (1.0f - dbToMeterFrac (0.0f));
+        g.setColour (juce::Colour (0xc0d04040));
+        g.drawLine (0.0f, zeroY, w, zeroY, 1.0f);
+        const float minus20Y = h * (1.0f - dbToMeterFrac (-20.0f));
+        g.setColour (juce::Colour (0x60ffffff));
+        g.drawLine (0.0f, minus20Y, w, minus20Y, 1.0f);
+
+        // L / R glyphs at the bottom so the user can see the bar exists
+        // even with no audio coming through.
+        g.setColour (juce::Colour (0xff70707a));
+        g.setFont (juce::Font (juce::FontOptions (9.0f)));
+        g.drawText ("L", juce::Rectangle<float> (1.0f, h - 12.0f, colW, 10.0f),
+                    juce::Justification::centred, false);
+        g.drawText ("R", juce::Rectangle<float> (1.0f + colW, h - 12.0f, colW, 10.0f),
+                    juce::Justification::centred, false);
+    }
+
+private:
+    const AuxLaneParams& params;
+};
+
+class AuxLaneComponent::SendSourcePanel final : public juce::Component
+{
+public:
+    SendSourcePanel (Session& s, int laneIdx) : session (s), laneIndex (laneIdx) {}
+
+    void paint (juce::Graphics& g) override
+    {
+        auto bounds = getLocalBounds().toFloat();
+        g.setColour (juce::Colour (0xff141418));
+        g.fillRoundedRectangle (bounds, 4.0f);
+        g.setColour (juce::Colour (0xff2a2a2e));
+        g.drawRoundedRectangle (bounds, 4.0f, 1.0f);
+
+        auto inner = getLocalBounds().reduced (8);
+        g.setColour (juce::Colour (0xffb0b0b8));
+        g.setFont (juce::Font (juce::FontOptions (12.0f, juce::Font::bold)));
+        auto header = inner.removeFromTop (16);
+        g.drawText ("SEND SOURCES", header, juce::Justification::centredLeft, false);
+        inner.removeFromTop (4);
+
+        const int rowH = juce::jmax (14, inner.getHeight() / Session::kNumTracks);
+        g.setFont (juce::Font (juce::FontOptions (11.0f)));
+
+        for (int i = 0; i < Session::kNumTracks; ++i)
+        {
+            auto row = inner.removeFromTop (rowH);
+            if (row.getHeight() <= 0) break;
+
+            const auto& tr = session.track (i);
+            const float liveDb = tr.strip.liveAuxSendDb[(size_t) laneIndex]
+                                     .load (std::memory_order_relaxed);
+            const float setDb  = tr.strip.auxSendDb[(size_t) laneIndex]
+                                     .load (std::memory_order_relaxed);
+            const float inputDb = tr.meterInputDb.load (std::memory_order_relaxed);
+            const float sendDb  = (liveDb <= ChannelStripParams::kAuxSendOffDb
+                                     ? setDb : liveDb);
+            const bool sendOn = sendDb > ChannelStripParams::kAuxSendOffDb;
+
+            // Track index + colour swatch.
+            auto idxArea = row.removeFromLeft (22);
+            g.setColour (tr.colour.withAlpha (sendOn ? 0.9f : 0.35f));
+            g.fillRect (idxArea.reduced (2, 4));
+            g.setColour (sendOn ? juce::Colours::white : juce::Colour (0xff707078));
+            g.drawText (juce::String (i + 1), idxArea, juce::Justification::centred, false);
+
+            // Track name. Default Focal sessions name tracks "1".."16" -
+            // the colour swatch on the left already shows the index, so
+            // promote those defaults to "Trk N" to avoid printing the same
+            // digit twice. User-renamed tracks pass through verbatim.
+            auto nameArea = row.removeFromLeft (juce::jmax (60, row.getWidth() / 2));
+            g.setColour (sendOn ? juce::Colour (0xffe0e0e4) : juce::Colour (0xff606068));
+            const auto rawName = tr.name.trim();
+            const auto displayName = (rawName.isEmpty() || rawName == juce::String (i + 1))
+                                       ? juce::String ("Trk ") + juce::String (i + 1)
+                                       : rawName;
+            g.drawText (displayName, nameArea.reduced (4, 0),
+                        juce::Justification::centredLeft, true);
+
+            // dB readout on the right.
+            auto dbArea = row.removeFromRight (52);
+            g.setColour (sendOn ? juce::Colour (0xffe0e0e4) : juce::Colour (0xff505058));
+            const auto dbText = sendOn ? juce::String (sendDb, 1) + " dB"
+                                       : juce::String ("-inf");
+            g.drawText (dbText, dbArea, juce::Justification::centredRight, false);
+
+            // Meter bar between name and dB.
+            auto meterArea = row.reduced (2, 3);
+            if (! meterArea.isEmpty())
+            {
+                g.setColour (juce::Colour (0xff181820));
+                g.fillRect (meterArea);
+                if (sendOn)
+                {
+                    const float inFrac = dbToMeterFrac (inputDb);
+                    juce::Rectangle<int> fill = meterArea;
+                    fill.setWidth (juce::roundToInt ((float) meterArea.getWidth() * inFrac));
+                    g.setColour (meterColourForFrac (inFrac).withAlpha (0.85f));
+                    g.fillRect (fill);
+                }
+            }
+        }
+    }
+
+private:
+    Session& session;
+    int laneIndex;
+};
+
 AuxLaneComponent::AuxLaneComponent (AuxLane& l, AuxLaneStrip& s, int idx,
                                        AudioEngine& e)
     : lane (l), strip (s), engine (e), laneIndex (idx)
@@ -51,6 +215,12 @@ AuxLaneComponent::AuxLaneComponent (AuxLane& l, AuxLaneStrip& s, int idx,
         lane.params.mute.store (muteButton.getToggleState(), std::memory_order_relaxed);
     };
     addAndMakeVisible (muteButton);
+
+    stripMeter = std::make_unique<StripMeter> (lane.params);
+    addAndMakeVisible (stripMeter.get());
+
+    sendPanel = std::make_unique<SendSourcePanel> (engine.getSession(), laneIndex);
+    addAndMakeVisible (sendPanel.get());
 
     for (int i = 0; i < AuxLaneParams::kMaxLanePlugins; ++i)
     {
@@ -99,16 +269,11 @@ AuxLaneComponent::AuxLaneComponent (AuxLane& l, AuxLaneStrip& s, int idx,
     for (int i = 0; i < AuxLaneParams::kMaxLanePlugins; ++i)
         refreshSlotControls (i);
     rebuildSlots();
-    startTimerHz (4);   // poll loaded-name + auto-bypass state for the slot UI
+    startTimerHz (30);
 }
 
 AuxLaneComponent::~AuxLaneComponent()
 {
-    // Tear down editor hosts first so their non-owning content pointers
-    // are detached before the editor unique_ptrs delete the editors.
-    // prepareForTopLevelDestruction handles the Wayland focus_window
-    // hand-off so mutter doesn't trip meta_window_unmanage on the X11
-    // host destroy.
     for (int i = 0; i < AuxLaneParams::kMaxLanePlugins; ++i)
         destroyEditorHostForSlot (i);
     for (auto& s : slots)
@@ -119,6 +284,8 @@ void AuxLaneComponent::timerCallback()
 {
     for (int i = 0; i < AuxLaneParams::kMaxLanePlugins; ++i)
         refreshSlotControls (i);
+    if (stripMeter != nullptr) stripMeter->repaint();
+    if (sendPanel  != nullptr) sendPanel->repaint();
 }
 
 void AuxLaneComponent::refreshSlotControls (int i)
@@ -134,9 +301,6 @@ void AuxLaneComponent::refreshSlotControls (int i)
             ui.displayedName = name;
             ui.openOrAddButton.setButtonText (name);
         }
-        // Auto-bypass / crash = loud failure modes; tag with distinct copy
-        // so the user can tell whether to retry (stalled) vs reload
-        // (crashed; the OOP child died and won't recover by itself).
         if (slotRef.wasCrashed())
             ui.openOrAddButton.setButtonText ("! " + name + " (crashed)");
         else if (slotRef.wasAutoBypassed())
@@ -156,10 +320,6 @@ void AuxLaneComponent::refreshSlotControls (int i)
 
 void AuxLaneComponent::openPickerForSlot (int slotIdx)
 {
-    // The empty-slot placeholder button fills the entire AUX body, so
-    // anchoring the menu at the button's top-left would land it up at
-    // the AUX selector row. Use the cursor's current screen position
-    // instead so the menu lands at the click.
     const auto cursor = juce::Desktop::getMousePosition();
     pluginpicker::openPickerMenu (strip.getPluginSlot (slotIdx),
                                     slots[(size_t) slotIdx].openOrAddButton,
@@ -177,7 +337,7 @@ void AuxLaneComponent::unloadSlot (int slotIdx)
 {
     destroyEditorHostForSlot (slotIdx);
     auto& ui = slots[(size_t) slotIdx];
-    ui.editor.reset();   // delete editor BEFORE the processor goes away
+    ui.editor.reset();
     strip.getPluginSlot (slotIdx).unload();
     refreshSlotControls (slotIdx);
     rebuildSlots();
@@ -185,9 +345,6 @@ void AuxLaneComponent::unloadSlot (int slotIdx)
 
 void AuxLaneComponent::toggleEditorForSlot (int slotIdx)
 {
-    // The host is always alive when the plugin is loaded (see
-    // rebuildSlots). Clicking the slot button after-the-fact toggles
-    // visibility of the host rather than building / tearing it down.
     auto& ui = slots[(size_t) slotIdx];
     if (ui.editorHost != nullptr)
         ui.editorHost->setHostHidden (ui.editorHost->isVisible());
@@ -219,21 +376,37 @@ void AuxLaneComponent::destroyEditorHostForSlot (int slotIdx)
     ui.editorHost.reset();
 }
 
+juce::Rectangle<int> AuxLaneComponent::getStripArea() const noexcept
+{
+    auto area = getLocalBounds().reduced (6);
+    return area.removeFromLeft (kStripWidth);
+}
+
+juce::Rectangle<int> AuxLaneComponent::getSendPanelArea() const noexcept
+{
+    auto area = getLocalBounds().reduced (6);
+    return area.removeFromRight (kSendPanelWidth);
+}
+
+juce::Rectangle<int> AuxLaneComponent::getCenterArea() const noexcept
+{
+    auto area = getLocalBounds().reduced (6);
+    area.removeFromLeft  (kStripWidth + kColumnGap);
+    area.removeFromRight (kSendPanelWidth + kColumnGap);
+    return area;
+}
+
 juce::Rectangle<int> AuxLaneComponent::computeSlotScreenRect (int slotIdx) const
 {
     if (slotIdx < 0 || slotIdx >= (int) slots.size()) return {};
     if (! strip.getPluginSlot (slotIdx).isLoaded()) return {};
 
-    auto area = getLocalBounds().reduced (6);
-    area.removeFromTop (6);
-    area.removeFromTop (kHeaderHeight);
-    area.removeFromTop (8);
-    area.removeFromTop (kSlotHeaderH);
-    area.removeFromTop (4);
-    if (area.isEmpty()) return {};
-    // localAreaToGlobal walks up the Component tree and returns screen
-    // coordinates the X11 toplevel can use directly.
-    return localAreaToGlobal (area);
+    auto center = getCenterArea();
+    if (center.isEmpty()) return {};
+    center.removeFromTop (kSlotHeaderH);
+    center.removeFromTop (4);
+    if (center.isEmpty()) return {};
+    return localAreaToGlobal (center);
 }
 
 void AuxLaneComponent::repositionEditorHosts()
@@ -257,29 +430,18 @@ void AuxLaneComponent::setEditorHostsHidden (bool hidden)
 
 void AuxLaneComponent::closeAllPopoutsForShutdown()
 {
-    // Destroy every editor host through the X-focus-safe path so mutter
-    // gets a FocusOut before the X11 peer goes away.
     for (int i = 0; i < (int) slots.size(); ++i)
         destroyEditorHostForSlot (i);
 }
 
 void AuxLaneComponent::rebuildSlots()
 {
-    // For each slot whose plugin is loaded, ensure the editor + its
-    // host exist so the lane shows the plugin's UI without an extra
-    // click. New session loads restore a plugin via
-    // PluginSlot::restoreFromSavedState; the timer refresh sees
-    // isLoaded() flip and we materialise the editor + host here.
     for (int i = 0; i < AuxLaneParams::kMaxLanePlugins; ++i)
     {
         auto& ui = slots[(size_t) i];
         auto* instance = strip.getPluginSlot (i).getInstance();
         if (instance != nullptr && ui.editor == nullptr)
         {
-            // X11 latch around createEditorIfNeeded: LV2 plugin editors
-            // eager-create an embedded X11 sub-window in their Editor
-            // ctor and need an X11 peer. Latch covers the nested
-            // addToDesktop. No-op for VST3 / non-LV2 paths.
             focal::platform::preferX11ForNextNativeWindow();
             ui.editor.reset (instance->createEditorIfNeeded());
             focal::platform::clearPreferX11ForNativeWindow();
@@ -304,52 +466,57 @@ void AuxLaneComponent::paint (juce::Graphics& g)
     g.fillRoundedRectangle (r.removeFromTop (4.0f), 2.0f);
     g.setColour (juce::Colour (0xff2a2a2e));
     g.drawRoundedRectangle (getLocalBounds().toFloat().reduced (1.5f), 4.0f, 1.0f);
+
+    // Left-strip backplate.
+    auto stripCol = getStripArea();
+    if (! stripCol.isEmpty())
+    {
+        g.setColour (juce::Colour (0xff141418));
+        g.fillRoundedRectangle (stripCol.toFloat(), 4.0f);
+        g.setColour (juce::Colour (0xff2a2a2e));
+        g.drawRoundedRectangle (stripCol.toFloat(), 4.0f, 1.0f);
+    }
 }
 
 void AuxLaneComponent::resized()
 {
-    auto area = getLocalBounds().reduced (6);
-    area.removeFromTop (6);
-
-    // Header: name + mute + return-level fader.
+    // Left column: header row (name + M) + vertical return fader + meter.
+    auto stripCol = getStripArea().reduced (6);
+    stripCol.removeFromTop (6);
     {
-        auto header = area.removeFromTop (kHeaderHeight);
-        auto top = header.removeFromTop (22);
-        muteButton.setBounds (top.removeFromRight (28));
-        top.removeFromRight (4);
-        nameLabel.setBounds (top);
-
-        header.removeFromTop (4);
-        returnFader.setBounds (header);
+        auto headerRow = stripCol.removeFromTop (22);
+        muteButton.setBounds (headerRow.removeFromRight (28));
+        headerRow.removeFromRight (4);
+        nameLabel.setBounds (headerRow);
     }
-    area.removeFromTop (8);
+    stripCol.removeFromTop (8);
 
-    // Single plugin slot - takes the whole remaining lane body.
+    // Fader on the left of the column body, meter on the right.
+    auto faderArea = stripCol.removeFromLeft (stripCol.getWidth() - 22);
+    stripCol.removeFromLeft (4);
+    returnFader.setBounds (faderArea);
+    if (stripMeter != nullptr) stripMeter->setBounds (stripCol);
+
+    // Center column: plugin slot header + editor-host rect underneath.
+    auto center = getCenterArea();
     auto& ui = slots[0];
-    const bool loaded = strip.getPluginSlot (0).isLoaded();
-
-    if (loaded)
+    if (strip.getPluginSlot (0).isLoaded())
     {
-        // Header strip: plugin name (clickable) + BYP + remove. The
-        // editor itself lives in an AuxEditorHost top-level positioned
-        // over the slot rect via repositionEditorHosts().
-        auto headerStrip = area.removeFromTop (kSlotHeaderH);
+        auto headerStrip = center.removeFromTop (kSlotHeaderH);
         ui.removeButton.setBounds (headerStrip.removeFromRight (28));
         headerStrip.removeFromRight (4);
         ui.bypassButton.setBounds (headerStrip.removeFromRight (44));
         headerStrip.removeFromRight (4);
         ui.openOrAddButton.setBounds (headerStrip);
-        area.removeFromTop (4);
     }
     else
     {
-        // Empty slot: the placeholder button fills the whole body so it
-        // reads as a clear "drop zone" with a generous click target.
-        ui.openOrAddButton.setBounds (area);
+        ui.openOrAddButton.setBounds (center);
     }
 
-    // Lane layout changed - push the new screen-rect to any live editor
-    // hosts so they track the resize.
+    // Right column: send-source panel fills.
+    if (sendPanel != nullptr) sendPanel->setBounds (getSendPanelArea());
+
     repositionEditorHosts();
 }
 } // namespace focal

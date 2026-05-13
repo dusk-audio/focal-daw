@@ -47,12 +47,14 @@ private:
     const std::atomic<float>* rightRms = nullptr;
     float referenceDbFs = -18.0f;
 
-    // Needle position per channel as a 0..1 fraction of full deflection
-    // (0 = -20 VU, 1 = +3 VU). Driven on the UI Timer with IEC 60268-17
-    // ballistics + a damped-spring overshoot, matching the TapeMachine
-    // plugin's meter so a single signal reads identically on both.
-    float needlePosL = 0.0f;
-    float needlePosR = 0.0f;
+    // Needle position per channel as an angleFrac in [-1, +1] — -1 is the
+    // resting left endstop (-20 VU), +1 is the +3 VU endstop. Mapped to a
+    // physical angle by the .cpp's anchor table so the needle motion is
+    // non-linear, matching the hardware face's compressed dB spacing.
+    // Driven on the UI Timer with IEC 60268-17 ballistics + a damped-
+    // spring overshoot.
+    float needlePosL = -1.0f;
+    float needlePosR = -1.0f;
     float needleVelL = 0.0f;
     float needleVelR = 0.0f;
 
@@ -66,6 +68,17 @@ private:
     // mechanics of a real analog galvanometer. Cached at resize.
     juce::Point<float> pivot;
     float arcRadius   = 0.0f;
+    float baselineRad = 0.0f;    // where the scale baseline + tick bottoms sit
     float halfArcDeg  = 45.0f;   // each side from straight-up
+
+    // PEAK LED hold deadline (Time::getMillisecondCounter()). 0 = idle.
+    // Set by timerCallback when the unclamped VU dB on either channel
+    // crosses kPeakTriggerVuDb; paint() lights the LED until now() passes
+    // this stamp. Single timestamp covers both channels - one PEAK LED.
+    juce::uint32 peakHoldUntilMs = 0;
+
+    // Cached LED geometry computed in rebuildCachedFace so paint() can
+    // overlay the lit state without recomputing layout each frame.
+    juce::Rectangle<float> peakLedRect;
 };
 } // namespace focal

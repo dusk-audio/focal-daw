@@ -5,24 +5,18 @@ namespace focal
 {
 namespace
 {
-const juce::Colour kFaceTop        { 0xfff4e7b4 };
-const juce::Colour kFaceBottom     { 0xffe8d895 };
-const juce::Colour kBezelOuter     { 0xff141416 };
-const juce::Colour kBezelInner     { 0xff2a2a2e };
+const juce::Colour kFaceTop        { 0xfff5f5f0 };
+const juce::Colour kFaceBottom     { 0xffe2e2dc };
+const juce::Colour kBezelOuter     { 0xff1a1410 };  // warm dark brown - TEAC look
+const juce::Colour kBezelInner     { 0xff2a2218 };  // mid brown highlight ring
 const juce::Colour kInk            { 0xff111114 };
 const juce::Colour kInkSoft        { 0xff5a5a60 };
 const juce::Colour kRedZone        { 0xffb02020 };
 const juce::Colour kNeedle         { 0xff141418 };
 const juce::Colour kNeedleR        { 0xff8a2828 };
-const juce::Colour kPivotHousing   { 0xff222226 };
-
-// IEC 60268-17 dB-linear scale: -20 VU at 0 %, 0 VU at ~87 %, +3 VU at
-// 100 %. Matches the TapeMachine plugin's VU scale so meters across the
-// mixer + TapeMachine read the same on identical signals.
-float dbToFraction (float vuDb) noexcept
-{
-    return juce::jlimit (0.0f, 1.0f, (vuDb + 20.0f) / 23.0f);
-}
+const juce::Colour kPivotHousing   { 0xff1c1c20 };
+const juce::Colour kPeakLedOff     { 0xff5a1a1a };
+const juce::Colour kPeakLedOn      { 0xffff3030 };
 
 // Scale endpoints in VU dB (mirrors TapeMachine clamp).
 constexpr float kVuMin = -20.0f;
@@ -36,27 +30,77 @@ constexpr float kVuTimeConstantMs  = 65.0f;
 constexpr float kOvershootDamping  = 0.78f;
 constexpr float kOvershootStiff    = 180.0f;
 
-struct LabelledTick
+// Below this face width the numeric scale labels are suppressed - they
+// collide on narrow bus strips, ticks alone read clearly. Matches the
+// existing width-aware pattern.
+constexpr int   kLabelMinWidth   = 110;
+constexpr float kPeakHoldMs      = 600.0f;
+constexpr float kPeakTriggerVuDb = 4.0f;
+
+// Scale anchor: where on the swept arc a given VU dB lands. angleFrac is
+// [-1, +1] = leftmost to rightmost edge of the half-sweep. Mirrors the
+// non-linear spacing of a real analog VU face: the −20..−10 stretch
+// covers a lot of arc, the run from −3 to 0 is much tighter, the red
+// 0..+3 zone takes up the right ~⅓ of the sweep. The needle reads the
+// same anchors so its rest-to-peak motion lands on the right labels.
+struct ScaleAnchor { float vuDb; float angleFrac; };
+const ScaleAnchor kAnchors[] = {
+    { -20.0f, -1.000f },
+    { -10.0f, -0.560f },
+    {  -7.0f, -0.380f },
+    {  -5.0f, -0.230f },
+    {  -3.0f, -0.080f },
+    {   0.0f,  0.210f },
+    {   3.0f,  1.000f },
+};
+constexpr int kNumAnchors = sizeof (kAnchors) / sizeof (kAnchors[0]);
+
+float vuDbToAngleFrac (float vuDb) noexcept
 {
-    float vuDb;
-    const char* label;        // nullptr = unlabelled minor tick
-    bool red;
-    bool primary;             // primary labels survive small-width filtering
+    if (vuDb <= kAnchors[0].vuDb)                 return kAnchors[0].angleFrac;
+    if (vuDb >= kAnchors[kNumAnchors - 1].vuDb)   return kAnchors[kNumAnchors - 1].angleFrac;
+    for (int i = 1; i < kNumAnchors; ++i)
+    {
+        if (vuDb <= kAnchors[i].vuDb)
+        {
+            const auto& a = kAnchors[i - 1];
+            const auto& b = kAnchors[i];
+            const float t = (vuDb - a.vuDb) / (b.vuDb - a.vuDb);
+            return a.angleFrac + t * (b.angleFrac - a.angleFrac);
+        }
+    }
+    return kAnchors[kNumAnchors - 1].angleFrac;
+}
+
+struct ScaleMark
+{
+    float       vuDb;       // tap point; angleFrac derived through vuDbToAngleFrac
+    const char* label;      // nullptr = unlabelled minor tick
+    bool        red;        // 0 VU and above paints red
+    bool        primary;    // primary = numbered, longer + thicker tick
 };
 
-const LabelledTick kTicks[] =
+// Major (numbered) ticks + minor sub-ticks. The minor ticks fill out the
+// scale between numbered marks the way a hardware face does. Reds turn on
+// at 0 VU; everything below stays black.
+const ScaleMark kMarks[] =
 {
-    { -20.0f, "20", false, true  },
-    { -10.0f, "10", false, true  },
-    {  -7.0f,  "7", false, false },
-    {  -5.0f,  "5", false, false },
-    {  -3.0f,  "3", false, false },
+    { -20.0f, "-20", false, true  },
+    { -15.0f, nullptr, false, false },
+    { -12.0f, nullptr, false, false },
+    { -10.0f, "10",  false, true  },
+    {  -8.5f, nullptr, false, false },
+    {  -7.0f,  "7",  false, true  },
+    {  -6.0f, nullptr, false, false },
+    {  -5.0f,  "5",  false, true  },
+    {  -4.0f, nullptr, false, false },
+    {  -3.0f,  "3",  false, true  },
     {  -2.0f, nullptr, false, false },
     {  -1.0f, nullptr, false, false },
-    {   0.0f,  "0", false, true  },
+    {   0.0f,  "0",  true,  true  },
     {   1.0f, nullptr, true,  false },
     {   2.0f, nullptr, true,  false },
-    {   3.0f,  "3", true,  true  },
+    {   3.0f,  "+3", true,  true  },
 };
 } // namespace
 
@@ -80,15 +124,27 @@ void AnalogVuMeter::setReferenceLevelDb (float refDb)
 
 void AnalogVuMeter::resized()
 {
-    // Pivot sits just below the face, close enough that the needle's
-    // visible portion still spans a satisfying length but the tip stays
-    // inside the upper half of the face. arcRadius lands the tip near
-    // the top of the labelled tick row.
-    const auto bounds = getLocalBounds().toFloat();
-    pivot.x   = bounds.getCentreX();
-    pivot.y   = bounds.getBottom() + bounds.getHeight() * 0.18f;
-    arcRadius = pivot.y - bounds.getY() - bounds.getHeight() * 0.10f;
-    halfArcDeg = 55.0f;   // wider sweep than 45° so tick labels spread out
+    // Aspect-locked dial with a wide hardware-style sweep (150° total).
+    // Pivot at the bottom-centre of a tight safe area; arcRadius is solved
+    // from the sweep angle so the extreme labels just clear the safe edges
+    // horizontally and the arc top clears the safe top. Always circular —
+    // single scalar radius driving every element.
+    const auto safe = getLocalBounds().toFloat().reduced (6.0f, 4.0f);
+    pivot.x = safe.getCentreX();
+    pivot.y = safe.getBottom() - 4.0f;
+    halfArcDeg = 75.0f;   // 150° total sweep
+
+    const float halfArcRad = juce::degreesToRadians (halfArcDeg);
+    const float sinH = std::sin (halfArcRad);
+    const float cosH = std::cos (halfArcRad);
+    // Label margin reserved past arc tips when labels render; effectively
+    // zero when narrow strips drop labels.
+    const float lblMargin = (getWidth() >= kLabelMinWidth) ? 14.0f : 2.0f;
+    const float rByWidth  = (safe.getWidth() * 0.5f - lblMargin)
+                             / juce::jmax (0.001f, sinH);
+    const float rByHeight = (safe.getHeight() - 4.0f)
+                             / juce::jmax (0.001f, cosH);
+    arcRadius = juce::jmax (10.0f, juce::jmin (rByWidth, rByHeight));
     rebuildCachedFace();
 }
 
@@ -100,31 +156,42 @@ void AnalogVuMeter::timerCallback()
     const float vuCoeff = 1.0f - std::exp (-1000.0f * dt / kVuTimeConstantMs);
     const float critDamp = kOvershootDamping * 2.0f * std::sqrt (kOvershootStiff);
 
-    auto rmsToVuDb = [this] (const std::atomic<float>* atom)
+    // Returns clamped VU dB for the needle AND writes the pre-clamp value
+    // into `outRawVuDb` so the PEAK LED can fire above the scale's visible
+    // ceiling (the needle pegs at +3 long before the user actually wants
+    // to see a peak warning).
+    auto rmsToVuDb = [this] (const std::atomic<float>* atom, float& outRawVuDb)
     {
         const float rms = juce::jmax (1.0e-6f, atom->load (std::memory_order_relaxed));
         const float dbFs = 20.0f * std::log10 (rms);
-        return juce::jlimit (kVuMin, kVuMax, dbFs - referenceDbFs);
+        const float rawVu = dbFs - referenceDbFs;
+        outRawVuDb = rawVu;
+        return juce::jlimit (kVuMin, kVuMax, rawVu);
     };
 
-    auto tickChannel = [&] (const std::atomic<float>* atom, float& pos, float& vel)
+    auto tickChannel = [&] (const std::atomic<float>* atom, float& pos, float& vel, float& rawVu)
     {
-        const float target = (rmsToVuDb (atom) - kVuMin) / (kVuMax - kVuMin);
+        const float target = vuDbToAngleFrac (rmsToVuDb (atom, rawVu));
 
         const float springForce  = (target - pos) * kOvershootStiff;
         const float dampingForce = -vel * critDamp;
         vel += (springForce + dampingForce) * dt;
         pos += vel * dt;
         pos += vuCoeff * (target - pos) * 0.3f;
-        pos  = juce::jlimit (0.0f, 1.0f, pos);
+        pos  = juce::jlimit (-1.0f, 1.0f, pos);
 
         if (std::abs (vel) < 0.001f && std::abs (target - pos) < 0.001f)
             vel = 0.0f;
     };
 
-    tickChannel (leftRms, needlePosL, needleVelL);
+    float rawL = kVuMin, rawR = kVuMin;
+    tickChannel (leftRms, needlePosL, needleVelL, rawL);
     if (rightRms != nullptr)
-        tickChannel (rightRms, needlePosR, needleVelR);
+        tickChannel (rightRms, needlePosR, needleVelR, rawR);
+
+    const float maxRaw = juce::jmax (rawL, rawR);
+    if (maxRaw >= kPeakTriggerVuDb)
+        peakHoldUntilMs = juce::Time::getMillisecondCounter() + (juce::uint32) kPeakHoldMs;
 
     repaint();
 }
@@ -159,69 +226,162 @@ void AnalogVuMeter::rebuildCachedFace()
         g.fillRoundedRectangle (faceRect, corner * 0.7f);
     }
 
-    auto fracToScreenAngleRad = [this] (float frac)
+    auto angleFracToScreenAngleRad = [this] (float angleFrac)
     {
-        const float deg = (frac - 0.5f) * 2.0f * halfArcDeg - 90.0f;
+        const float deg = angleFrac * halfArcDeg - 90.0f;
         return juce::degreesToRadians (deg);
     };
-    auto pointOnArc = [&] (float frac, float radius)
+    auto pointOnArc = [&] (float angleFrac, float radius)
     {
-        const float a = fracToScreenAngleRad (frac);
+        const float a = angleFracToScreenAngleRad (angleFrac);
         return juce::Point<float> (pivot.x + std::cos (a) * radius,
                                      pivot.y + std::sin (a) * radius);
     };
 
-    // Red overload arc - thick stroked stroke, sits along the tick line.
+    const float jucePi = juce::MathConstants<float>::pi;
+
+    // ALL element radii are fractions of the single arcRadius scalar so
+    // the dial stays circular when the host strip changes aspect ratio.
+    // Layout (smallest → largest from pivot):
+    //   baselineRad   curved scale arc + bottom of every tick
+    //   tick top       baselineRad + tickLenMaj  (numbered) / + tickLenMin (sub)
+    //   labelRad       baselineRad + tickLenMaj + labelInset
+    const bool showLabels   = w >= kLabelMinWidth;
+    const float labelFont   = juce::jlimit (7.0f, 14.0f, arcRadius * 0.16f);
+    const float tickLenMaj  = arcRadius * 0.12f;
+    const float tickLenMin  = arcRadius * 0.06f;
+    baselineRad             = arcRadius * 0.78f;
+    juce::ignoreUnused (bounds);
+
+    // Curved baseline arc — one continuous black stroke spanning the full
+    // sweep, with a red overlay over the 0..+3 segment. Drawing black
+    // underneath gives the red a clean start without a rounded-end bulge
+    // at the junction (which is what made the two-stroke version look
+    // crooked at 0 VU).
+    const float arcStrokeW = juce::jmax (1.0f, arcRadius * 0.025f);
+    const float angleZero  = vuDbToAngleFrac (0.0f);
     {
-        juce::Path arc;
-        const float fracStart = dbToFraction (0.0f);
-        const float fracEnd   = 1.0f;
-        const float jucePi = juce::MathConstants<float>::pi;
-        // JUCE addCentredArc uses radians from 12-o-clock clockwise.
-        // Convert: trig angle (0 = right) -> JUCE angle (0 = up) = trig + π/2.
-        arc.addCentredArc (pivot.x, pivot.y, arcRadius, arcRadius, 0.0f,
-                            fracToScreenAngleRad (fracStart) + jucePi * 0.5f,
-                            fracToScreenAngleRad (fracEnd)   + jucePi * 0.5f,
-                            true);
-        g.setColour (kRedZone);
-        g.strokePath (arc, juce::PathStrokeType (juce::jmax (2.5f, (float) h * 0.06f)));
+        juce::Path arcBlack;
+        arcBlack.addCentredArc (pivot.x, pivot.y, baselineRad, baselineRad, 0.0f,
+                                  angleFracToScreenAngleRad (-1.0f) + jucePi * 0.5f,
+                                  angleFracToScreenAngleRad ( 1.0f) + jucePi * 0.5f,
+                                  true);
+        g.setColour (juce::Colours::black);
+        g.strokePath (arcBlack, juce::PathStrokeType (arcStrokeW,
+                                                        juce::PathStrokeType::curved,
+                                                        juce::PathStrokeType::rounded));
+
+        juce::Path arcRed;
+        arcRed.addCentredArc (pivot.x, pivot.y, baselineRad, baselineRad, 0.0f,
+                                angleFracToScreenAngleRad (angleZero) + jucePi * 0.5f,
+                                angleFracToScreenAngleRad ( 1.0f)     + jucePi * 0.5f,
+                                true);
+        g.setColour (juce::Colours::red);
+        g.strokePath (arcRed, juce::PathStrokeType (arcStrokeW,
+                                                       juce::PathStrokeType::curved,
+                                                       juce::PathStrokeType::rounded));
     }
 
-    // Tick marks only - no numeric labels, no baseline arc connecting them. Labels were too crowded at the
-    // bus/master strip width; the tick density alone communicates the
-    // scale, and the red zone marks where overload begins.
-    const float tickOuter = arcRadius;
-    const float tickInner = arcRadius - juce::jmax (4.0f, (float) h * 0.13f);
-    const float dotR      = juce::jmax (0.9f, (float) h * 0.020f);
-
-    for (const auto& t : kTicks)
+    // Radial tick marks. Each tick line runs along the radius from the
+    // pivot, sitting flush on the baseline arc and growing outward by
+    // tickLenMaj (numbered) or tickLenMin (sub-tick). Drawn after the
+    // arc so they paint on top of the baseline.
+    for (const auto& m : kMarks)
     {
-        const float frac = dbToFraction (t.vuDb);
-        const auto pa = pointOnArc (frac, tickOuter);
-        const auto pb = pointOnArc (frac, tickInner);
-        const auto pd = pointOnArc (frac, tickInner - dotR * 2.5f);
+        const float af   = vuDbToAngleFrac (m.vuDb);
+        const float len  = m.primary ? tickLenMaj : tickLenMin;
+        const auto pIn   = pointOnArc (af, baselineRad);
+        const auto pOut  = pointOnArc (af, baselineRad + len);
 
-        g.setColour (t.red ? kRedZone : kInk);
-        // Major (primary) ticks are slightly longer + thicker so the eye
-        // still gets a coarse landmark grid even without numbers.
-        const float thickness = t.primary ? 1.3f : 0.8f;
-        g.drawLine (juce::Line<float> (pa, pb), thickness);
-        g.fillEllipse (juce::Rectangle<float> (dotR * 2.0f, dotR * 2.0f).withCentre (pd));
+        g.setColour (m.red ? juce::Colours::red : juce::Colours::black);
+        const float thickness = m.primary ? 1.5f : 1.0f;
+        g.drawLine (juce::Line<float> (pIn, pOut), thickness);
     }
 
-    // "vu" badge - lower-left of the face, where there's empty headroom
-    // below the labelled-tick row. Avoids the +3 / red-zone clutter on the
-    // right side that the previous layout collided with.
+    // Numeric labels — upright sans-serif horizontally centred above the
+    // tick outer end (Justification::centredBottom anchors the text just
+    // above the tick). Suppressed under kLabelMinWidth.
+    if (showLabels)
     {
-        const float vuFont = juce::jlimit (8.0f, 14.0f, (float) h * 0.24f);
-        g.setFont (juce::Font (juce::FontOptions (vuFont, juce::Font::italic | juce::Font::bold)));
-        g.setColour (kInk);
-        const auto vuBox = juce::Rectangle<float> (faceRect.getRight() - vuFont * 2.4f - 2.0f,
-                                                     faceRect.getBottom() - vuFont * 1.25f,
-                                                     vuFont * 2.2f, vuFont * 1.15f);
-        g.drawText ("vu", vuBox, juce::Justification::centredRight, false);
+        g.setFont (juce::Font (juce::FontOptions (labelFont, juce::Font::bold)));
+        const float boxW = labelFont * 2.6f;
+        const float boxH = labelFont * 1.25f;
+        for (const auto& m : kMarks)
+        {
+            if (m.label == nullptr) continue;
+            const float af = vuDbToAngleFrac (m.vuDb);
+            const auto pTickTop = pointOnArc (af, baselineRad + tickLenMaj);
+            const float textCx  = pTickTop.x;
+            const float textBaseY = pTickTop.y - 1.5f;
+            g.setColour (m.red ? juce::Colours::red : juce::Colours::black);
+            g.drawText (juce::String (m.label),
+                         juce::Rectangle<float> (textCx - boxW * 0.5f,
+                                                    textBaseY - boxH,
+                                                    boxW, boxH),
+                         juce::Justification::centredBottom, false);
+        }
     }
 
+    // Semicircular pivot hub centred exactly on (pivot.x, pivot.y) — the
+    // same point every other element radiates from. Top half of a circle
+    // of radius arcRadius * 0.10, so it scales with the dial without
+    // dominating narrow bus faces.
+    {
+        const float hubR = juce::jmax (4.0f, arcRadius * 0.10f);
+        juce::Path hub;
+        hub.startNewSubPath (pivot.x - hubR, pivot.y);
+        hub.addArc (pivot.x - hubR, pivot.y - hubR,
+                     hubR * 2.0f, hubR * 2.0f,
+                     -jucePi * 0.5f, jucePi * 0.5f, false);
+        hub.lineTo (pivot.x + hubR, pivot.y);
+        hub.closeSubPath();
+        g.setColour (kPivotHousing);
+        g.fillPath (hub);
+        g.setColour (juce::Colour (0xff3a3a40));
+        g.strokePath (hub, juce::PathStrokeType (0.8f));
+    }
+
+    // PEAK indicator — small LED in the upper-right corner of the face,
+    // matching the SSL-style placement. Caption dropped since the dot is
+    // self-explanatory in that corner and there's no clean room for text
+    // without crowding the +3 label.
+    {
+        const float ledR = juce::jmax (2.0f, arcRadius * 0.05f);
+        const float margin = juce::jmax (4.0f, arcRadius * 0.06f);
+        const float ledCx = faceRect.getRight()  - margin - ledR;
+        const float ledCy = faceRect.getY()      + margin + ledR;
+        peakLedRect = juce::Rectangle<float> (ledCx - ledR, ledCy - ledR,
+                                                ledR * 2.0f, ledR * 2.0f);
+
+        // Faint recessed well so the LED reads as a physical hole even when
+        // unlit (visible against the bright face).
+        g.setColour (juce::Colour (0xff909094));
+        g.fillEllipse (peakLedRect.expanded (1.0f));
+        g.setColour (kPeakLedOff);
+        g.fillEllipse (peakLedRect);
+        g.setColour (juce::Colour (0xff201010));
+        g.drawEllipse (peakLedRect, 0.5f);
+    }
+
+    // "VU" badge — plain sans-serif above the pivot hub. Suppressed on
+    // narrow bus faces (same threshold as the numeric labels) where the
+    // badge would collide with the hub and the +3 label.
+    if (showLabels)
+    {
+        const float vuFont = juce::jlimit (10.0f, 18.0f, arcRadius * 0.18f);
+        g.setFont (juce::Font (juce::FontOptions (vuFont, juce::Font::plain)));
+        g.setColour (juce::Colours::black);
+        const float vuBoxW = vuFont * 2.6f;
+        const float vuBoxH = vuFont * 1.15f;
+        const float hubR   = juce::jmax (4.0f, arcRadius * 0.10f);
+        const float vuCx = pivot.x;
+        const float vuCy = pivot.y - hubR - vuBoxH * 0.5f - arcRadius * 0.04f;
+        g.drawText ("VU",
+                     juce::Rectangle<float> (vuCx - vuBoxW * 0.5f,
+                                                vuCy - vuBoxH * 0.5f,
+                                                vuBoxW, vuBoxH),
+                     juce::Justification::centred, false);
+    }
 }
 
 void AnalogVuMeter::paint (juce::Graphics& g)
@@ -229,16 +389,16 @@ void AnalogVuMeter::paint (juce::Graphics& g)
     if (cachedFace.isValid())
         g.drawImageAt (cachedFace, 0, 0);
 
-    auto drawNeedle = [&] (float frac, juce::Colour c, float thickness)
+    auto drawNeedle = [&] (float angleFrac, juce::Colour c, float thickness)
     {
-        const float deg = (frac - 0.5f) * 2.0f * halfArcDeg - 90.0f;
+        const float deg = angleFrac * halfArcDeg - 90.0f;
         const float rad  = juce::degreesToRadians (deg);
-        // Needle starts inside the visible pivot housing and ends just
-        // shy of the tick line, never overshooting into the tick numbers.
-        const float baseR = juce::jmax (0.0f, arcRadius * 0.18f);
-        const float tipR  = arcRadius - juce::jmax (1.0f, (float) getHeight() * 0.04f);
-        const auto base = juce::Point<float> (pivot.x + std::cos (rad) * baseR,
-                                                 pivot.y + std::sin (rad) * baseR);
+        // Needle starts EXACTLY at the pivot and radiates outward to the
+        // baseline. No baseR offset — using a non-zero base distance made
+        // the line look like it continued past the pivot when the segment
+        // was extrapolated visually by the eye through the hub.
+        const float tipR  = baselineRad - arcRadius * 0.02f;
+        const auto base = pivot;
         const auto tip  = juce::Point<float> (pivot.x + std::cos (rad) * tipR,
                                                  pivot.y + std::sin (rad) * tipR);
         g.setColour (c);
@@ -250,5 +410,19 @@ void AnalogVuMeter::paint (juce::Graphics& g)
     if (rightRms != nullptr)
         drawNeedle (needlePosR, kNeedleR, 1.2f);
     drawNeedle (needlePosL, kNeedle, 1.4f);
+
+    // PEAK LED overlay - lit while the hold timer is still in the future.
+    if (peakHoldUntilMs != 0 && ! peakLedRect.isEmpty())
+    {
+        const auto now = juce::Time::getMillisecondCounter();
+        if (now < peakHoldUntilMs)
+        {
+            g.setColour (kPeakLedOn);
+            g.fillEllipse (peakLedRect);
+            // Soft glow so the lit state pops against the cream face.
+            g.setColour (kPeakLedOn.withAlpha (0.35f));
+            g.fillEllipse (peakLedRect.expanded (peakLedRect.getWidth() * 0.25f));
+        }
+    }
 }
 } // namespace focal

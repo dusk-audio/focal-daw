@@ -13,12 +13,13 @@ class AuxLaneStrip;
 class AudioEngine;
 class AuxEditorHost;
 
-// One AUX return lane. Mute, return-level fader, name + colour, plus
-// AuxLaneParams::kMaxLanePlugins plugin slots. The slot's plugin editor
-// is hosted by an AuxEditorHost - a borderless X11 toplevel positioned
-// over the lane's slot rect so the user perceives it as embedded. The
-// editor cannot be a true Component child of the lane on Wayland because
-// X11 plugin windows can't reparent into a wl_surface.
+// AUX return lane. Three-column layout: aux-return strip (name, mute,
+// return fader, output meter) on the left, plugin host area in the
+// center, send-source panel showing every channel's send-to-this-lane
+// level on the right. The plugin editor is hosted by an AuxEditorHost -
+// a borderless X11 toplevel positioned over the center-column slot rect
+// so it reads as embedded. The editor cannot be a true Component child
+// on Wayland because X11 plugin windows can't reparent into a wl_surface.
 class AuxLaneComponent final : public juce::Component, private juce::Timer
 {
 public:
@@ -29,26 +30,18 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
 
-    // Push the current slot screen-rect to every loaded slot's
-    // AuxEditorHost so the host tracks main-window movement and lane
-    // re-layout. Called from MainComponent's movement watcher.
     void repositionEditorHosts();
-
-    // Hide / show every loaded slot's AuxEditorHost without destroying
-    // them. Used when AUX view is swapped out (MIXING / RECORDING /
-    // MASTERING) or another AUX lane becomes active.
     void setEditorHostsHidden (bool hidden);
-
-    // Tear down every editor host owned by this lane through the
-    // X-focus-safe path. Called from AuxView::closeAllAuxPopouts at app
-    // shutdown.
     void closeAllPopoutsForShutdown();
 
-    static constexpr int kMinLaneWidth = 220;
-    static constexpr int kHeaderHeight = 60;     // name + return level
-    static constexpr int kSlotHeaderH  = 24;     // bypass + remove + name strip
+    static constexpr int kStripWidth      = 150;
+    static constexpr int kSendPanelWidth  = 280;
+    static constexpr int kColumnGap       = 8;
+    static constexpr int kSlotHeaderH     = 24;
 
 private:
+    class SendSourcePanel;
+
     void timerCallback() override;
     void rebuildSlots();
     void openPickerForSlot (int slotIdx);
@@ -59,26 +52,31 @@ private:
     void destroyEditorHostForSlot (int slotIdx);
     juce::Rectangle<int> computeSlotScreenRect (int slotIdx) const;
 
+    juce::Rectangle<int> getStripArea() const noexcept;
+    juce::Rectangle<int> getCenterArea() const noexcept;
+    juce::Rectangle<int> getSendPanelArea() const noexcept;
+
     AuxLane& lane;
     AuxLaneStrip& strip;
     AudioEngine& engine;
     int laneIndex;
 
     juce::Label   nameLabel;
-    juce::Slider  returnFader { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
+    juce::Slider  returnFader { juce::Slider::LinearVertical, juce::Slider::TextBoxBelow };
     juce::TextButton muteButton { "M" };
+
+    // Repainted by timer for the return-fader meter bar.
+    class StripMeter;
+    std::unique_ptr<StripMeter> stripMeter;
+
+    std::unique_ptr<SendSourcePanel> sendPanel;
 
     struct SlotUI
     {
-        juce::TextButton openOrAddButton;     // "+ Plugin" when empty; plugin name + click-to-toggle when loaded
+        juce::TextButton openOrAddButton;
         juce::TextButton bypassButton;
         juce::TextButton removeButton;
 
-        // Editor lives inside an AuxEditorHost (borderless X11 toplevel
-        // tracked to the slot's screen rect), not as a Component child
-        // of the lane. The unique_ptr keeps the editor alive across
-        // load/replace cycles; AuxEditorHost holds a non-owning content
-        // pointer.
         std::unique_ptr<juce::AudioProcessorEditor> editor;
         std::unique_ptr<AuxEditorHost>              editorHost;
         juce::String displayedName;
