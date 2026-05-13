@@ -6,8 +6,9 @@ namespace focal::pluginpicker
 {
 namespace
 {
-constexpr int kIdScan        = 9001;
-constexpr int kIdBrowseFile  = 9002;
+constexpr int kIdScan            = 9001;
+constexpr int kIdBrowseFile      = 9002;
+constexpr int kIdHardwareInsert  = 9003;
 
 void showLoadFailureAlert (const juce::String& message)
 {
@@ -102,7 +103,8 @@ void openPickerMenu (PluginSlot& slot,
                       std::unique_ptr<juce::FileChooser>& chooserOwner,
                       std::function<void()> onChange,
                       PluginKind kind,
-                      juce::Point<int> screenPosition)
+                      juce::Point<int> screenPosition,
+                      std::function<void()> onPickHardwareInsert)
 {
     auto& manager = slot.getManagerForUi();
     auto& known   = manager.getKnownPluginList();
@@ -124,6 +126,17 @@ void openPickerMenu (PluginSlot& slot,
         });
 
     juce::PopupMenu menu;
+
+    // External Hardware Insert lives at the very top of the menu (above
+    // even the "no plugins scanned" banner) so the user can reach it
+    // regardless of plugin state. Only shown when the caller wired up
+    // a handler - aux + channel slots both do, mastering stages don't.
+    if (onPickHardwareInsert)
+    {
+        menu.addItem (kIdHardwareInsert, "External Hardware Insert...");
+        menu.addSeparator();
+    }
+
     if (known.getNumTypes() == 0)
     {
         menu.addSectionHeader ("No plugins scanned yet");
@@ -191,12 +204,20 @@ void openPickerMenu (PluginSlot& slot,
     else
         options = options.withTargetComponent (&target);
 
+    auto onHardwareCopy = onPickHardwareInsert;
+
     menu.showMenuAsync (options,
         [slotPtr, safeTarget, chooserOwnerPtr, onChangeCopy = std::move (onChangeCopy),
+         onHardwareCopy = std::move (onHardwareCopy),
          kind, screenPosition, sharedDescriptions] (int result) mutable
         {
             if (safeTarget.getComponent() == nullptr) return;  // host UI gone
             if (result == 0) return;  // cancelled
+            if (result == kIdHardwareInsert)
+            {
+                if (onHardwareCopy) onHardwareCopy();
+                return;
+            }
             if (result == kIdScan)
             {
                 runScanModal (slotPtr->getManagerForUi());
@@ -206,7 +227,8 @@ void openPickerMenu (PluginSlot& slot,
                 // visual spot.
                 openPickerMenu (*slotPtr, *safeTarget.getComponent(),
                                   *chooserOwnerPtr, std::move (onChangeCopy),
-                                  kind, screenPosition);
+                                  kind, screenPosition,
+                                  std::move (onHardwareCopy));
                 return;
             }
             if (result == kIdBrowseFile)

@@ -1,0 +1,358 @@
+#include "HardwareInsertEditor.h"
+
+#include <memory>
+
+namespace focal
+{
+namespace
+{
+// Channel-pair entries in the Output / Input dropdowns. Indexed from 1
+// (ComboBox treats 0 as "nothing selected"); userData encodes the pair
+// as L * 1000 + R + 1 so we can decode back without a side-table.
+int encodePair (int chL, int chR) noexcept { return (chL * 1000) + chR + 1; }
+int decodePairL (int id)        noexcept { return (id - 1) / 1000; }
+int decodePairR (int id)        noexcept { return (id - 1) % 1000; }
+} // namespace
+
+HardwareInsertEditor::HardwareInsertEditor (HardwareInsertParams& paramsRef,
+                                                juce::AudioDeviceManager& dm,
+                                                std::function<void()> onDone)
+    : params (paramsRef),
+      deviceManager (dm),
+      onDoneCallback (std::move (onDone))
+{
+    setSize (kPanelW, kPanelH);
+
+    headerLabel.setText ("I/O", juce::dontSendNotification);
+    headerLabel.setJustificationType (juce::Justification::centred);
+    headerLabel.setColour (juce::Label::textColourId, juce::Colours::white);
+    headerLabel.setFont (juce::Font (juce::FontOptions (17.0f, juce::Font::bold)));
+    addAndMakeVisible (headerLabel);
+
+    auto setupLabel = [this] (juce::Label& lbl, const juce::String& text,
+                                juce::Justification j = juce::Justification::centredRight)
+    {
+        lbl.setText (text, juce::dontSendNotification);
+        lbl.setJustificationType (j);
+        lbl.setColour (juce::Label::textColourId, juce::Colour (0xffc0c0c8));
+        lbl.setFont (juce::Font (juce::FontOptions (12.0f)));
+        addAndMakeVisible (lbl);
+    };
+    setupLabel (outVolLabel, "Output Volume:");
+    setupLabel (outChLabel,  "Output:");
+    setupLabel (inChLabel,   "Input:");
+    setupLabel (inVolLabel,  "Input Volume:");
+    setupLabel (latencyLabel, "Latency Detection:");
+    setupLabel (latencySamplesLabel, "Latency Offset:");
+    setupLabel (dryWetLabel,  "Dry/Wet:");
+    setupLabel (formatLabel,  "Format:");
+
+    auto setupGainSlider = [this] (juce::Slider& s, std::atomic<float>& atom)
+    {
+        s.setSliderStyle (juce::Slider::LinearHorizontal);
+        s.setTextBoxStyle (juce::Slider::TextBoxLeft, false, 70, 22);
+        s.setRange (-24.0, 12.0, 0.1);
+        s.setValue ((double) atom.load (std::memory_order_relaxed),
+                     juce::dontSendNotification);
+        s.setTextValueSuffix (" dB");
+        s.setDoubleClickReturnValue (true, 0.0);
+        s.onValueChange = [this, &s, &atom]
+        {
+            atom.store ((float) s.getValue(), std::memory_order_relaxed);
+        };
+        addAndMakeVisible (s);
+    };
+    setupGainSlider (outVolSlider, params.outputGainDb);
+    setupGainSlider (inVolSlider,  params.inputGainDb);
+
+    auto setupCombo = [this] (juce::ComboBox& cb)
+    {
+        cb.setColour (juce::ComboBox::backgroundColourId, juce::Colour (0xff202024));
+        cb.setColour (juce::ComboBox::textColourId,       juce::Colour (0xffe0e0e4));
+        cb.setColour (juce::ComboBox::outlineColourId,    juce::Colour (0xff404048));
+        addAndMakeVisible (cb);
+    };
+    setupCombo (outChCombo);
+    setupCombo (inChCombo);
+    outChCombo.onChange = [this] { publishRoutingFromUi(); };
+    inChCombo .onChange = [this] { publishRoutingFromUi(); };
+    populateDropdowns();
+
+    pingButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff2a4a6a));
+    pingButton.setColour (juce::TextButton::textColourOffId, juce::Colours::white);
+    pingButton.setTooltip ("Send a chirp out the SEND, capture the RETURN, "
+                            "measure round-trip latency in samples. Make sure "
+                            "the outboard is connected and audio is rolling.");
+    pingButton.onClick = [this]
+    {
+        // Clear any stale result before triggering. The audio thread
+        // writes pingResult only after capture + correlation finish.
+        params.pingResult .store (-1,    std::memory_order_relaxed);
+        params.pingPending.store (true,  std::memory_order_release);
+        pingButton.setButtonText ("Pinging...");
+        pingButton.setEnabled (false);
+    };
+    addAndMakeVisible (pingButton);
+
+    // Poll the audio-thread result + the strip's measured latency at
+    // 10 Hz. Result-snapshot pattern: pingPending flips back to false
+    // when the audio thread writes pingResult. UI then surfaces the
+    // measured lag (or a failure alert).
+    startTimerHz (10);
+
+    latencySlider.setSliderStyle (juce::Slider::LinearHorizontal);
+    latencySlider.setTextBoxStyle (juce::Slider::TextBoxLeft, false, 70, 22);
+    // Range matches HardwareInsertSlot::kMaxDelaySamples so a measured
+    // ping result is always representable without truncation. The audio
+    // thread already caps the effective delay to the same value.
+    latencySlider.setRange (0.0, 16384.0, 1.0);
+    latencySlider.setTextValueSuffix (" sam");
+    latencySlider.setDoubleClickReturnValue (true, 0.0);
+    {
+        const auto routing = currentRouting();
+        latencySlider.setValue ((double) routing.latencySamples,
+                                  juce::dontSendNotification);
+    }
+    latencySlider.onValueChange = [this] { publishRoutingFromUi(); };
+    addAndMakeVisible (latencySlider);
+
+    dryWetSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+    dryWetSlider.setTextBoxStyle (juce::Slider::TextBoxLeft, false, 70, 22);
+    dryWetSlider.setRange (0.0, 100.0, 0.1);
+    dryWetSlider.setTextValueSuffix (" %");
+    dryWetSlider.setValue ((double) (params.dryWet.load (std::memory_order_relaxed) * 100.0f),
+                            juce::dontSendNotification);
+    dryWetSlider.onValueChange = [this]
+    {
+        params.dryWet.store ((float) (dryWetSlider.getValue() / 100.0),
+                              std::memory_order_relaxed);
+    };
+    addAndMakeVisible (dryWetSlider);
+
+    formatStereoButton.setRadioGroupId (8001);
+    formatMidSideButton.setRadioGroupId (8001);
+    {
+        const auto routing = currentRouting();
+        formatStereoButton .setToggleState (routing.format == 0, juce::dontSendNotification);
+        formatMidSideButton.setToggleState (routing.format == 1, juce::dontSendNotification);
+    }
+    formatStereoButton .onClick = [this] { publishRoutingFromUi(); };
+    formatMidSideButton.onClick = [this] { publishRoutingFromUi(); };
+    addAndMakeVisible (formatStereoButton);
+    addAndMakeVisible (formatMidSideButton);
+
+    cancelButton.onClick = [this] { if (onDoneCallback) onDoneCallback(); };
+    doneButton  .onClick = [this] { if (onDoneCallback) onDoneCallback(); };
+    doneButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff2a5a3a));
+    doneButton.setColour (juce::TextButton::textColourOffId, juce::Colours::white);
+    addAndMakeVisible (cancelButton);
+    addAndMakeVisible (doneButton);
+
+    // Mark the params as actively in use so the audio thread's strip
+    // dispatcher (Phase 3) flips into Hardware mode. The strip's
+    // insertMode atom is updated by the caller; the editor sets
+    // `enabled` so the panel reflects "this slot is active".
+    params.enabled.store (true, std::memory_order_relaxed);
+}
+
+HardwareInsertEditor::~HardwareInsertEditor() = default;
+
+void HardwareInsertEditor::timerCallback()
+{
+    // While the ping is in flight, pingPending stays true. When the
+    // audio thread completes capture + correlation it writes the
+    // measured lag to pingResult and clears pingPending. We pick up the
+    // result here, push it into the routing snapshot + latency slider,
+    // and re-enable the button.
+    if (! pingButton.isEnabled()
+        && ! params.pingPending.load (std::memory_order_acquire))
+    {
+        const int lag = params.pingResult.load (std::memory_order_relaxed);
+        pingButton.setEnabled (true);
+        pingButton.setButtonText ("Ping");
+        if (lag < 0)
+        {
+            juce::AlertWindow::showAsync (
+                juce::MessageBoxOptions()
+                    .withIconType (juce::MessageBoxIconType::WarningIcon)
+                    .withTitle ("Latency Detection")
+                    .withMessage ("Ping failed - no clean return detected. "
+                                  "Check the SEND/RETURN cables, raise the "
+                                  "Output Volume, or measure the latency "
+                                  "manually and type the sample count.")
+                    .withButton ("OK"),
+                nullptr);
+        }
+        else
+        {
+            // Slider range is sized to HardwareInsertSlot::kMaxDelaySamples
+            // so the measured lag is always representable without
+            // truncation. The publishRoutingFromUi() that follows reads
+            // back via getValue(), so storing the lag here is the value
+            // that lands in the routing snapshot.
+            latencySlider.setValue ((double) lag, juce::dontSendNotification);
+            publishRoutingFromUi();
+        }
+    }
+}
+
+void HardwareInsertEditor::populateDropdowns()
+{
+    outChCombo.clear (juce::dontSendNotification);
+    inChCombo .clear (juce::dontSendNotification);
+
+    auto* device = deviceManager.getCurrentAudioDevice();
+    if (device == nullptr)
+    {
+        outChCombo.addItem ("(no audio device)", 1);
+        outChCombo.setSelectedId (1, juce::dontSendNotification);
+        inChCombo .addItem ("(no audio device)", 1);
+        inChCombo .setSelectedId (1, juce::dontSendNotification);
+        return;
+    }
+
+    const auto outNames = device->getOutputChannelNames();
+    const auto inNames  = device->getInputChannelNames();
+    const auto routing = currentRouting();
+
+    auto addPairs = [] (juce::ComboBox& cb, const juce::StringArray& names)
+    {
+        // Pair adjacent channels - typical interface convention is
+        // odd/even = L/R. Add a leading "(none)" entry so the user can
+        // explicitly clear the routing.
+        cb.addItem ("(none)", 1);
+        for (int i = 0; i + 1 < names.size(); i += 2)
+        {
+            const auto label = juce::String (i + 1) + "-" + juce::String (i + 2)
+                              + "  " + names[i] + " / " + names[i + 1];
+            cb.addItem (label, encodePair (i, i + 1));
+        }
+    };
+    addPairs (outChCombo, outNames);
+    addPairs (inChCombo,  inNames);
+
+    // Preselect the routing the params currently hold. Falls back to
+    // "(none)" if the stored pair isn't in the menu (device hot-swap).
+    auto selectMatching = [] (juce::ComboBox& cb, int chL, int chR)
+    {
+        if (chL < 0 || chR < 0)
+        {
+            cb.setSelectedId (1, juce::dontSendNotification);
+            return;
+        }
+        const int targetId = encodePair (chL, chR);
+        for (int i = 0; i < cb.getNumItems(); ++i)
+        {
+            if (cb.getItemId (i) == targetId)
+            {
+                cb.setSelectedId (targetId, juce::dontSendNotification);
+                return;
+            }
+        }
+        cb.setSelectedId (1, juce::dontSendNotification);
+    };
+    selectMatching (outChCombo, routing.outputChL, routing.outputChR);
+    selectMatching (inChCombo,  routing.inputChL,  routing.inputChR);
+}
+
+HardwareInsertRouting HardwareInsertEditor::currentRouting() const
+{
+    return params.routing.current();
+}
+
+void HardwareInsertEditor::publishRoutingFromUi()
+{
+    auto fresh = std::make_unique<HardwareInsertRouting> (currentRouting());
+
+    const int outId = outChCombo.getSelectedId();
+    if (outId == 1 || outId == 0)
+    {
+        fresh->outputChL = -1;
+        fresh->outputChR = -1;
+    }
+    else
+    {
+        fresh->outputChL = decodePairL (outId);
+        fresh->outputChR = decodePairR (outId);
+    }
+
+    const int inId = inChCombo.getSelectedId();
+    if (inId == 1 || inId == 0)
+    {
+        fresh->inputChL = -1;
+        fresh->inputChR = -1;
+    }
+    else
+    {
+        fresh->inputChL = decodePairL (inId);
+        fresh->inputChR = decodePairR (inId);
+    }
+
+    fresh->latencySamples = (int) latencySlider.getValue();
+    fresh->format = formatMidSideButton.getToggleState() ? 1 : 0;
+
+    params.routing.publish (std::move (fresh));
+}
+
+void HardwareInsertEditor::paint (juce::Graphics& g)
+{
+    g.fillAll (juce::Colour (0xff1a1a20));
+}
+
+void HardwareInsertEditor::resized()
+{
+    auto bounds = getLocalBounds().reduced (16, 12);
+
+    headerLabel.setBounds (bounds.removeFromTop (28));
+    bounds.removeFromTop (8);
+
+    constexpr int kRowH        = 28;
+    constexpr int kRowGap      = 8;
+    constexpr int kLabelW      = 140;
+    constexpr int kControlPadL = 8;
+
+    auto layoutRow = [&] (juce::Component& label, juce::Component& control)
+    {
+        auto row = bounds.removeFromTop (kRowH);
+        auto lblArea = row.removeFromLeft (kLabelW);
+        label.setBounds (lblArea);
+        row.removeFromLeft (kControlPadL);
+        control.setBounds (row);
+        bounds.removeFromTop (kRowGap);
+    };
+
+    layoutRow (outVolLabel, outVolSlider);
+    layoutRow (outChLabel,  outChCombo);
+    bounds.removeFromTop (8);
+    layoutRow (inChLabel,   inChCombo);
+    layoutRow (inVolLabel,  inVolSlider);
+    bounds.removeFromTop (12);
+
+    {
+        auto row = bounds.removeFromTop (kRowH);
+        latencyLabel.setBounds (row.removeFromLeft (kLabelW));
+        row.removeFromLeft (kControlPadL);
+        pingButton.setBounds (row.removeFromLeft (90));
+        bounds.removeFromTop (kRowGap);
+    }
+    layoutRow (latencySamplesLabel, latencySlider);
+    bounds.removeFromTop (12);
+    layoutRow (dryWetLabel, dryWetSlider);
+    bounds.removeFromTop (12);
+
+    {
+        auto row = bounds.removeFromTop (kRowH);
+        formatLabel.setBounds (row.removeFromLeft (kLabelW));
+        row.removeFromLeft (kControlPadL);
+        formatStereoButton .setBounds (row.removeFromLeft (110));
+        row.removeFromLeft (8);
+        formatMidSideButton.setBounds (row.removeFromLeft (110));
+    }
+
+    // Footer row, pinned to the bottom.
+    auto footer = getLocalBounds().reduced (16, 12).removeFromBottom (kRowH);
+    doneButton  .setBounds (footer.removeFromRight (100));
+    footer.removeFromRight (8);
+    cancelButton.setBounds (footer.removeFromRight (90));
+}
+} // namespace focal

@@ -41,12 +41,19 @@ enum class PluginKind { Effects, Instruments };
 // position when `target` is a large click-target (full-slot placeholder)
 // so the menu appears at the click rather than at the component's
 // top-left. Default {-1,-1} means "use target component bounds".
+// `onPickHardwareInsert`, when set, adds a top-of-menu "External
+// Hardware Insert..." item. Selection invokes the callback - the caller
+// is expected to flip the strip's insertMode to Hardware and open the
+// HardwareInsertEditor modal. Empty/null callback hides the menu entry
+// (preserves the existing menu shape for surfaces that don't support
+// hardware inserts).
 void openPickerMenu (PluginSlot& slot,
                       juce::Component& target,
                       std::unique_ptr<juce::FileChooser>& chooserOwner,
                       std::function<void()> onChange,
                       PluginKind kind,
-                      juce::Point<int> screenPosition = { -1, -1 });
+                      juce::Point<int> screenPosition = { -1, -1 },
+                      std::function<void()> onPickHardwareInsert = {});
 
 // Synchronous scan with a tiny modal banner so the user sees progress.
 // Same UX as the per-channel scan dialog. Safe to call from message thread.

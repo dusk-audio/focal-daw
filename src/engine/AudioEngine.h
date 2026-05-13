@@ -137,6 +137,12 @@ public:
     AuxLaneStrip&        getAuxLaneStrip (int idx)       noexcept { return auxLaneStrips[(size_t) idx]; }
     const AuxLaneStrip&  getAuxLaneStrip (int idx) const noexcept { return auxLaneStrips[(size_t) idx]; }
 
+    // Per-track channel strip access. UI needs this to read/write the
+    // strip's insertMode atom when the user flips between Plugin and
+    // Hardware modes via the picker.
+    ChannelStrip&        getChannelStrip (int idx)       noexcept { return strips[(size_t) idx]; }
+    const ChannelStrip&  getChannelStrip (int idx) const noexcept { return strips[(size_t) idx]; }
+
     // Convenience for the UI; runs on the message thread. Coordinates the
     // RecordManager / PlaybackEngine state changes around Transport.
     void play();
@@ -391,6 +397,17 @@ private:
     std::atomic<int>    currentBlockSize  { 0 };
     std::atomic<int>    xrunCount         { 0 };
     std::atomic<float>  cpuUsage          { 0.0f };
+
+    // Per-callback device-I/O pointer cache. Populated at the top of
+    // audioDeviceIOCallbackWithContext and forwarded to ChannelStrip /
+    // AuxLaneStrip so the hardware-insert side of each slot (Phase 3)
+    // can read returns from + write sends to specific device channels.
+    // Pointers are valid for the duration of one callback only;
+    // strips must consume them synchronously and never cache across blocks.
+    const float* const* currentDeviceInputs   = nullptr;
+    int                 numCurrentDeviceInputs  = 0;
+    float* const*       currentDeviceOutputs  = nullptr;
+    int                 numCurrentDeviceOutputs = 0;
 
     // Cached 1.0 / juce::Time::getHighResolutionTicksPerSecond(). The
     // tick->seconds conversion runs twice per audio callback (xrun watchdog

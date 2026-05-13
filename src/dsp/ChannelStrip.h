@@ -7,6 +7,7 @@
 #include <vector>
 #include "../session/Session.h"
 #include "../engine/PluginSlot.h"
+#include "HardwareInsertSlot.h"
 
 #if FOCAL_HAS_DUSK_DSP
   #include "BritishEQProcessor.h"   // multi-q
@@ -42,6 +43,24 @@ public:
     void bindPluginManager (PluginManager& mgr) noexcept { pluginSlot.setManager (mgr); }
     PluginSlot&       getPluginSlot()       noexcept { return pluginSlot; }
     const PluginSlot& getPluginSlot() const noexcept { return pluginSlot; }
+
+    // Hardware-insert side of the channel insert slot. The strip's
+    // insert is "either a plugin OR a hardware insert" - the live mode
+    // is chosen by insertMode (0 = empty, 1 = plugin, 2 = hardware).
+    // Audio thread reads insertMode with acquire; mode flips cross-
+    // fade through activeInsertGain over ~20 ms to mask the routing
+    // discontinuity.
+    void bindHardwareInsert (const HardwareInsertParams& params) noexcept;
+    HardwareInsertSlot&       getHardwareInsertSlot()       noexcept { return hardwareSlot; }
+    const HardwareInsertSlot& getHardwareInsertSlot() const noexcept { return hardwareSlot; }
+
+    enum InsertMode : int { kInsertEmpty = 0, kInsertPlugin = 1, kInsertHardware = 2 };
+
+    // Message thread sets this; audio thread reads with acquire and
+    // initiates a 20 ms crossfade to the new mode. Default is plugin so
+    // existing channel-strip behaviour (load-a-plugin-via-picker) is
+    // preserved with no UI changes.
+    std::atomic<int> insertMode { kInsertPlugin };
 
     // Engine sets this to true when the recorder is going to read
     // getLastProcessedMono() this block (i.e. armed && recording && printEffects).
@@ -86,6 +105,12 @@ public:
     //   • binary-routed signal into busL[N]/busR[N] for each assigned bus
     //   • aux-send signal into auxLaneL[N]/auxLaneR[N] at auxSendDb[N] gain,
     //     pre- or post-fader per auxSendPreFader[N]
+    // deviceInputs / deviceOutputs are the raw audio-device I/O arrays
+    // for the current callback (passed by AudioEngine). They're forwarded
+    // to the hardware-insert slot's processStereoBlock so the SEND can
+    // accumulate into device outputs and the RETURN can be read from
+    // device inputs. Defaulted to null/0 so non-engine call sites (tests,
+    // self-test) keep compiling without engine I/O context.
     void processAndAccumulate (const float* inL,
                                const float* inR,                   // nullptr = mono path
                                juce::MidiBuffer& trackMidi,         // filtered MIDI for this track
@@ -96,7 +121,11 @@ public:
                                const std::array<float*, kNumAuxSends>& auxLaneL,
                                const std::array<float*, kNumAuxSends>& auxLaneR,
                                int numSamples,
-                               bool passByGate) noexcept;
+                               bool passByGate,
+                               const float* const* deviceInputs  = nullptr,
+                               int   numDeviceInputs             = 0,
+                               float* const*       deviceOutputs = nullptr,
+                               int   numDeviceOutputs            = 0) noexcept;
 
 private:
     const ChannelStripParams* paramsRef = nullptr;
@@ -137,6 +166,24 @@ private:
     // so the user can drop a guitar amp / synth / character processor in
     // the signal path before the channel's EQ + comp shape it.
     PluginSlot pluginSlot;
+
+    // Hardware-insert side. Either pluginSlot OR hardwareSlot runs in any
+    // given block, chosen by insertMode + the crossfade gate below.
+    HardwareInsertSlot hardwareSlot;
+
+    // Audio-thread crossfade state for the plugin <-> hardware mode flip.
+    // activeInsertMode is the slot we're CURRENTLY running; insertMode is
+    // what the UI wants us to run. Mismatch triggers a ramp-out / mode-
+    // swap / ramp-in cycle via activeInsertGain (20 ms equal-power
+    // smoother). resetTailsAndDelayLine() is called on the new slot at
+    // the swap point so the freshly-activated path starts clean.
+    int activeInsertMode = kInsertPlugin;
+    juce::SmoothedValue<float> activeInsertGain;
+
+    // Scratch buffers used to hold the pre-insert signal so the
+    // crossfade can blend pre vs post per-sample. Sized in prepare().
+    std::vector<float> insertScratchL;
+    std::vector<float> insertScratchR;
 
     // Empty MIDI buffer passed to the channel insert plugin. PluginSlot's
     // processBlock now requires a MidiBuffer& for instrument hosting in

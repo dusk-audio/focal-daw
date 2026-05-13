@@ -3,6 +3,7 @@
 #include "ChannelEqEditor.h"
 #include "ChannelCompEditor.h"
 #include "DimOverlay.h"
+#include "HardwareInsertEditor.h"
 #include "PluginPickerHelpers.h"
 #include "../engine/AudioEngine.h"
 #include "../engine/PluginSlot.h"
@@ -1130,6 +1131,12 @@ void ChannelStripComponent::openPluginPicker()
                         : pluginpicker::PluginKind::Effects;
 
     juce::Component::SafePointer<ChannelStripComponent> safe (this);
+    auto openHwEditor = [safe]
+    {
+        if (auto* self = safe.getComponent())
+            self->openHardwareInsertEditor();
+    };
+
     pluginpicker::openPickerMenu (pluginSlot,
                                     pluginSlotButton,
                                     activePluginChooser,
@@ -1137,6 +1144,11 @@ void ChannelStripComponent::openPluginPicker()
                                     {
                                         auto* self = safe.getComponent();
                                         if (self == nullptr) return;
+                                        // Picking a plugin flips the strip back to Plugin mode
+                                        // (overriding any prior Hardware selection on this slot).
+                                        self->engine.getChannelStrip (self->trackIndex)
+                                                  .insertMode.store (ChannelStrip::kInsertPlugin,
+                                                                       std::memory_order_release);
 
                                         // Close the modal synchronously so the cached editor
                                         // (still bound to the just-replaced processor) gets
@@ -1179,7 +1191,38 @@ void ChannelStripComponent::openPluginPicker()
                                             });
                                         });
                                     },
-                                    kind);
+                                    kind,
+                                    juce::Point<int> { -1, -1 },
+                                    std::move (openHwEditor));
+}
+
+void ChannelStripComponent::openHardwareInsertEditor()
+{
+    // Flip the strip to Hardware mode FIRST so the audio thread's
+    // crossfade gate (Phase 3) starts ramping in even before the user
+    // touches a control. The editor itself mutates `track.hardwareInsert`
+    // via AtomicSnapshot::publish + scalar atomic stores.
+    engine.getChannelStrip (trackIndex)
+        .insertMode.store (ChannelStrip::kInsertHardware,
+                            std::memory_order_release);
+    refreshPluginSlotButton();
+
+    juce::Component::SafePointer<ChannelStripComponent> safe (this);
+    auto editor = std::make_unique<HardwareInsertEditor> (
+        track.hardwareInsert,
+        engine.getDeviceManager(),
+        [safe]
+        {
+            if (auto* self = safe.getComponent())
+            {
+                self->hardwareInsertModal.close();
+                self->refreshPluginSlotButton();
+            }
+        });
+
+    auto* parent = findParentComponentOfClass<juce::Component>();
+    if (parent == nullptr) parent = this;
+    hardwareInsertModal.show (*parent, std::move (editor));
 }
 
 void ChannelStripComponent::unloadPluginSlot()
@@ -1234,16 +1277,51 @@ void ChannelStripComponent::showPluginSlotMenu()
 
 void ChannelStripComponent::refreshPluginSlotButton()
 {
-    const auto name = pluginSlot.getLoadedName();
-    if (name == lastSlotName) return;
-    lastSlotName = name;
-    // Loaded buttons get a small "▾" prefix to telegraph that the button
-    // is more than a single-action target - right-click reveals the
-    // Replace / Remove menu.
-    if (name.isNotEmpty())
-        pluginSlotButton.setButtonText (juce::String (juce::CharPointer_UTF8 ("\xe2\x96\xbe ")) + name);
+    const int mode = engine.getChannelStrip (trackIndex)
+                       .insertMode.load (std::memory_order_relaxed);
+    juce::String label;
+    if (mode == ChannelStrip::kInsertHardware)
+    {
+        // Loaded hardware: show the routed channel pair so the user knows
+        // at a glance where the strip is patched. Each side (out / in) is
+        // formatted independently - mono when only L is assigned, stereo
+        // when both are - and the label falls back to "HW (unrouted)" when
+        // neither side has audio routing.
+        const auto routing = track.hardwareInsert.routing.current();
+        auto formatPair = [] (int l, int r) -> juce::String
+        {
+            if (l < 0 && r < 0) return {};
+            if (r < 0)          return juce::String (l + 1);                       // mono
+            if (l < 0)          return juce::String (r + 1);                       // mono on R only
+            if (l == r)         return juce::String (l + 1);                       // same channel both
+            return juce::String (l + 1) + "-" + juce::String (r + 1);              // stereo pair
+        };
+        const auto out = formatPair (routing.outputChL, routing.outputChR);
+        const auto in  = formatPair (routing.inputChL,  routing.inputChR);
+        if (out.isEmpty() && in.isEmpty())
+            label = "HW (unrouted)";
+        else
+            label = juce::String ("HW: out ")
+                  + (out.isNotEmpty() ? out : juce::String ("-"))
+                  + " / in "
+                  + (in .isNotEmpty() ? in  : juce::String ("-"));
+    }
     else
-        pluginSlotButton.setButtonText ("+ Plugin");
+    {
+        const auto name = pluginSlot.getLoadedName();
+        if (name.isNotEmpty())
+            label = juce::String (juce::CharPointer_UTF8 ("\xe2\x96\xbe ")) + name;
+        else
+            label = "Insert";
+    }
+
+    if (label == lastSlotName) return;
+    lastSlotName = label;
+    pluginSlotButton.setButtonText (label);
+
+    // Re-fetch the plugin name for the dropPluginEditor / cached-editor
+    // bookkeeping below (kept on the same atomic field the old code used).
+    const auto name = pluginSlot.getLoadedName();
 
     // If the plugin was unloaded out from under an open editor (e.g. via
     // the right-click menu's Remove), the cached editor references a

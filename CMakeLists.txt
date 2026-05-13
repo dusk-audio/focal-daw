@@ -187,6 +187,7 @@ target_sources(Focal PRIVATE
     src/dsp/BusStrip.cpp
     src/dsp/BrickwallLimiter.cpp
     src/dsp/ChannelStrip.cpp
+    src/dsp/HardwareInsertSlot.cpp
     src/dsp/LoudnessMeter.cpp
     src/dsp/MasterBus.cpp
     src/dsp/MasteringChain.cpp
@@ -218,6 +219,7 @@ target_sources(Focal PRIVATE
     src/engine/AudioPipelineSelfTest.cpp
     src/ui/ConsoleView.cpp
     src/ui/DimOverlay.cpp
+    src/ui/HardwareInsertEditor.cpp
     src/ui/ImportTargetPicker.cpp
     src/ui/MainComponent.cpp
     src/ui/MasteringEqEditor.cpp

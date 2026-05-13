@@ -1,5 +1,6 @@
 #include "AuxLaneComponent.h"
 #include "AuxEditorHost.h"
+#include "HardwareInsertEditor.h"
 #include "PlatformWindowing.h"
 #include "PluginPickerHelpers.h"
 #include "../dsp/AuxLaneStrip.h"
@@ -293,6 +294,43 @@ void AuxLaneComponent::refreshSlotControls (int i)
     auto& slotRef = strip.getPluginSlot (i);
     auto& ui      = slots[(size_t) i];
 
+    const int mode = strip.insertMode[(size_t) i].load (std::memory_order_relaxed);
+    if (mode == AuxLaneStrip::kInsertHardware)
+    {
+        // Hardware-active slot: show the routed channel pair so the user
+        // can see at a glance where the lane is patched. Each side
+        // (out / in) is formatted independently so a mono routing
+        // doesn't print a misleading "L-0".
+        const auto routing = lane.hardwareInserts[(size_t) i].routing.current();
+        auto formatPair = [] (int l, int r) -> juce::String
+        {
+            if (l < 0 && r < 0) return {};
+            if (r < 0)          return juce::String (l + 1);
+            if (l < 0)          return juce::String (r + 1);
+            if (l == r)         return juce::String (l + 1);
+            return juce::String (l + 1) + "-" + juce::String (r + 1);
+        };
+        const auto out = formatPair (routing.outputChL, routing.outputChR);
+        const auto in  = formatPair (routing.inputChL,  routing.inputChR);
+        juce::String label;
+        if (out.isEmpty() && in.isEmpty())
+            label = "HW (unrouted)";
+        else
+            label = juce::String ("HW: out ")
+                  + (out.isNotEmpty() ? out : juce::String ("-"))
+                  + " / in "
+                  + (in .isNotEmpty() ? in  : juce::String ("-"));
+        if (label != ui.displayedName)
+        {
+            ui.displayedName = label;
+            ui.openOrAddButton.setButtonText (label);
+        }
+        ui.bypassButton.setVisible (true);
+        ui.bypassButton.setToggleState (false, juce::dontSendNotification);
+        ui.removeButton.setVisible (true);
+        return;
+    }
+
     if (slotRef.isLoaded())
     {
         const auto name = slotRef.getLoadedName();
@@ -312,7 +350,7 @@ void AuxLaneComponent::refreshSlotControls (int i)
     else
     {
         ui.displayedName.clear();
-        ui.openOrAddButton.setButtonText ("+ Plugin");
+        ui.openOrAddButton.setButtonText ("Insert");
         ui.bypassButton.setVisible (false);
         ui.removeButton.setVisible (false);
     }
@@ -321,16 +359,55 @@ void AuxLaneComponent::refreshSlotControls (int i)
 void AuxLaneComponent::openPickerForSlot (int slotIdx)
 {
     const auto cursor = juce::Desktop::getMousePosition();
+    juce::Component::SafePointer<AuxLaneComponent> safe (this);
     pluginpicker::openPickerMenu (strip.getPluginSlot (slotIdx),
                                     slots[(size_t) slotIdx].openOrAddButton,
                                     activePluginChooser,
                                     [this, slotIdx]
                                     {
+                                        // Picking a plugin flips this slot back to Plugin mode.
+                                        strip.insertMode[(size_t) slotIdx]
+                                            .store (AuxLaneStrip::kInsertPlugin,
+                                                     std::memory_order_release);
                                         refreshSlotControls (slotIdx);
                                         rebuildSlots();
                                     },
                                     pluginpicker::PluginKind::Effects,
-                                    cursor);
+                                    cursor,
+                                    [safe, slotIdx]
+                                    {
+                                        if (auto* self = safe.getComponent())
+                                            self->openHardwareInsertEditor (slotIdx);
+                                    });
+}
+
+void AuxLaneComponent::openHardwareInsertEditor (int slotIdx)
+{
+    if (slotIdx < 0 || slotIdx >= AuxLaneParams::kMaxLanePlugins) return;
+
+    // Flip the lane's slot to Hardware mode immediately so the audio
+    // thread's crossfade gate (Phase 3) begins ramping in even before
+    // the user touches a control inside the editor.
+    strip.insertMode[(size_t) slotIdx].store (AuxLaneStrip::kInsertHardware,
+                                                std::memory_order_release);
+    refreshSlotControls (slotIdx);
+
+    juce::Component::SafePointer<AuxLaneComponent> safe (this);
+    auto editor = std::make_unique<HardwareInsertEditor> (
+        lane.hardwareInserts[(size_t) slotIdx],
+        engine.getDeviceManager(),
+        [safe, slotIdx]
+        {
+            if (auto* self = safe.getComponent())
+            {
+                self->hardwareInsertModal.close();
+                self->refreshSlotControls (slotIdx);
+            }
+        });
+
+    auto* parent = findParentComponentOfClass<juce::Component>();
+    if (parent == nullptr) parent = this;
+    hardwareInsertModal.show (*parent, std::move (editor));
 }
 
 void AuxLaneComponent::unloadSlot (int slotIdx)
@@ -498,6 +575,13 @@ void AuxLaneComponent::resized()
     if (stripMeter != nullptr) stripMeter->setBounds (stripCol);
 
     // Center column: plugin slot header + editor-host rect underneath.
+    // resized() only lays out slots[0]; extra slots would need their own
+    // sub-areas computed off getCenterArea(). The single-slot contract is
+    // enforced at compile time so adding kMaxLanePlugins > 1 forces this
+    // layout block to be revisited.
+    static_assert (AuxLaneParams::kMaxLanePlugins == 1,
+                     "AuxLaneComponent::resized assumes a single plugin slot — "
+                     "extend the layout block before raising kMaxLanePlugins.");
     auto center = getCenterArea();
     auto& ui = slots[0];
     if (strip.getPluginSlot (0).isLoaded())

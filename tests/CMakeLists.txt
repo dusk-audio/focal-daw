@@ -17,7 +17,9 @@ add_executable(focal-tests
     fade_shapes.cpp
     crossfade.cpp
     file_importer_audio.cpp
+    hardware_insert.cpp
     ${CMAKE_SOURCE_DIR}/src/dsp/BrickwallLimiter.cpp
+    ${CMAKE_SOURCE_DIR}/src/dsp/HardwareInsertSlot.cpp
     ${CMAKE_SOURCE_DIR}/src/engine/FileImporter.cpp)
 
 target_include_directories(focal-tests PRIVATE
@@ -35,6 +37,7 @@ target_link_libraries(focal-tests PRIVATE
     juce::juce_audio_basics
     juce::juce_audio_formats
     juce::juce_core
+    juce::juce_dsp
     juce::juce_graphics
     juce::juce_recommended_config_flags
     juce::juce_recommended_warning_flags)

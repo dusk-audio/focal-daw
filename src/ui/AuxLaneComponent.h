@@ -5,6 +5,7 @@
 #include <array>
 #include <memory>
 #include "../session/Session.h"
+#include "EmbeddedModal.h"
 
 namespace focal
 {
@@ -45,6 +46,7 @@ private:
     void timerCallback() override;
     void rebuildSlots();
     void openPickerForSlot (int slotIdx);
+    void openHardwareInsertEditor (int slotIdx);
     void unloadSlot (int slotIdx);
     void toggleEditorForSlot (int slotIdx);
     void refreshSlotControls (int slotIdx);
@@ -83,5 +85,6 @@ private:
     };
     std::array<SlotUI, AuxLaneParams::kMaxLanePlugins> slots;
     std::unique_ptr<juce::FileChooser> activePluginChooser;
+    EmbeddedModal hardwareInsertModal;
 };
 } // namespace focal

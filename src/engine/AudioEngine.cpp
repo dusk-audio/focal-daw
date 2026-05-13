@@ -41,6 +41,11 @@ AudioEngine::AudioEngine (Session& sessionToBindTo) : session (sessionToBindTo)
         // before any audio processing - the slot is bypassed until a
         // plugin is actually loaded, so binding here costs nothing.
         strips[(size_t) i].bindPluginManager (pluginManager);
+        // Hardware-insert side of the channel insert slot. The slot is
+        // pre-allocated; this just latches a pointer to the per-track
+        // HardwareInsertParams so the audio thread can read routing /
+        // gain / dry-wet lock-free.
+        strips[(size_t) i].bindHardwareInsert (session.track (i).hardwareInsert);
     }
     for (int i = 0; i < Session::kNumBuses; ++i)
         busStrips[(size_t) i].bind (session.bus (i).strip);
@@ -50,6 +55,12 @@ AudioEngine::AudioEngine (Session& sessionToBindTo) : session (sessionToBindTo)
         // Lanes host plugins (reverb / delay / etc.) so they need the
         // shared PluginManager to resolve files into AudioPluginInstances.
         auxLaneStrips[(size_t) i].bindPluginManager (pluginManager);
+        // Hardware-insert side of each lane slot. One bind per slot
+        // index so the audio thread can read each slot's routing /
+        // gain / dry-wet without indirection.
+        for (int s = 0; s < AuxLaneParams::kMaxLanePlugins; ++s)
+            auxLaneStrips[(size_t) i].bindHardwareInsert (
+                s, session.auxLane (i).hardwareInserts[(size_t) s]);
     }
     master.bind (session.master());
     masteringChain.bind (session.mastering());
@@ -861,6 +872,25 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 
     const auto callbackStart = juce::Time::getHighResolutionTicks();
 
+    // Cache the device-I/O pointers + channel counts for the strips'
+    // hardware-insert slots. Strips read/write through these for the
+    // duration of THIS callback only - never cached across blocks.
+    currentDeviceInputs     = inputChannelData;
+    numCurrentDeviceInputs  = numInputChannels;
+    currentDeviceOutputs    = outputChannelData;
+    numCurrentDeviceOutputs = numOutputChannels;
+
+    // Zero every device output up front. The master bus + click
+    // overwrite their assigned channels at the end of the callback via
+    // memcpy so pre-zeroing them is harmless. Hardware-insert sends
+    // accumulate into their assigned channels via `+=`, which requires
+    // a clean zero baseline. Pre-zeroing everything avoids baking in a
+    // "master is always 0/1" assumption.
+    for (int ch = 0; ch < numOutputChannels; ++ch)
+        if (outputChannelData != nullptr && outputChannelData[ch] != nullptr)
+            std::memset (outputChannelData[ch], 0,
+                          sizeof (float) * (size_t) numSamples);
+
     // Drain each MIDI input's collector into its per-input buffer for this
     // block. Each removeNextBlockOfMessages is lock-free with respect to
     // the MIDI thread's addMessageToQueue, so the audio thread never
@@ -1575,7 +1605,11 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                                                  busLPtrs, busRPtrs,
                                                  auxLanePtrsL, auxLanePtrsR,
                                                  numSamples,
-                                                 stripPasses);
+                                                 stripPasses,
+                                                 currentDeviceInputs,
+                                                 numCurrentDeviceInputs,
+                                                 currentDeviceOutputs,
+                                                 numCurrentDeviceOutputs);
         session.track (t).meterGrDb.store (strips[(size_t) t].getCurrentGrDb(),
                                             std::memory_order_relaxed);
 
@@ -1765,7 +1799,11 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 
         auxLaneStrips[(size_t) a].processStereoBlock (auxLaneL[(size_t) a].data(),
                                                         auxLaneR[(size_t) a].data(),
-                                                        numSamples);
+                                                        numSamples,
+                                                        currentDeviceInputs,
+                                                        numCurrentDeviceInputs,
+                                                        currentDeviceOutputs,
+                                                        numCurrentDeviceOutputs);
         juce::FloatVectorOperations::add (mixL.data(),
                                             auxLaneL[(size_t) a].data(),
                                             numSamples);

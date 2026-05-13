@@ -28,6 +28,21 @@ void ChannelStrip::prepare (double sampleRate, int blockSize, int oversamplingFa
     tempMono.assign ((size_t) juce::jmax (1, blockSize), 0.0f);
     tempStereoBuffer.setSize (2, juce::jmax (1, blockSize), false, false, true);
 
+    // Hardware insert + the plugin <-> hardware crossfade gate. Same
+    // 20 ms ramp as the rest of the strip so the transition feels in
+    // tempo with fader/pan smoothing already in place. The gain is
+    // initialised to MATCH the active mode so a session that restores
+    // insertMode=Empty doesn't audibly fade-down on the first block
+    // (the steady-state target for Empty is 0; without this seed the
+    // current value would be 1 and the 20 ms ramp would tick down).
+    hardwareSlot.prepare (sampleRate, blockSize);
+    activeInsertGain.reset (sampleRate, rampSeconds);
+    activeInsertMode = insertMode.load (std::memory_order_relaxed);
+    activeInsertGain.setCurrentAndTargetValue (
+        activeInsertMode == kInsertEmpty ? 0.0f : 1.0f);
+    insertScratchL.assign ((size_t) juce::jmax (1, blockSize), 0.0f);
+    insertScratchR.assign ((size_t) juce::jmax (1, blockSize), 0.0f);
+
     // Plugin slot - prepared at the same SR/BS so the audio thread never
     // sees an unprepared instance. If the slot has no plugin loaded, this
     // is essentially a no-op; if a plugin is loaded across a device-rate
@@ -236,6 +251,11 @@ void ChannelStrip::updateCompParameters() noexcept
 #endif
 }
 
+void ChannelStrip::bindHardwareInsert (const HardwareInsertParams& params) noexcept
+{
+    hardwareSlot.bind (params);
+}
+
 void ChannelStrip::processAndAccumulate (const float* inL,
                                          const float* inR,
                                          juce::MidiBuffer& trackMidi,
@@ -246,9 +266,43 @@ void ChannelStrip::processAndAccumulate (const float* inL,
                                          const std::array<float*, kNumAuxSends>& auxLaneL,
                                          const std::array<float*, kNumAuxSends>& auxLaneR,
                                          int numSamples,
-                                         bool passByGate) noexcept
+                                         bool passByGate,
+                                         const float* const* deviceInputs,
+                                         int   numDeviceInputs,
+                                         float* const*       deviceOutputs,
+                                         int   numDeviceOutputs) noexcept
 {
     juce::ScopedNoDenormals noDenormals;
+
+    // Insert-mode crossfade gate. Run once at the top of every block.
+    //   - If the user (or session-load) flipped insertMode, ramp the
+    //     gate's gain DOWN. Once it reaches zero, swap activeInsertMode
+    //     and reset the freshly-activated slot's tail state so it starts
+    //     clean. Then ramp UP to 1 on subsequent blocks.
+    //   - Steady state: the gate's target follows the active mode -
+    //     1.0 when an insert is active (plugin or hardware), 0.0 when
+    //     empty (no DSP runs at all).
+    const int req = insertMode.load (std::memory_order_acquire);
+    if (req != activeInsertMode)
+    {
+        if (activeInsertGain.getCurrentValue() > 1.0e-4f)
+        {
+            activeInsertGain.setTargetValue (0.0f);
+        }
+        else
+        {
+            activeInsertMode = req;
+            if (activeInsertMode == kInsertHardware)
+                hardwareSlot.resetTailsAndDelayLine();
+            activeInsertGain.setTargetValue (activeInsertMode == kInsertEmpty
+                                              ? 0.0f : 1.0f);
+        }
+    }
+    else
+    {
+        activeInsertGain.setTargetValue (activeInsertMode == kInsertEmpty
+                                          ? 0.0f : 1.0f);
+    }
 
     lastProcessedPtr = nullptr;
     lastProcessedR   = nullptr;
@@ -324,11 +378,47 @@ void ChannelStrip::processAndAccumulate (const float* inL,
         if (paramsRef->phaseInvert.load (std::memory_order_relaxed))
             juce::FloatVectorOperations::negate (tempMono.data(), tempMono.data(), numSamples);
 
-        // Per-channel insert plugin (post-phase-invert, pre-EQ). No-op when no
-        // plugin loaded or slot bypassed; lock-free atomic read of the instance
-        // pointer otherwise.
-        pluginMidiScratch.clear();
-        pluginSlot.processMonoBlock (tempMono.data(), numSamples, pluginMidiScratch);
+        // Per-channel insert (post-phase-invert, pre-EQ). insertMode picks
+        // plugin or hardware; activeInsertGain ramps the post-insert signal
+        // against the pre-insert copy so mode flips are click-free and an
+        // empty slot just bypasses both.
+        //
+        // Defensive clamp - insertScratchL/R are sized to prepare()'s
+        // blockSize. Audio hosts can hand us oversized blocks during
+        // transitions; we refuse to allocate on the audio thread.
+        jassert (numSamples <= (int) insertScratchL.size());
+        const int safeSamples = juce::jmin (numSamples, (int) insertScratchL.size());
+
+        std::memcpy (insertScratchL.data(), tempMono.data(),
+                      sizeof (float) * (size_t) safeSamples);
+        if (activeInsertMode == kInsertPlugin)
+        {
+            pluginMidiScratch.clear();
+            pluginSlot.processMonoBlock (tempMono.data(), numSamples, pluginMidiScratch);
+        }
+        else if (activeInsertMode == kInsertHardware)
+        {
+            // Mono path: duplicate to L+R, run the stereo hardware insert,
+            // collapse back to mono by averaging. Hardware return is
+            // inherently stereo (it routes to a physical input pair) so
+            // the average is the most faithful mono interpretation.
+            std::memcpy (insertScratchR.data(), tempMono.data(),
+                          sizeof (float) * (size_t) safeSamples);
+            hardwareSlot.processStereoBlock (tempMono.data(), insertScratchR.data(),
+                                              numSamples,
+                                              deviceInputs, numDeviceInputs,
+                                              deviceOutputs, numDeviceOutputs);
+            for (int i = 0; i < safeSamples; ++i)
+                tempMono[(size_t) i] = 0.5f
+                    * (tempMono[(size_t) i] + insertScratchR[(size_t) i]);
+        }
+        // Crossfade pre-insert vs post-insert by the gate.
+        for (int i = 0; i < safeSamples; ++i)
+        {
+            const float g = activeInsertGain.getNextValue();
+            tempMono[(size_t) i] = (1.0f - g) * insertScratchL[(size_t) i]
+                                   +        g  * tempMono[(size_t) i];
+        }
 
 #if FOCAL_HAS_DUSK_DSP
         if (oversamplerStages > 0 && oversamplerMono != nullptr)
@@ -399,7 +489,14 @@ void ChannelStrip::processAndAccumulate (const float* inL,
             juce::FloatVectorOperations::clear (R, numSamples);
             // Instrument plugins read MIDI and write audio. Phase invert is
             // a no-op against generated content, so we don't apply it here.
+            // The instrument plugin IS the audio source - the crossfade
+            // gate doesn't apply (no dry to blend with, no "empty" valid
+            // for a MIDI track that has an instrument loaded). We still
+            // tick the smoother to keep its state in sync in case the
+            // track later flips to audio mode.
             pluginSlot.processStereoBlock (L, R, numSamples, trackMidi);
+            for (int i = 0; i < numSamples; ++i)
+                activeInsertGain.getNextValue();
         }
         else
         {
@@ -412,8 +509,35 @@ void ChannelStrip::processAndAccumulate (const float* inL,
                 juce::FloatVectorOperations::negate (R, R, numSamples);
             }
 
-            pluginMidiScratch.clear();
-            pluginSlot.processStereoBlock (L, R, numSamples, pluginMidiScratch);
+            // Defensive clamp - insertScratchL/R sized at prepare() to
+            // blockSize. Audio hosts can hand us oversized blocks during
+            // transitions; the audio thread refuses to allocate.
+            jassert (numSamples <= (int) insertScratchL.size());
+            const int safeSamples = juce::jmin (numSamples, (int) insertScratchL.size());
+
+            // Stash pre-insert for the crossfade gate.
+            std::memcpy (insertScratchL.data(), L, sizeof (float) * (size_t) safeSamples);
+            std::memcpy (insertScratchR.data(), R, sizeof (float) * (size_t) safeSamples);
+
+            if (activeInsertMode == kInsertPlugin)
+            {
+                pluginMidiScratch.clear();
+                pluginSlot.processStereoBlock (L, R, numSamples, pluginMidiScratch);
+            }
+            else if (activeInsertMode == kInsertHardware)
+            {
+                hardwareSlot.processStereoBlock (L, R, numSamples,
+                                                  deviceInputs, numDeviceInputs,
+                                                  deviceOutputs, numDeviceOutputs);
+            }
+            // Crossfade pre vs post by the gate (empty mode collapses to
+            // pre, plugin/hardware ramp from pre to their processed output).
+            for (int i = 0; i < safeSamples; ++i)
+            {
+                const float g = activeInsertGain.getNextValue();
+                L[i] = (1.0f - g) * insertScratchL[(size_t) i] + g * L[i];
+                R[i] = (1.0f - g) * insertScratchR[(size_t) i] + g * R[i];
+            }
         }
 
 #if FOCAL_HAS_DUSK_DSP

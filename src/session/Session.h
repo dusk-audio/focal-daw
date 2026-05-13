@@ -75,6 +75,45 @@ struct AutomationLane
 float evaluateLane (const AutomationLane& lane, juce::int64 t,
                     AutomationParam param) noexcept;
 
+// External hardware-insert routing. These fields change together when
+// the user flips the Output / Input dropdown in the HardwareInsertEditor,
+// so the audio thread must observe them as one consistent snapshot.
+// Wrapped in AtomicSnapshot<> inside HardwareInsertParams below.
+struct HardwareInsertRouting
+{
+    int outputChL      = -1;   // -1 = unassigned (insert SEND disabled)
+    int outputChR      = -1;
+    int inputChL       = -1;   // -1 = unassigned (insert RETURN silent)
+    int inputChR       = -1;
+    int latencySamples =  0;   // round-trip, samples
+    int format         =  0;   // 0 = Stereo, 1 = Mid/Side
+};
+
+// Per-strip hardware-insert state. Sibling of ChannelStripParams - the
+// channel insert slot is "either a plugin OR a hardware insert", with
+// the live mode chosen by the strip's atomic insertMode flag (added in
+// Phase 3). Audio-thread reads lock-free via plain atomic loads (scalar
+// knobs) and AtomicSnapshot acquire (routing). Message thread writes
+// via plain stores + AtomicSnapshot::publish.
+struct HardwareInsertParams
+{
+    std::atomic<bool>                     enabled { false };
+    AtomicSnapshot<HardwareInsertRouting> routing;
+
+    std::atomic<float> outputGainDb { 0.0f };   // SEND trim
+    std::atomic<float> inputGainDb  { 0.0f };   // RETURN trim
+    std::atomic<float> dryWet       { 1.0f };   // 0 = dry only, 1 = wet only
+
+    // Ping handshake. UI thread sets pingPending = true; audio thread
+    // runs the chirp + capture + correlation, writes the measured sample
+    // lag to pingResult, then clears pingPending. Both fields are
+    // mutable so the audio thread can update them through a
+    // const HardwareInsertParams* reference (same pattern as the meter
+    // atomics on Bus / Master params).
+    mutable std::atomic<bool> pingPending { false };
+    mutable std::atomic<int>  pingResult  { -1 };
+};
+
 // Phase 1a-minimal channel strip parameters: fader, pan, mute, solo. The full
 // strip (HPF, 4-band EQ, FET/Opto compressor, sends, bus assigns) lands in
 // later chunks once the DSP cores are lifted out of the Dusk plugins repo.
@@ -588,6 +627,13 @@ struct Track
     juce::Colour colour;
     ChannelStripParams strip;
 
+    // Hardware-insert side of the channel insert slot. The strip's
+    // insert is "either a plugin OR a hardware insert", chosen at audio
+    // time by an atomic mode flag added in Phase 3. The two slots
+    // co-exist as zero-cost-when-idle DSP objects so swapping between
+    // them needs no allocation.
+    HardwareInsertParams hardwareInsert;
+
     std::atomic<int> mode { (int) Mode::Mono };  // store as int for atomic-ness
 
     // Recording surface
@@ -716,6 +762,12 @@ struct BusParams
     std::atomic<float> compRatio     { 4.0f };    // 1..10
     std::atomic<float> compAttackMs  { 10.0f };
     std::atomic<float> compReleaseMs { 100.0f };
+    // When true, the UniversalCompressor Bus mode runs its hardware-style
+    // program-dependent release (150-450 ms) and the explicit release knob
+    // is ignored. Default true because the donor's bus-comp choice param
+    // clamps anything outside its discrete set to "Auto" anyway, so this
+    // matches what existing sessions have actually been hearing.
+    std::atomic<bool>  compReleaseAuto { true };
     std::atomic<float> compMakeupDb  { 0.0f };
 
     // Metering - written from the audio thread, read from UI. mutable for
@@ -781,6 +833,12 @@ struct AuxLane
     // strings = no plugin loaded in that slot.
     std::array<juce::String, AuxLaneParams::kMaxLanePlugins> pluginDescriptionXml;
     std::array<juce::String, AuxLaneParams::kMaxLanePlugins> pluginStateBase64;
+
+    // Hardware-insert side of each lane slot. Parallel to the plugin
+    // state above - the slot's audio mode (Plugin vs Hardware) lives on
+    // the strip; Session just persists the parameter values so a saved
+    // hardware-insert configuration survives a reload.
+    std::array<HardwareInsertParams, AuxLaneParams::kMaxLanePlugins> hardwareInserts;
 };
 
 struct MasterBusParams
@@ -819,6 +877,8 @@ struct MasterBusParams
     std::atomic<float> compRatio      { 4.0f };    // 1..10
     std::atomic<float> compAttackMs   { 10.0f };   // 0.1..50
     std::atomic<float> compReleaseMs  { 100.0f };  // 50..1000
+    // See BusParams::compReleaseAuto for why this defaults to true.
+    std::atomic<bool>  compReleaseAuto { true };
     std::atomic<float> compMakeupDb   { 0.0f };    // -10..+20
 
     // Metering - written from the audio thread each block, polled by UI.
@@ -869,6 +929,8 @@ struct MasteringParams
     std::atomic<float> compRatio      { 2.0f };
     std::atomic<float> compAttackMs   { 30.0f };
     std::atomic<float> compReleaseMs  { 250.0f };
+    // See BusParams::compReleaseAuto.
+    std::atomic<bool>  compReleaseAuto { true };
     std::atomic<float> compMakeupDb   { 0.0f };
 
     // Brickwall limiter (final stage). Default ceiling -0.3 dB matches

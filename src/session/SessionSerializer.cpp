@@ -180,6 +180,28 @@ juce::DynamicObject::Ptr trackToObject (const Track& t)
     comp->setProperty ("vca_output",    t.strip.compVcaOutput.load());
     obj->setProperty ("comp", juce::var (comp));
 
+    // External hardware-insert state. The routing snapshot is read via
+    // AtomicSnapshot::current() (message-thread side), the scalar knobs
+    // via plain atomic loads. Persisting the fields here lets a saved
+    // configuration survive a session reload regardless of whether the
+    // strip's insertMode (Phase 3) is currently set to Hardware - if
+    // the user flips back to Hardware later, the settings are restored.
+    {
+        auto* hwi = new juce::DynamicObject();
+        hwi->setProperty ("enabled",         t.hardwareInsert.enabled.load());
+        const auto& routing = t.hardwareInsert.routing.current();
+        hwi->setProperty ("output_ch_l",     routing.outputChL);
+        hwi->setProperty ("output_ch_r",     routing.outputChR);
+        hwi->setProperty ("input_ch_l",      routing.inputChL);
+        hwi->setProperty ("input_ch_r",      routing.inputChR);
+        hwi->setProperty ("latency_samples", routing.latencySamples);
+        hwi->setProperty ("format",          routing.format);
+        hwi->setProperty ("output_gain_db",  t.hardwareInsert.outputGainDb.load());
+        hwi->setProperty ("input_gain_db",   t.hardwareInsert.inputGainDb .load());
+        hwi->setProperty ("dry_wet",         t.hardwareInsert.dryWet      .load());
+        obj->setProperty ("hardware_insert", juce::var (hwi));
+    }
+
     juce::Array<juce::var> regions;
     for (auto& r : t.regions)
     {
@@ -388,6 +410,7 @@ juce::DynamicObject::Ptr busToObject (const Bus& a)
     obj->setProperty ("comp_ratio",       a.strip.compRatio.load());
     obj->setProperty ("comp_attack_ms",   a.strip.compAttackMs.load());
     obj->setProperty ("comp_release_ms",  a.strip.compReleaseMs.load());
+    obj->setProperty ("comp_release_auto", a.strip.compReleaseAuto.load());
     obj->setProperty ("comp_makeup_db",   a.strip.compMakeupDb.load());
 
     return obj;
@@ -542,6 +565,31 @@ void restoreTrack (Track& t, const juce::var& v)
         loadF ("vca_attack",    t.strip.compVcaAttack);
         loadF ("vca_release",   t.strip.compVcaRelease);
         loadF ("vca_output",    t.strip.compVcaOutput);
+    }
+
+    if (auto hwi = v["hardware_insert"]; hwi.isObject())
+    {
+        if (hwi.hasProperty ("enabled"))
+            t.hardwareInsert.enabled.store ((bool) hwi["enabled"]);
+
+        auto fresh = std::make_unique<HardwareInsertRouting>();
+        // current() returns the existing snapshot - seeds any field that
+        // the JSON doesn't carry (forward-compat with older sessions).
+        *fresh = t.hardwareInsert.routing.current();
+        if (hwi.hasProperty ("output_ch_l"))     fresh->outputChL      = (int) hwi["output_ch_l"];
+        if (hwi.hasProperty ("output_ch_r"))     fresh->outputChR      = (int) hwi["output_ch_r"];
+        if (hwi.hasProperty ("input_ch_l"))      fresh->inputChL       = (int) hwi["input_ch_l"];
+        if (hwi.hasProperty ("input_ch_r"))      fresh->inputChR       = (int) hwi["input_ch_r"];
+        if (hwi.hasProperty ("latency_samples")) fresh->latencySamples = (int) hwi["latency_samples"];
+        if (hwi.hasProperty ("format"))          fresh->format         = (int) hwi["format"];
+        t.hardwareInsert.routing.publish (std::move (fresh));
+
+        if (hwi.hasProperty ("output_gain_db"))
+            t.hardwareInsert.outputGainDb.store ((float) (double) hwi["output_gain_db"]);
+        if (hwi.hasProperty ("input_gain_db"))
+            t.hardwareInsert.inputGainDb .store ((float) (double) hwi["input_gain_db"]);
+        if (hwi.hasProperty ("dry_wet"))
+            t.hardwareInsert.dryWet      .store ((float) (double) hwi["dry_wet"]);
     }
 
     // Automation - per-strip mode + per-param point arrays. Lanes not in
@@ -742,6 +790,7 @@ void restoreBus (Bus& a, const juce::var& v)
     if (v.hasProperty ("comp_ratio"))      a.strip.compRatio    .store ((float) (double) v["comp_ratio"]);
     if (v.hasProperty ("comp_attack_ms"))  a.strip.compAttackMs .store ((float) (double) v["comp_attack_ms"]);
     if (v.hasProperty ("comp_release_ms")) a.strip.compReleaseMs.store ((float) (double) v["comp_release_ms"]);
+    if (v.hasProperty ("comp_release_auto")) a.strip.compReleaseAuto.store ((bool) v["comp_release_auto"]);
     if (v.hasProperty ("comp_makeup_db"))  a.strip.compMakeupDb .store ((float) (double) v["comp_makeup_db"]);
 }
 } // namespace
@@ -778,6 +827,24 @@ bool SessionSerializer::save (const Session& s, const juce::File& target)
             auto* slot = new juce::DynamicObject();
             slot->setProperty ("plugin_desc_xml", lane.pluginDescriptionXml[(size_t) p]);
             slot->setProperty ("plugin_state",    lane.pluginStateBase64[(size_t) p]);
+
+            // Hardware-insert side of this slot. Same shape as the
+            // Track::hardwareInsert block above.
+            auto* hwi = new juce::DynamicObject();
+            const auto& hw = lane.hardwareInserts[(size_t) p];
+            hwi->setProperty ("enabled",         hw.enabled.load());
+            const auto& routing = hw.routing.current();
+            hwi->setProperty ("output_ch_l",     routing.outputChL);
+            hwi->setProperty ("output_ch_r",     routing.outputChR);
+            hwi->setProperty ("input_ch_l",      routing.inputChL);
+            hwi->setProperty ("input_ch_r",      routing.inputChR);
+            hwi->setProperty ("latency_samples", routing.latencySamples);
+            hwi->setProperty ("format",          routing.format);
+            hwi->setProperty ("output_gain_db",  hw.outputGainDb.load());
+            hwi->setProperty ("input_gain_db",   hw.inputGainDb .load());
+            hwi->setProperty ("dry_wet",         hw.dryWet      .load());
+            slot->setProperty ("hardware_insert", juce::var (hwi));
+
             slots.add (juce::var (slot));
         }
         obj->setProperty ("plugin_slots", slots);
@@ -821,6 +888,7 @@ bool SessionSerializer::save (const Session& s, const juce::File& target)
     mast->setProperty ("comp_ratio",        s.mastering().compRatio.load());
     mast->setProperty ("comp_attack_ms",    s.mastering().compAttackMs.load());
     mast->setProperty ("comp_release_ms",   s.mastering().compReleaseMs.load());
+    mast->setProperty ("comp_release_auto", s.mastering().compReleaseAuto.load());
     mast->setProperty ("comp_makeup_db",    s.mastering().compMakeupDb.load());
     mast->setProperty ("limiter_enabled",   s.mastering().limiterEnabled.load());
     mast->setProperty ("limiter_drive_db",  s.mastering().limiterDriveDb.load());
@@ -942,6 +1010,30 @@ bool SessionSerializer::load (Session& s, const juce::File& source)
                     if (! sv.isObject()) continue;
                     lane.pluginDescriptionXml[(size_t) p] = sv["plugin_desc_xml"].toString();
                     lane.pluginStateBase64[(size_t) p]    = sv["plugin_state"]   .toString();
+
+                    if (auto hwi = sv["hardware_insert"]; hwi.isObject())
+                    {
+                        auto& hw = lane.hardwareInserts[(size_t) p];
+                        if (hwi.hasProperty ("enabled"))
+                            hw.enabled.store ((bool) hwi["enabled"]);
+
+                        auto fresh = std::make_unique<HardwareInsertRouting>();
+                        *fresh = hw.routing.current();
+                        if (hwi.hasProperty ("output_ch_l"))     fresh->outputChL      = (int) hwi["output_ch_l"];
+                        if (hwi.hasProperty ("output_ch_r"))     fresh->outputChR      = (int) hwi["output_ch_r"];
+                        if (hwi.hasProperty ("input_ch_l"))      fresh->inputChL       = (int) hwi["input_ch_l"];
+                        if (hwi.hasProperty ("input_ch_r"))      fresh->inputChR       = (int) hwi["input_ch_r"];
+                        if (hwi.hasProperty ("latency_samples")) fresh->latencySamples = (int) hwi["latency_samples"];
+                        if (hwi.hasProperty ("format"))          fresh->format         = (int) hwi["format"];
+                        hw.routing.publish (std::move (fresh));
+
+                        if (hwi.hasProperty ("output_gain_db"))
+                            hw.outputGainDb.store ((float) (double) hwi["output_gain_db"]);
+                        if (hwi.hasProperty ("input_gain_db"))
+                            hw.inputGainDb .store ((float) (double) hwi["input_gain_db"]);
+                        if (hwi.hasProperty ("dry_wet"))
+                            hw.dryWet      .store ((float) (double) hwi["dry_wet"]);
+                    }
                 }
             }
         }
@@ -990,6 +1082,7 @@ bool SessionSerializer::load (Session& s, const juce::File& source)
         loadF ("comp_ratio",        m.compRatio);
         loadF ("comp_attack_ms",    m.compAttackMs);
         loadF ("comp_release_ms",   m.compReleaseMs);
+        loadB ("comp_release_auto", m.compReleaseAuto);
         loadF ("comp_makeup_db",    m.compMakeupDb);
         loadB ("limiter_enabled",   m.limiterEnabled);
         loadF ("limiter_drive_db",  m.limiterDriveDb);

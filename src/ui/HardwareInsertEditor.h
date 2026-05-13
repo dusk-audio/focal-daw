@@ -1,0 +1,74 @@
+#pragma once
+
+#include <juce_audio_devices/juce_audio_devices.h>
+#include <juce_gui_basics/juce_gui_basics.h>
+#include <functional>
+#include "../session/Session.h"
+
+namespace focal
+{
+// In-window panel for configuring a HardwareInsertParams. Mirrors Logic
+// Pro's I/O insert dialog: Output / Output Volume / Input / Input Volume
+// / Latency Detection (Ping) / Latency Offset / Dry-Wet / Stereo|Mid-Side.
+//
+// Hosted inside an EmbeddedModal owned by the calling channel-strip /
+// aux-lane component. The panel mutates `params` directly via the same
+// AtomicSnapshot::publish + atomic-store pattern the rest of Focal uses
+// for cross-thread parameter updates, so changes take effect on the
+// audio thread one block after the user moves a control.
+//
+// Pings + the ping-result polling timer land in Phase 6; the v1 panel
+// exposes the manual latency-offset slider only.
+class HardwareInsertEditor final : public juce::Component,
+                                       private juce::Timer
+{
+public:
+    HardwareInsertEditor (HardwareInsertParams& params,
+                          juce::AudioDeviceManager& deviceManager,
+                          std::function<void()> onDone);
+    ~HardwareInsertEditor() override;
+
+    void paint (juce::Graphics&) override;
+    void resized() override;
+
+    static constexpr int kPanelW = 480;
+    static constexpr int kPanelH = 460;
+
+private:
+    void populateDropdowns();
+    HardwareInsertRouting currentRouting() const;
+    void publishRoutingFromUi();
+    void timerCallback() override;
+
+    HardwareInsertParams& params;
+    juce::AudioDeviceManager& deviceManager;
+    std::function<void()> onDoneCallback;
+
+    juce::Label headerLabel;
+
+    juce::Label   outVolLabel;
+    juce::Slider  outVolSlider;
+    juce::Label   outChLabel;
+    juce::ComboBox outChCombo;
+
+    juce::Label   inChLabel;
+    juce::ComboBox inChCombo;
+    juce::Label   inVolLabel;
+    juce::Slider  inVolSlider;
+
+    juce::Label      latencyLabel;
+    juce::TextButton pingButton  { "Ping" };
+    juce::Label      latencySamplesLabel;
+    juce::Slider     latencySlider;
+
+    juce::Label  dryWetLabel;
+    juce::Slider dryWetSlider;
+
+    juce::Label       formatLabel;
+    juce::ToggleButton formatStereoButton  { "Stereo" };
+    juce::ToggleButton formatMidSideButton { "Mid/Side" };
+
+    juce::TextButton cancelButton { "Cancel" };
+    juce::TextButton doneButton   { "Done" };
+};
+} // namespace focal

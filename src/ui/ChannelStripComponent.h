@@ -242,6 +242,14 @@ private:
     void openPluginPicker();
     void unloadPluginSlot();
     void refreshPluginSlotButton();
+
+    // External Hardware Insert UX. The picker calls back into
+    // openHardwareInsertEditor on selection; that flips the strip's
+    // insertMode to Hardware (via AudioEngine::getChannelStrip(t)
+    // .insertMode.store) and shows HardwareInsertEditor inside an
+    // EmbeddedModal owned by this strip.
+    void openHardwareInsertEditor();
+    EmbeddedModal hardwareInsertModal;
     // Right-click context menu for the plugin slot button. Mirrors the
     // plugin items inside showColourMenu() but is reachable directly from
     // the slot button so users don't have to discover the strip-body
