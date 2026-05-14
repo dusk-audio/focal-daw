@@ -33,7 +33,7 @@ These are not implementation details — they're the product. Anything that viol
 
 1. **16 channels maximum.** Fixed. Two banks of 8 to match standard control surfaces.
 2. **Fixed signal chain.** No reordering EQ / comp. No adding / removing processors. Channel-strip processing order is the same on every track, every time.
-3. **No waveform editing.** Region-level move / split / delete / trim only. No zoom-to-sample, no pencil tool.
+3. **Simple waveform editing.** Region-level move / split / delete / trim only.
 4. **Console-style automation only.** Write / Read / Touch via gesture; no curve drawing.
 5. **Everything visible.** No tabs, no hidden panels (MIDI piano roll overlay is the only exception).
 6. **No preferences sprawl.** Audio device config and that's it.
