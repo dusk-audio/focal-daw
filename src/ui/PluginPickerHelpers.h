@@ -61,9 +61,14 @@ void runScanModal (PluginManager& manager);
 
 // Run a juce::FileChooser to pick a plugin file (.vst3 / .so / .lv2),
 // loading on selection. `chooserOwner` keeps the chooser alive across the
-// async callback. `onChange` runs on successful load.
+// async callback. `onChange` runs on successful load. `expectedKind`
+// gates the load: if the picked plugin's effect/instrument flag doesn't
+// match (e.g. user browses to a synth on an audio track expecting an
+// effect), the slot is unloaded and an alert is shown. PluginKind::Effects
+// rejects instruments; PluginKind::Instruments rejects effects.
 void openFileChooser (PluginSlot& slot,
                        std::unique_ptr<juce::FileChooser>& chooserOwner,
-                       std::function<void()> onChange);
+                       std::function<void()> onChange,
+                       PluginKind expectedKind = PluginKind::Effects);
 }
 } // namespace focal

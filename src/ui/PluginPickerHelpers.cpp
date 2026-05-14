@@ -51,9 +51,39 @@ void runScanModal (PluginManager& manager)
         nullptr);
 }
 
+namespace
+{
+// Returns true when the plugin currently loaded into `slot` matches the
+// expected kind. Empty slot returns false (caller decides whether to
+// treat that as success or failure). Message-thread only - calls into
+// the plugin via fillInPluginDescription.
+bool loadedKindMatches (PluginSlot& slot, PluginKind kind)
+{
+    if (! slot.isLoaded()) return false;
+    const bool isInstrument = slot.isLoadedPluginInstrument();
+    return (kind == PluginKind::Instruments) ? isInstrument : ! isInstrument;
+}
+
+void rejectMismatchedKind (PluginSlot& slot, PluginKind kind)
+{
+    slot.unload();
+    const juce::String wanted = (kind == PluginKind::Instruments)
+                                  ? "instrument" : "effect";
+    const juce::String got    = (kind == PluginKind::Instruments)
+                                  ? "effect" : "instrument";
+    juce::AlertWindow::showMessageBoxAsync (
+        juce::AlertWindow::WarningIcon,
+        "Plugin kind mismatch",
+        "This slot expects an " + wanted + " plugin but the chosen file is an "
+        + got + ". The slot was left empty. Use a MIDI track for instrument "
+        "plugins and an audio track for effect plugins.");
+}
+} // namespace
+
 void openFileChooser (PluginSlot& slot,
                        std::unique_ptr<juce::FileChooser>& chooserOwner,
-                       std::function<void()> onChange)
+                       std::function<void()> onChange,
+                       PluginKind expectedKind)
 {
     // VST3 plugins are bundles (directories), so the chooser allows both
     // files and directories. canSelectDirectories lets the user pick the
@@ -76,7 +106,7 @@ void openFileChooser (PluginSlot& slot,
         juce::FileBrowserComponent::openMode |
         juce::FileBrowserComponent::canSelectFiles |
         juce::FileBrowserComponent::canSelectDirectories,
-        [&slot, &chooserOwner, onChange = std::move (onChange)] (const juce::FileChooser& chooser)
+        [&slot, &chooserOwner, onChange = std::move (onChange), expectedKind] (const juce::FileChooser& chooser)
         {
             const auto file = chooser.getResult();
 
@@ -94,6 +124,12 @@ void openFileChooser (PluginSlot& slot,
             const bool ok = slot.loadFromFile (file, error);
             chooserOwner.reset();
             if (! ok) { showLoadFailureAlert (error); return; }
+            if (! loadedKindMatches (slot, expectedKind))
+            {
+                rejectMismatchedKind (slot, expectedKind);
+                if (onChange) onChange();
+                return;
+            }
             if (onChange) onChange();
         });
 }
@@ -233,7 +269,7 @@ void openPickerMenu (PluginSlot& slot,
             }
             if (result == kIdBrowseFile)
             {
-                openFileChooser (*slotPtr, *chooserOwnerPtr, std::move (onChangeCopy));
+                openFileChooser (*slotPtr, *chooserOwnerPtr, std::move (onChangeCopy), kind);
                 return;
             }
 
@@ -242,10 +278,36 @@ void openPickerMenu (PluginSlot& slot,
             if (idx < 0 || idx >= sharedDescriptions->size()) return;
             const auto& desc = sharedDescriptions->getReference (idx);
 
+            // Defence-in-depth: getInstrument/EffectDescriptions already
+            // filtered by kind, but a stale KnownPluginList entry (e.g.
+            // scanned before the plugin was reclassified by the vendor)
+            // could slip through. Verify the description matches the
+            // expected kind before loading.
+            const bool descIsInstrument = desc.isInstrument;
+            const bool descMatches = (kind == PluginKind::Instruments)
+                                       ? descIsInstrument
+                                       : ! descIsInstrument;
+            if (! descMatches)
+            {
+                rejectMismatchedKind (*slotPtr, kind);
+                if (onChangeCopy) onChangeCopy();
+                return;
+            }
+
             juce::String error;
             if (! slotPtr->loadFromDescription (desc, error))
             {
                 showLoadFailureAlert (error);
+                return;
+            }
+            // Post-load sanity check: rare for the loaded plugin's
+            // self-reported flag to differ from its scanned description,
+            // but it has been seen (plugin reports differently when
+            // hosted vs scanned). Reject + warn in that case too.
+            if (! loadedKindMatches (*slotPtr, kind))
+            {
+                rejectMismatchedKind (*slotPtr, kind);
+                if (onChangeCopy) onChangeCopy();
                 return;
             }
             if (onChangeCopy) onChangeCopy();
