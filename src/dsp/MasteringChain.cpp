@@ -78,7 +78,15 @@ void MasteringChain::updateCompParameters() noexcept
     storeAtom (compBusThreshAtom,  paramsRef->compThreshDb.load   (std::memory_order_relaxed));
     storeAtom (compBusRatioAtom,   paramsRef->compRatio.load      (std::memory_order_relaxed));
     storeAtom (compBusAttackAtom,  paramsRef->compAttackMs.load   (std::memory_order_relaxed));
-    storeAtom (compBusReleaseAtom, paramsRef->compReleaseMs.load  (std::memory_order_relaxed));
+    // bus_release is a Choice {0.1s, 0.3s, 0.6s, 1.2s, Auto}; see
+    // MasterBus::updateCompParameters for the mapping rationale.
+    const bool autoRel = paramsRef->compReleaseAuto.load (std::memory_order_relaxed);
+    const float relMs  = paramsRef->compReleaseMs.load   (std::memory_order_relaxed);
+    const float relIdx = autoRel ? 4.0f
+                       : (relMs < 200.0f ? 0.0f
+                       : (relMs < 450.0f ? 1.0f
+                       : (relMs < 900.0f ? 2.0f : 3.0f)));
+    storeAtom (compBusReleaseAtom, relIdx);
     storeAtom (compBusMakeupAtom,  paramsRef->compMakeupDb.load   (std::memory_order_relaxed));
 }
 #endif

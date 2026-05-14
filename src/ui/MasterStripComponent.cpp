@@ -50,8 +50,9 @@ MasterStripComponent::MasterStripComponent (MasterBusParams& p,
     nameLabel.setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
     addAndMakeVisible (nameLabel);
 
-    // Analog VU meter, fed by the post-master peak atoms so it tracks the
-    // exact stereo signal that hits the audio device. Two needles (L + R).
+    // Analog VU meter, fed by the post-master RMS atoms so it tracks the
+    // exact stereo signal that hits the audio device with VU-style 300 ms
+    // ballistics applied to the linear RMS amplitudes. Two needles (L + R).
     vuMeter = std::make_unique<AnalogVuMeter> (
         &params.meterPostMasterRmsL, &params.meterPostMasterRmsR);
     addAndMakeVisible (*vuMeter);
@@ -126,8 +127,32 @@ MasterStripComponent::MasterStripComponent (MasterBusParams& p,
     compThreshold.onValueChange = [this] { params.compThreshDb .store ((float) compThreshold.getValue(), std::memory_order_relaxed); };
     compRatio    .onValueChange = [this] { params.compRatio    .store ((float) compRatio    .getValue(), std::memory_order_relaxed); };
     compAttack   .onValueChange = [this] { params.compAttackMs .store ((float) compAttack   .getValue(), std::memory_order_relaxed); };
-    compRelease  .onValueChange = [this] { params.compReleaseMs.store ((float) compRelease  .getValue(), std::memory_order_relaxed); };
     compMakeup   .onValueChange = [this] { params.compMakeupDb .store ((float) compMakeup   .getValue(), std::memory_order_relaxed); };
+
+    // SSL-style release: the top of the knob's travel = AUTO. Below that
+    // the user dials a continuous release in ms; the display reads "AUTO"
+    // only at the very top.
+    compRelease.textFromValueFunction = [] (double v) -> juce::String
+    {
+        return v >= 999.5 ? juce::String ("AUTO") : juce::String ((int) std::round (v));
+    };
+    compRelease.valueFromTextFunction = [] (const juce::String& s) -> double
+    {
+        return s.trim().equalsIgnoreCase ("auto") ? 1000.0 : (double) s.getDoubleValue();
+    };
+    compRelease.onValueChange = [this]
+    {
+        const double v = compRelease.getValue();
+        const bool autoOn = v >= 999.5;
+        params.compReleaseAuto.store (autoOn, std::memory_order_relaxed);
+        if (! autoOn)
+            params.compReleaseMs.store ((float) v, std::memory_order_relaxed);
+    };
+    // Sync initial slider position with the auto flag so the knob lands
+    // at the AUTO detent when sessions saved in Auto mode are restored.
+    if (params.compReleaseAuto.load (std::memory_order_relaxed))
+        compRelease.setValue (1000.0, juce::dontSendNotification);
+    compRelease.updateText();
 
     addAndMakeVisible (compThreshold); addAndMakeVisible (compRatio);
     addAndMakeVisible (compAttack);    addAndMakeVisible (compRelease);
@@ -413,7 +438,7 @@ void MasterStripComponent::resized()
     // the meter row reads consistently across the console.
     if (vuMeter != nullptr)
     {
-        const int vuH = juce::jmax (32, area.getWidth() * 5 / 12);
+        const int vuH = juce::jmax (40, area.getWidth() * 7 / 12);
         vuMeter->setBounds (area.removeFromTop (vuH));
         area.removeFromTop (4);
     }
