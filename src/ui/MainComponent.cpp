@@ -923,9 +923,7 @@ void MainComponent::resized()
         rowBounds = area.removeFromTop (kRowH);
     }
 
-    const int stageW = 110;
     constexpr int kStageBtnH = 28;
-    const int stageBlockW = stageW * 4;
     const int stageY = rowBounds.getY() + (rowBounds.getHeight() - kStageBtnH) / 2;
 
     // Banking decision (kept before stageX so the stage block can flow
@@ -933,6 +931,12 @@ void MainComponent::resized()
     const bool needsBanking = (consoleView != nullptr) && (! inFullscreenView)
                              && (area.getWidth() < consoleView->fixedWidthFor16Tracks());
     const bool transportCompact = rowBounds.getWidth() < TransportBar::kCompactTransportWidth;
+
+    // Stage tabs shrink in compact mode so the bank overlay + stage block
+    // don't crowd against the transport bar's right cluster at the OS
+    // minimum window width.
+    const int stageW = transportCompact ? 92 : 110;
+    const int stageBlockW = stageW * 4;
     const int  kBankBtnW   = transportCompact ? 90 : 130;
     constexpr int kBankBtnGap = 6;
 
@@ -1841,7 +1845,7 @@ void MainComponent::openBounceDialog()
     });
 }
 
-void MainComponent::runAudioImportFlow (juce::File source,
+void MainComponent::runAudioImportFlow (const juce::File& source,
                                             juce::int64 timelineStart,
                                             int trackHint)
 {
@@ -1923,7 +1927,7 @@ void MainComponent::runAudioImportFlow (juce::File source,
     importTargetModal.show (*this, std::move (picker));
 }
 
-void MainComponent::runMidiImportFlow (juce::File source,
+void MainComponent::runMidiImportFlow (const juce::File& source,
                                           juce::int64 timelineStart,
                                           int trackHint)
 {
@@ -1978,6 +1982,20 @@ void MainComponent::runMidiImportFlow (juce::File source,
             auto* self = safeThis.getComponent();
             if (self == nullptr) return;
             self->importTargetModal.close();
+
+            // Mirror the audio-import recheck: the user could have hit
+            // Play between opening the picker and confirming a target.
+            // MidiRegions is AtomicSnapshot-mutated (RT-safe by design)
+            // so this isn't a strict data-race guard, but importing a
+            // region mid-playback produces confusing UX (notes appear
+            // partway through the take). Bail consistently with the
+            // audio path.
+            if (! self->engine.getTransport().isStopped())
+            {
+                showImportError ("Import MIDI",
+                                         "Stop playback before importing files.");
+                return;
+            }
 
             auto& track = self->session.track (trackIndex);
 

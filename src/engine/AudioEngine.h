@@ -129,19 +129,45 @@ public:
 
     // Per-strip access - UI components reach into the engine to call
     // PluginSlot::loadFromFile etc. on the message thread. The audio path
-    // still owns the strips; this is just a typed accessor.
-    ChannelStrip&       getStrip (int idx)       noexcept { return strips[(size_t) idx]; }
-    const ChannelStrip& getStrip (int idx) const noexcept { return strips[(size_t) idx]; }
-    BusStrip&        getBusStrip (int idx)       noexcept { return busStrips[(size_t) idx]; }
-    const BusStrip&  getBusStrip (int idx) const noexcept { return busStrips[(size_t) idx]; }
-    AuxLaneStrip&        getAuxLaneStrip (int idx)       noexcept { return auxLaneStrips[(size_t) idx]; }
-    const AuxLaneStrip&  getAuxLaneStrip (int idx) const noexcept { return auxLaneStrips[(size_t) idx]; }
+    // still owns the strips; this is just a typed accessor. Bounds
+    // checking via jassert keeps debug builds loud about out-of-range
+    // indices; release builds rely on the caller respecting Session::
+    // kNumTracks / kNumBuses / kNumAuxLanes.
+    ChannelStrip& getChannelStrip (int idx) noexcept
+    {
+        jassert (idx >= 0 && idx < (int) strips.size());
+        return strips[(size_t) idx];
+    }
+    const ChannelStrip& getChannelStrip (int idx) const noexcept
+    {
+        jassert (idx >= 0 && idx < (int) strips.size());
+        return strips[(size_t) idx];
+    }
+    // Legacy alias kept so existing call sites (RegionEditActions,
+    // ConsoleView) compile without churn. Forwards to getChannelStrip.
+    ChannelStrip&       getStrip (int idx)       noexcept { return getChannelStrip (idx); }
+    const ChannelStrip& getStrip (int idx) const noexcept { return getChannelStrip (idx); }
 
-    // Per-track channel strip access. UI needs this to read/write the
-    // strip's insertMode atom when the user flips between Plugin and
-    // Hardware modes via the picker.
-    ChannelStrip&        getChannelStrip (int idx)       noexcept { return strips[(size_t) idx]; }
-    const ChannelStrip&  getChannelStrip (int idx) const noexcept { return strips[(size_t) idx]; }
+    BusStrip& getBusStrip (int idx) noexcept
+    {
+        jassert (idx >= 0 && idx < (int) busStrips.size());
+        return busStrips[(size_t) idx];
+    }
+    const BusStrip& getBusStrip (int idx) const noexcept
+    {
+        jassert (idx >= 0 && idx < (int) busStrips.size());
+        return busStrips[(size_t) idx];
+    }
+    AuxLaneStrip& getAuxLaneStrip (int idx) noexcept
+    {
+        jassert (idx >= 0 && idx < (int) auxLaneStrips.size());
+        return auxLaneStrips[(size_t) idx];
+    }
+    const AuxLaneStrip& getAuxLaneStrip (int idx) const noexcept
+    {
+        jassert (idx >= 0 && idx < (int) auxLaneStrips.size());
+        return auxLaneStrips[(size_t) idx];
+    }
 
     // Convenience for the UI; runs on the message thread. Coordinates the
     // RecordManager / PlaybackEngine state changes around Transport.

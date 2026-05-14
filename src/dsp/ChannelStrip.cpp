@@ -419,6 +419,10 @@ void ChannelStrip::processAndAccumulate (const float* inL,
             tempMono[(size_t) i] = (1.0f - g) * insertScratchL[(size_t) i]
                                    +        g  * tempMono[(size_t) i];
         }
+        // Smoother tail-advance for oversized host blocks - see the matching
+        // stereo path below for the rationale.
+        for (int i = safeSamples; i < numSamples; ++i)
+            activeInsertGain.getNextValue();
 
 #if FOCAL_HAS_DUSK_DSP
         if (oversamplerStages > 0 && oversamplerMono != nullptr)
@@ -538,6 +542,13 @@ void ChannelStrip::processAndAccumulate (const float* inL,
                 L[i] = (1.0f - g) * insertScratchL[(size_t) i] + g * L[i];
                 R[i] = (1.0f - g) * insertScratchR[(size_t) i] + g * R[i];
             }
+            // Tick the smoother across the tail of an oversized block so its
+            // internal counter stays aligned with the rest of the chain
+            // (EQ / Comp / fader smoothers all advance per-sample over the
+            // full numSamples below). Without this the crossfade smoother
+            // drifts behind on every clamped block.
+            for (int i = safeSamples; i < numSamples; ++i)
+                activeInsertGain.getNextValue();
         }
 
 #if FOCAL_HAS_DUSK_DSP

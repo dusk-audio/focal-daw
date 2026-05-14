@@ -162,15 +162,28 @@ void AuxEditorHost::applyEditorLayout()
     // idle pump than construction. If the editor has grown since we last
     // sized the panel, the inner editor will clip when resized() centres
     // it. Resize the panel to fit the editor's current native size first,
-    // then run the layout so resizable editors stretch and non-resizable
+    // then grow the host window to match (this is a borderless
+    // DocumentWindow so the content area equals the panel size), then
+    // run the layout so resizable editors stretch and non-resizable
     // editors recentre cleanly.
     if (auto* editor = editorPanel->getEditor())
     {
         const int ew = editor->getWidth();
         const int eh = editor->getHeight();
         if (ew > editorPanel->getWidth() || eh > editorPanel->getHeight())
-            editorPanel->setSize (juce::jmax (editorPanel->getWidth(),  ew),
-                                    juce::jmax (editorPanel->getHeight(), eh));
+        {
+            const int newW = juce::jmax (editorPanel->getWidth(),  ew);
+            const int newH = juce::jmax (editorPanel->getHeight(), eh);
+            editorPanel->setSize (newW, newH);
+            // Grow the host's window to match. setContentNonOwned's
+            // resizeToFitContent flag only sizes the window on initial
+            // attach, so mutating the panel later requires an explicit
+            // setSize call here. The host is borderless / no title bar,
+            // so content size == window size.
+            if (getWidth() < newW || getHeight() < newH)
+                setSize (juce::jmax (getWidth(),  newW),
+                          juce::jmax (getHeight(), newH));
+        }
     }
     editorPanel->resized();
 }

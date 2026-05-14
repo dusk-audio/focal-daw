@@ -21,10 +21,12 @@ AuxView::AuxView (Session& session, AudioEngine& engine)
 {
     for (int i = 0; i < Session::kNumAuxLanes; ++i)
     {
-        // Selector button
+        // Selector button. Use full-saturation accent (matches stage-tab
+        // saturation; the earlier 0.7f multiplier made these read as
+        // washed-out next to the stage tabs they sit underneath).
         auto& btn = selectorButtons[(size_t) i];
         btn.setButtonText (session.auxLane (i).name);
-        styleSelectorButton (btn, session.auxLane (i).colour.withMultipliedSaturation (0.7f));
+        styleSelectorButton (btn, session.auxLane (i).colour);
         if (i == 0)
             btn.setConnectedEdges (juce::Button::ConnectedOnRight);
         else if (i == Session::kNumAuxLanes - 1)

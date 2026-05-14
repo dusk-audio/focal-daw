@@ -88,7 +88,7 @@ AudioImportResult importAudio (const AudioImportRequest& req)
         result.errorMessage = "Source file does not exist: " + req.source.getFullPathName();
         return result;
     }
-    if (req.sessionSampleRate <= 0.0)
+    if (! std::isfinite (req.sessionSampleRate) || req.sessionSampleRate <= 0.0)
     {
         result.errorMessage = "Invalid session sample rate";
         return result;
@@ -268,12 +268,18 @@ MidiImportResult importMidi (const MidiImportRequest& req)
         result.errorMessage = "MIDI file does not exist: " + req.source.getFullPathName();
         return result;
     }
-    if (req.sessionSampleRate <= 0.0)
+    if (! std::isfinite (req.sessionSampleRate) || req.sessionSampleRate <= 0.0)
     {
         result.errorMessage = "Invalid session sample rate";
         return result;
     }
-    if (req.sessionBpm <= 0.0f)
+    // Upper bound for BPM picked well above anything musically plausible
+    // - rejects NaN/inf as well as nonsense values from a hand-edited
+    // session.json that would otherwise turn into ridiculous tick-to-
+    // sample conversions inside the importer's scheduler math.
+    constexpr float kMaxBpm = 999.0f;
+    if (! std::isfinite (req.sessionBpm) || req.sessionBpm <= 0.0f
+        || req.sessionBpm > kMaxBpm)
     {
         result.errorMessage = "Invalid session tempo";
         return result;

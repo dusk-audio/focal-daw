@@ -1,0 +1,92 @@
+name: Windows build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Focal (MSVC x64 Release)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Focal
+        uses: actions/checkout@v4
+
+      - name: Clone JUCE 8.0.4
+        shell: bash
+        run: |
+          git clone --depth 1 --branch 8.0.4 \
+            https://github.com/juce-framework/JUCE.git \
+            "${RUNNER_TEMP}/JUCE"
+
+      - name: Clone Dusk plugins (donor DSP)
+        shell: bash
+        run: |
+          git clone --depth 1 \
+            https://github.com/dusk-audio/dusk-audio-plugins.git \
+            "${RUNNER_TEMP}/plugins"
+
+      - name: Configure (CMake / Visual Studio 17 2022 / x64)
+        shell: bash
+        run: |
+          cmake -S . -B build \
+            -G "Visual Studio 17 2022" -A x64 \
+            -DJUCE_PATH="${RUNNER_TEMP}/JUCE" \
+            -DDUSK_PLUGINS_PATH="${RUNNER_TEMP}/plugins"
+
+      - name: Build (Release)
+        shell: bash
+        run: cmake --build build --config Release -j
+
+      - name: Upload Focal.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: Focal-windows-x64
+          path: build/Focal_artefacts/Release/Focal.exe
+          retention-days: 14
+          if-no-files-found: error
+
+  tests:
+    name: Catch2 tests (MSVC x64 Release)
+    runs-on: windows-latest
+    needs: build
+
+    steps:
+      - name: Checkout Focal
+        uses: actions/checkout@v4
+
+      - name: Clone JUCE 8.0.4
+        shell: bash
+        run: |
+          git clone --depth 1 --branch 8.0.4 \
+            https://github.com/juce-framework/JUCE.git \
+            "${RUNNER_TEMP}/JUCE"
+
+      - name: Clone Dusk plugins (donor DSP)
+        shell: bash
+        run: |
+          git clone --depth 1 \
+            https://github.com/dusk-audio/dusk-audio-plugins.git \
+            "${RUNNER_TEMP}/plugins"
+
+      - name: Configure tests
+        shell: bash
+        run: |
+          cmake -S . -B build-tests \
+            -G "Visual Studio 17 2022" -A x64 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DFOCAL_BUILD_TESTS=ON \
+            -DJUCE_PATH="${RUNNER_TEMP}/JUCE" \
+            -DDUSK_PLUGINS_PATH="${RUNNER_TEMP}/plugins"
+
+      - name: Build tests
+        shell: bash
+        run: cmake --build build-tests --target focal-tests --config Release -j
+
+      - name: Run tests
+        shell: bash
+        run: ctest --test-dir build-tests --output-on-failure -C Release

@@ -178,6 +178,16 @@ void ConsoleView::resized()
             if (overflow > 0)
                 masterW = juce::jmax (1, masterW - overflow);
         }
+        // After all three steps, channelW / busW / masterW are clamped
+        // to a minimum of 1 via juce::jmax, so totalOf() can still
+        // exceed availForStrips in pathologically narrow windows
+        // (visibleChannels + Session::kNumBuses + 1 px per strip is
+        // the hard floor). That case is treated as a window-sizing
+        // bug; minimumContentWidth() returns the threshold below
+        // which the OS-enforced resize floor should never let the
+        // user drag the window, so we don't add a runtime guard here.
+        // If you see this trigger at runtime, raise the resize-limit
+        // floor in MainWindow rather than papering over it in layout.
     }
 
     int x = area.getX();

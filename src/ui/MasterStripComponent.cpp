@@ -451,7 +451,7 @@ void MasterStripComponent::resized()
     constexpr int kKnobBlockH = kKnobDia + kTextBoxH + 2;   // 42
     constexpr int kKnobBlockW = 40;                          // textbox fits "4.0:1", "1100"
 
-    auto layKnobRow = [] (juce::Rectangle<int>& parent, int n)
+    auto layKnobRow = [&] (juce::Rectangle<int>& parent, int n)
                        -> std::pair<juce::Rectangle<int>, juce::Rectangle<int>>
     {
         auto labelRow = parent.removeFromTop (10);

@@ -472,9 +472,12 @@ void BusComponent::resized()
     nameLabel.setBounds (area.removeFromTop (20));
     area.removeFromTop (3);
 
-    // Analog VU meter spans the full strip width with the photo's ~2.4:1
+    // Analog VU meter spans the full strip width at a ~12:7 (~1.71:1)
     // aspect ratio. Sits between the name label and the EQ block so the
-    // user reads level first (the most common monitoring task).
+    // user reads level first (the most common monitoring task). The
+    // squatter 12:7 ratio (vs the 12:5 photo aspect) leaves more
+    // vertical room for the EQ + comp section below at narrow strip
+    // widths.
     if (vuMeter != nullptr)
     {
         const int vuH = juce::jmax (36, area.getWidth() * 7 / 12);
@@ -496,7 +499,7 @@ void BusComponent::resized()
     constexpr int kKnobBlockH = kKnobDia + kTextBoxH + 2;   // 42
     constexpr int kKnobBlockW = 40;
 
-    auto layKnobRow = [] (juce::Rectangle<int>& parent, int n)
+    auto layKnobRow = [&] (juce::Rectangle<int>& parent, int n)
                        -> std::pair<juce::Rectangle<int>, juce::Rectangle<int>>
     {
         auto labelRow = parent.removeFromTop (10);

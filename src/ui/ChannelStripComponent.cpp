@@ -921,15 +921,17 @@ ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
         addChildComponent (auxKnobLabels[(size_t) i]);
     }
 
-    // Plugin slot button - left-click to load/replace via file chooser;
-    // right-click to unload. Empty state shows "+ Plugin".
+    // Insert slot button. Empty state shows "Insert"; plugin loaded
+    // shows the plugin name; hardware insert shows "HW: out N-M / in N-M"
+    // (or "HW (unrouted)"). refreshPluginSlotButton drives the label.
     pluginSlotButton.setColour (juce::TextButton::buttonColourId,   juce::Colour (0xff222226));
     pluginSlotButton.setColour (juce::TextButton::textColourOffId,  juce::Colour (0xff9080c0));
     pluginSlotButton.setColour (juce::TextButton::textColourOnId,   juce::Colour (0xffd0c0e0));
     pluginSlotButton.setTooltip (juce::CharPointer_UTF8 (
-        "Empty: click to pick a plugin from your system (VST3 / LV2 etc.). "
-        "Loaded: click to toggle the plugin editor; right-click for "
-        "Replace / Remove."));
+        "Empty: click to pick a plugin (VST3 / LV2) or an External "
+        "Hardware Insert. Loaded plugin: click to toggle the editor; "
+        "right-click for Replace / Remove. Hardware insert: click to "
+        "open the routing editor."));
     pluginSlotButton.onClick = [this]
     {
         if (! pluginSlot.isLoaded())
@@ -2962,8 +2964,8 @@ void ChannelStripComponent::resized()
         if (compMeter != nullptr)
             compMeter->setBounds (meterRect);
 
-        auto layoutKnobCell = [] (juce::Rectangle<int> cell,
-                                   juce::Slider& knob, juce::Label& label)
+        auto layoutKnobCell = [&] (juce::Rectangle<int> cell,
+                                    juce::Slider& knob, juce::Label& label)
         {
             label.setBounds (cell.removeFromTop (kCompKnobLabelH));
             knob.setBounds  (cell.getX(), cell.getY(), cell.getWidth(), kCompKnobBlockH);

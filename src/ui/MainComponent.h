@@ -105,10 +105,10 @@ private:
     // target-picker modal with the given source + timeline position;
     // trackHint (>=0) biases the picker's recommendation to that row
     // when the dropped file is compatible.
-    void runAudioImportFlow (juce::File source,
+    void runAudioImportFlow (const juce::File& source,
                               juce::int64 timelineStart,
                               int trackHint);
-    void runMidiImportFlow  (juce::File source,
+    void runMidiImportFlow  (const juce::File& source,
                               juce::int64 timelineStart,
                               int trackHint);
 

@@ -130,6 +130,11 @@ void AuxLaneStrip::processStereoBlock (float* L, float* R, int numSamples,
             L[i] = (1.0f - g) * insertScratchL[(size_t) i] + g * L[i];
             R[i] = (1.0f - g) * insertScratchR[(size_t) i] + g * R[i];
         }
+        // Smoother tail-advance on oversized host blocks so the gate's
+        // counter stays aligned with the lane's return-gain smoother (which
+        // ticks numSamples times further down).
+        for (int i = safeSamples; i < numSamples; ++i)
+            activeInsertGain[sIdx].getNextValue();
     }
 
     // Return level + meter peak.
