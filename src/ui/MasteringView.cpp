@@ -396,23 +396,36 @@ void MasteringView::resized()
     sourceFileLabel.setBounds (header);
     area.removeFromTop (8);
 
-    // ── Transport row ──
+    // ── Transport row (now also hosts the LUFS readouts so the
+    //    loudness target context sits next to the playback cluster
+    //    instead of being buried at the bottom of the view). Width-
+    //    clamped placement so narrow windows don't render widgets
+    //    with negative widths. ──
     auto transportRow = area.removeFromTop (36);
-    rewindButton.setBounds (transportRow.removeFromLeft (50));
-    transportRow.removeFromLeft (4);
-    playButton.setBounds   (transportRow.removeFromLeft (70));
-    transportRow.removeFromLeft (4);
-    stopButton.setBounds   (transportRow.removeFromLeft (70));
-    transportRow.removeFromLeft (16);
-    clockLabel.setBounds   (transportRow.removeFromLeft (140));
-    transportRow.removeFromLeft (16);
-    grLabel.setBounds      (transportRow);
+    const auto place = [&transportRow] (juce::Component& c, int preferredW, int gapAfter = 0)
+    {
+        const int available = transportRow.getWidth();
+        if (available <= 0) { c.setVisible (false); return; }
+        c.setVisible (true);
+        const int w = juce::jmin (preferredW, available);
+        c.setBounds (transportRow.removeFromLeft (w));
+        if (gapAfter > 0) transportRow.removeFromLeft (juce::jmin (gapAfter, transportRow.getWidth()));
+    };
+    place (rewindButton,    50,  4);
+    place (playButton,      70,  4);
+    place (stopButton,      70, 16);
+    place (clockLabel,     140, 12);
+    place (grLabel,        140, 12);
+    place (truePeak,       100,  4);
+    place (lufsM,           90,  4);
+    place (lufsS,           90,  4);
+    place (lufsI,          120,  6);
+    place (resetLoudness,   60,  0);
     area.removeFromTop (8);
 
-    // ── Bottom strip (export + meters + LUFS + target) ──
-    // We pull the bottom strip BEFORE the waveform so the waveform can
-    // expand to fill whatever vertical room is left.
-    auto bottom = area.removeFromBottom (108);
+    // ── Bottom strip (export + L/R meters + target). LUFS readouts
+    //    moved up to the transport row above. ──
+    auto bottom = area.removeFromBottom (66);
     area.removeFromBottom (6);
 
     auto meterRow = bottom.removeFromTop (28);
@@ -421,18 +434,6 @@ void MasteringView::resized()
     meterR.setBounds (meterRow.removeFromRight (140));
     meterRow.removeFromRight (4);
     meterL.setBounds (meterRow.removeFromRight (140));
-    bottom.removeFromTop (4);
-
-    auto lufsRow = bottom.removeFromTop (24);
-    truePeak.setBounds (lufsRow.removeFromLeft (110));
-    lufsRow.removeFromLeft (6);
-    lufsM.setBounds    (lufsRow.removeFromLeft (110));
-    lufsRow.removeFromLeft (4);
-    lufsS.setBounds    (lufsRow.removeFromLeft (110));
-    lufsRow.removeFromLeft (4);
-    lufsI.setBounds    (lufsRow.removeFromLeft (130));
-    lufsRow.removeFromLeft (6);
-    resetLoudness.setBounds (lufsRow.removeFromLeft (70));
     bottom.removeFromTop (4);
 
     auto targetRow = bottom.removeFromTop (24);
@@ -457,7 +458,10 @@ void MasteringView::resized()
     constexpr int kPanelGap = 8;
     const int totalW    = juce::jmax (0, panelsRow.getWidth() - 2 * kPanelGap);
     const int eqW       = (int) std::round (totalW * 0.42);
-    const int limW      = (int) std::round (totalW * 0.22);
+    // Limiter shrunk 0.22 -> 0.14. Two sliders + a release knob don't
+    // need a fifth of the row; the freed width goes to the multiband
+    // comp panel which has 4 columns of GR bars + a row of knobs.
+    const int limW      = (int) std::round (totalW * 0.14);
     const int compW     = totalW - eqW - limW;
 
     auto eqPanel   = panelsRow.removeFromLeft (eqW);

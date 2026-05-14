@@ -363,14 +363,17 @@ void AuxLaneComponent::openPickerForSlot (int slotIdx)
     pluginpicker::openPickerMenu (strip.getPluginSlot (slotIdx),
                                     slots[(size_t) slotIdx].openOrAddButton,
                                     activePluginChooser,
-                                    [this, slotIdx]
+                                    [safe, slotIdx]
                                     {
-                                        // Picking a plugin flips this slot back to Plugin mode.
-                                        strip.insertMode[(size_t) slotIdx]
-                                            .store (AuxLaneStrip::kInsertPlugin,
-                                                     std::memory_order_release);
-                                        refreshSlotControls (slotIdx);
-                                        rebuildSlots();
+                                        if (auto* self = safe.getComponent())
+                                        {
+                                            // Picking a plugin flips this slot back to Plugin mode.
+                                            self->strip.insertMode[(size_t) slotIdx]
+                                                .store (AuxLaneStrip::kInsertPlugin,
+                                                         std::memory_order_release);
+                                            self->refreshSlotControls (slotIdx);
+                                            self->rebuildSlots();
+                                        }
                                     },
                                     pluginpicker::PluginKind::Effects,
                                     cursor,

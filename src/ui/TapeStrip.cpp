@@ -25,6 +25,23 @@ TapeStrip::TapeStrip (Session& s, AudioEngine& e) : session (s), engine (e)
     wireZoom (zoomOutButton, "Zoom out (-)",        [this] { zoomByFactor (1.0f / 1.25f); });
     wireZoom (zoomInButton,  "Zoom in (=)",         [this] { zoomByFactor (1.25f); });
     wireZoom (zoomFitButton, "Zoom to fit (Cmd+0)", [this] { zoomFit(); });
+
+    // SNAP: lives alongside the zoom HUD so the user can toggle grid
+    // snapping without having to look up at the transport bar.
+    snapToggle.setClickingTogglesState (true);
+    snapToggle.setColour (juce::TextButton::buttonColourId,   juce::Colour (0xff282830));
+    snapToggle.setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xff5e4a18));   // dim amber when on
+    snapToggle.setColour (juce::TextButton::textColourOffId,  juce::Colour (0xff909094));
+    snapToggle.setColour (juce::TextButton::textColourOnId,   juce::Colour (0xffe0c050));
+    snapToggle.setMouseClickGrabsKeyboardFocus (false);
+    snapToggle.setWantsKeyboardFocus (false);
+    snapToggle.setTooltip ("Snap region drags to the grid.");
+    snapToggle.setToggleState (engine.getSession().snapToGrid, juce::dontSendNotification);
+    snapToggle.onClick = [this]
+    {
+        engine.getSession().snapToGrid = snapToggle.getToggleState();
+    };
+    addAndMakeVisible (snapToggle);
 }
 
 TapeStrip::~TapeStrip()
@@ -354,6 +371,10 @@ void TapeStrip::resized()
     place (zoomFitButton, kFitW);
     place (zoomInButton,  kBtnW);
     place (zoomOutButton, kBtnW);
+    // SNAP sits left of the zoom cluster. Slightly wider since the
+    // label is 4 characters; matches the SNAP width that used to live
+    // on the transport bar.
+    place (snapToggle, 48);
 }
 
 void TapeStrip::timerCallback()
@@ -3139,7 +3160,7 @@ void TapeStrip::filesDropped (const juce::StringArray& files, int x, int y)
         if (rowBounds (t).contains (x, y)) { trackHint = t; break; }
 
     const auto col = tracksColumnBounds();
-    const int clampedX = juce::jmax (col.getX(), x);
+    const int clampedX = juce::jlimit (col.getX(), col.getRight(), x);
     const auto timelineStart = sampleAtX (clampedX);
 
     // Route the first compatible file. Multi-file drop is out of scope

@@ -193,10 +193,14 @@ private:
     // inside the content range.
     juce::int64 scrollSamples = 0;
 
-    // Tiny zoom HUD glued to the top-right of the ruler band.
+    // Tiny zoom HUD glued to the top-right of the ruler band. Snap is
+    // co-located here (moved from the transport bar) so the gesture
+    // controls that drive arrangement-surface behaviour all live on the
+    // arrangement surface itself.
     juce::TextButton zoomOutButton { "-" };
     juce::TextButton zoomInButton  { "+" };
     juce::TextButton zoomFitButton { "Fit" };
+    juce::TextButton snapToggle    { "SNAP" };
 
     // Caches so the timer can detect track color / name changes and repaint.
     // Without these, the strip's only repaint trigger is playhead motion, so

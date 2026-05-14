@@ -186,6 +186,49 @@ void TransportIconButton::paintButton (juce::Graphics& g, bool isMouseOver,
             g.fillEllipse (c.x - 1.2f, c.y - 1.2f, 2.4f, 2.4f);
             break;
         }
+        case Icon::Tuner:
+        {
+            // Tuning fork: two vertical prongs joined by a U-bend,
+            // a stem dropping below the bend, and a small bulb at the
+            // bottom of the stem (concert-fork silhouette). Built from
+            // a single stroked path for clarity at small sizes.
+            const float w  = iconBox.getWidth();
+            const float h  = iconBox.getHeight();
+            const float cx = iconBox.getCentreX();
+            const float topY    = iconBox.getY() + h * 0.05f;
+            const float bendY   = iconBox.getY() + h * 0.55f;
+            const float stemBot = iconBox.getBottom() - h * 0.10f;
+            const float prongDx = w * 0.20f;
+            const float bendR   = w * 0.18f;
+
+            juce::Path fork;
+            // Left prong, top down to the start of the U-bend.
+            fork.startNewSubPath (cx - prongDx, topY);
+            fork.lineTo          (cx - prongDx, bendY);
+            // U-bend from left prong to right prong.
+            fork.cubicTo (cx - prongDx, bendY + bendR,
+                            cx + prongDx, bendY + bendR,
+                            cx + prongDx, bendY);
+            // Right prong, bottom up to the top.
+            fork.lineTo (cx + prongDx, topY);
+
+            // Stem: line from the bottom of the U-bend down to the bulb.
+            juce::Path stem;
+            stem.startNewSubPath (cx, bendY + bendR);
+            stem.lineTo          (cx, stemBot - 1.5f);
+
+            g.strokePath (fork, juce::PathStrokeType (1.6f,
+                                                       juce::PathStrokeType::curved,
+                                                       juce::PathStrokeType::rounded));
+            g.strokePath (stem, juce::PathStrokeType (1.6f,
+                                                       juce::PathStrokeType::curved,
+                                                       juce::PathStrokeType::rounded));
+            // Bulb at the stem's tip.
+            const float bulbR = w * 0.07f;
+            g.fillEllipse (cx - bulbR, stemBot - bulbR * 2.0f,
+                             bulbR * 2.0f, bulbR * 2.0f);
+            break;
+        }
         case Icon::Metronome:
         {
             // Metronome silhouette: trapezoid body + a swinging arm
@@ -418,18 +461,9 @@ TransportBar::TransportBar (AudioEngine& engineRef) : engine (engineRef)
         b.setColour (juce::TextButton::textColourOnId,   juce::Colours::white);
     };
 
-    styleModeToggle (snapToggle,  juce::Colour (0xffd0a040));   // amber when on
     // clickToggle is now a TransportIconButton — paints from its ctor
     // colour, no TextButton styling needed.
     styleModeToggle (countInToggle, juce::Colour (0xff60c060));   // green: same family as CLICK
-
-    snapToggle.setTooltip ("Snap region drags to 1-second boundaries.");
-    snapToggle.setToggleState (engine.getSession().snapToGrid, juce::dontSendNotification);
-    snapToggle.onClick = [this]
-    {
-        engine.getSession().snapToGrid = snapToggle.getToggleState();
-    };
-    addAndMakeVisible (snapToggle);
 
     // Loop / Punch / Keyboard icon buttons in the transport cluster. Loop +
     // Punch are toggle buttons (state mirrors transport flags); Keyboard
@@ -521,8 +555,6 @@ TransportBar::TransportBar (AudioEngine& engineRef) : engine (engineRef)
     // Selection of which track to tune lives on MainComponent (it knows
     // the focused track from the TapeStrip selection); this button just
     // toggles the overlay.
-    tuneButton.setColour (juce::TextButton::buttonColourId,  juce::Colour (0xff202024));
-    tuneButton.setColour (juce::TextButton::textColourOffId, juce::Colour (0xff70d0a0));
     tuneButton.setTooltip ("Tuner - shows the pitch of the selected track's input. "
                             "Click a track first, then press TUNE.");
     tuneButton.onClick = [this] { if (onTunerToggle) onTunerToggle(); };
@@ -763,8 +795,6 @@ void TransportBar::refreshButtonStates()
                                  juce::dontSendNotification);
     punchButton.setToggleState (engine.getTransport().isPunchEnabled(),
                                  juce::dontSendNotification);
-    snapToggle.setToggleState  (engine.getSession().snapToGrid,
-                                juce::dontSendNotification);
     clickToggle.setToggleState (engine.getSession().metronomeEnabled.load(),
                                 juce::dontSendNotification);
     countInToggle.setToggleState (engine.getSession().countInEnabled.load(),
@@ -895,10 +925,14 @@ void TransportBar::resized()
     {
         area.removeFromRight (4);
     }
-    tuneButton.setBounds     (area.removeFromRight (compact ? 54 : 60).reduced (1, 4));
-    area.removeFromRight (compact ? 8 : 12);
-
-    snapToggle.setBounds  (area.removeFromRight (compact ? 30 : 54).reduced (1, 4));
+    // Tune is now a circular TransportIconButton (tuning-fork glyph)
+    // - keep its bounds square so the disc renders round like the rest
+    // of the transport cluster.
+    {
+        auto rect = area.removeFromRight (kBtnDia);
+        const int pad = juce::jmax (0, (rect.getHeight() - kBtnDia) / 2);
+        tuneButton.setBounds (rect.reduced (0, pad));
+    }
     area.removeFromRight (compact ? 8 : 12);
 
     area.removeFromLeft (12);
@@ -957,14 +991,12 @@ void TransportBar::syncCompactLabels (bool compact)
     const bool tapeExpanded = tapeToggle.getToggleState();
     if (compact)
     {
-        snapToggle .setButtonText ("S");
         tapeToggle .setButtonText (tapeExpanded
             ? juce::CharPointer_UTF8 ("\xe2\x96\xbe")    // "▾"
             : juce::CharPointer_UTF8 ("\xe2\x96\xb8")); // "▸"
     }
     else
     {
-        snapToggle .setButtonText ("SNAP");
         tapeToggle .setButtonText (tapeExpanded
             ? juce::CharPointer_UTF8 ("\xe2\x96\xbe SUMMARY")    // "▾ SUMMARY"
             : juce::CharPointer_UTF8 ("\xe2\x96\xb8 SUMMARY")); // "▸ SUMMARY"

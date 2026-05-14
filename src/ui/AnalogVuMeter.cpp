@@ -274,7 +274,6 @@ void AnalogVuMeter::rebuildCachedFace()
     const float tickLenMaj  = arcRadius * 0.12f;
     const float tickLenMin  = arcRadius * 0.06f;
     baselineRad             = arcRadius * 0.78f;
-    juce::ignoreUnused (bounds);
 
     // Curved baseline arc — one continuous black stroke spanning the full
     // sweep, with a red overlay over the 0..+3 segment. Drawing black

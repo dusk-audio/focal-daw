@@ -1085,9 +1085,6 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             std::memcpy (outputChannelData[0], mixL.data(), sizeof (float) * (size_t) numSamples);
         if (numOutputChannels >= 2 && outputChannelData[1] != nullptr)
             std::memcpy (outputChannelData[1], mixR.data(), sizeof (float) * (size_t) numSamples);
-        for (int ch = 2; ch < numOutputChannels; ++ch)
-            if (auto* out = outputChannelData[ch])
-                std::memset (out, 0, sizeof (float) * (size_t) numSamples);
 
         const auto sr = currentSampleRate.load (std::memory_order_relaxed);
         if (sr > 0.0)
@@ -1836,9 +1833,6 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         std::memcpy (outputChannelData[0], mixL.data(), sizeof (float) * (size_t) numSamples);
     if (numOutputChannels >= 2 && outputChannelData[1] != nullptr)
         std::memcpy (outputChannelData[1], mixR.data(), sizeof (float) * (size_t) numSamples);
-    for (int ch = 2; ch < numOutputChannels; ++ch)
-        if (auto* out = outputChannelData[ch])
-            std::memset (out, 0, sizeof (float) * (size_t) numSamples);
 
     if (isPlaying || isRecording)
     {

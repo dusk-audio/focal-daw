@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include <memory>
+#include <stdexcept>
 
 using Catch::Matchers::WithinAbs;
 
@@ -89,7 +90,11 @@ struct TempScope
         dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
                   .getChildFile ("focal-fileimporter-tests")
                   .getChildFile (juce::Uuid().toDashedString());
-        dir.createDirectory();
+        const auto result = dir.createDirectory();
+        if (result.failed())
+            throw std::runtime_error ("TempScope failed to create temp dir '"
+                                       + dir.getFullPathName().toStdString()
+                                       + "': " + result.getErrorMessage().toStdString());
     }
     ~TempScope() { dir.deleteRecursively(); }
 };
@@ -142,8 +147,10 @@ TEST_CASE ("FileImporter: 96k mono -> 48k session preserves length", "[FileImpor
     focal::fileimport::AudioImportRequest req;
     req.source            = src;
     req.audioDir          = tmp.dir;
+    req.trackIndex        = 0;
     req.sessionSampleRate = 48000.0;
     req.targetChannels    = 1;
+    req.timelineStart     = 0;
 
     const auto res = focal::fileimport::importAudio (req);
     REQUIRE (res.ok);

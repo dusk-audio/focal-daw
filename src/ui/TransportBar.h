@@ -15,7 +15,7 @@ class TransportIconButton final : public juce::Button
 {
 public:
     enum class Icon { Stop, Play, Record, Rewind, Forward, Loop, Punch, Keyboard,
-                       Bars, TimeClock, Metronome };
+                       Bars, TimeClock, Metronome, Tuner };
 
     TransportIconButton (const juce::String& name, Icon icon, juce::Colour activeColour);
 
@@ -115,7 +115,9 @@ private:
     bool        rewIsScrubbing  = false;
     bool        ffwdIsScrubbing = false;
     juce::int64 lastScrubTickMs = 0;
-    juce::TextButton snapToggle    { "SNAP" };
+    // SNAP relocated to TapeStrip's zoom HUD - the gesture controls
+    // that govern arrangement-surface behaviour all live on that
+    // surface now.
     TransportIconButton clickToggle { "Metronome",
                                           TransportIconButton::Icon::Metronome,
                                           juce::Colour (0xff60c060) };
@@ -123,7 +125,9 @@ private:
     juce::Label      bpmCaption;
     juce::Label      bpmValue;
     juce::TextButton tapButton      { "TAP" };
-    juce::TextButton tuneButton     { "TUNE" };
+    TransportIconButton tuneButton  { "Tune",
+                                          TransportIconButton::Icon::Tuner,
+                                          juce::Colour (0xff70d0a0) };
 
     void syncCompactLabels (bool compact);
     // Right-click on the PUNCH toggle opens a popup with pre-roll /

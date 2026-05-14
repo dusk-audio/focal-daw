@@ -34,6 +34,11 @@ public:
     HardwareInsertSlot();
     ~HardwareInsertSlot();
 
+    HardwareInsertSlot (const HardwareInsertSlot&) = delete;
+    HardwareInsertSlot& operator= (const HardwareInsertSlot&) = delete;
+    HardwareInsertSlot (HardwareInsertSlot&&) = delete;
+    HardwareInsertSlot& operator= (HardwareInsertSlot&&) = delete;
+
     // Message thread. Sets up the per-channel delay lines and the
     // smoothers. Safe to call multiple times - idempotent.
     void prepare (double sampleRate, int blockSize);

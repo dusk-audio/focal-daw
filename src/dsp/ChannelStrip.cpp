@@ -394,7 +394,7 @@ void ChannelStrip::processAndAccumulate (const float* inL,
         if (activeInsertMode == kInsertPlugin)
         {
             pluginMidiScratch.clear();
-            pluginSlot.processMonoBlock (tempMono.data(), numSamples, pluginMidiScratch);
+            pluginSlot.processMonoBlock (tempMono.data(), safeSamples, pluginMidiScratch);
         }
         else if (activeInsertMode == kInsertHardware)
         {
@@ -405,7 +405,7 @@ void ChannelStrip::processAndAccumulate (const float* inL,
             std::memcpy (insertScratchR.data(), tempMono.data(),
                           sizeof (float) * (size_t) safeSamples);
             hardwareSlot.processStereoBlock (tempMono.data(), insertScratchR.data(),
-                                              numSamples,
+                                              safeSamples,
                                               deviceInputs, numDeviceInputs,
                                               deviceOutputs, numDeviceOutputs);
             for (int i = 0; i < safeSamples; ++i)
@@ -522,11 +522,11 @@ void ChannelStrip::processAndAccumulate (const float* inL,
             if (activeInsertMode == kInsertPlugin)
             {
                 pluginMidiScratch.clear();
-                pluginSlot.processStereoBlock (L, R, numSamples, pluginMidiScratch);
+                pluginSlot.processStereoBlock (L, R, safeSamples, pluginMidiScratch);
             }
             else if (activeInsertMode == kInsertHardware)
             {
-                hardwareSlot.processStereoBlock (L, R, numSamples,
+                hardwareSlot.processStereoBlock (L, R, safeSamples,
                                                   deviceInputs, numDeviceInputs,
                                                   deviceOutputs, numDeviceOutputs);
             }

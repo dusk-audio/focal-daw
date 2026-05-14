@@ -24,7 +24,7 @@ struct AudioImportRequest
     juce::File   source;
     juce::File   audioDir;          // Session::getAudioDirectory()
     int          trackIndex = 0;    // for the generated filename ("import_track{NN}_...")
-    double       sessionSampleRate = 0.0;
+    double       sessionSampleRate;   // required - importer rejects <= 0
     int          targetChannels = 1;  // 1 = mono, 2 = stereo
     juce::int64  timelineStart = 0;   // samples
 };
@@ -41,7 +41,7 @@ AudioImportResult importAudio (const AudioImportRequest&);
 struct MidiImportRequest
 {
     juce::File   source;
-    double       sessionSampleRate = 0.0;
+    double       sessionSampleRate;   // required - importer rejects <= 0
     float        sessionBpm = 120.0f;
     juce::int64  timelineStart = 0;
 };

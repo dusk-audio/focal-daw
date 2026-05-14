@@ -113,11 +113,11 @@ void AuxLaneStrip::processStereoBlock (float* L, float* R, int numSamples,
 
         if (activeInsertMode[sIdx] == kInsertPlugin)
         {
-            slots[sIdx].processStereoBlock (L, R, numSamples, pluginMidiScratch);
+            slots[sIdx].processStereoBlock (L, R, safeSamples, pluginMidiScratch);
         }
         else if (activeInsertMode[sIdx] == kInsertHardware)
         {
-            hardwareSlots[sIdx].processStereoBlock (L, R, numSamples,
+            hardwareSlots[sIdx].processStereoBlock (L, R, safeSamples,
                                                      deviceInputs, numDeviceInputs,
                                                      deviceOutputs, numDeviceOutputs);
         }
