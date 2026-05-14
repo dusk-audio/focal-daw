@@ -3,6 +3,7 @@ name: Windows build
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -11,6 +12,8 @@ jobs:
   build:
     name: Build Focal (MSVC x64 Release)
     runs-on: windows-latest
+    permissions:
+      contents: write   # needed for the release-attach step on tag pushes
 
     steps:
       - name: Checkout Focal
@@ -42,13 +45,36 @@ jobs:
         shell: bash
         run: cmake --build build --config Release -j
 
-      - name: Upload Focal.exe
+      - name: Upload Focal.exe (per-run artifact)
         uses: actions/upload-artifact@v4
         with:
           name: Focal-windows-x64
           path: build/Focal_artefacts/Release/Focal.exe
           retention-days: 14
           if-no-files-found: error
+
+      # Tag-only steps: zip the binary with a versioned name and attach it
+      # to the GitHub Release matching the pushed tag. The release object
+      # is created if it doesn't exist; otherwise the asset is added to
+      # the existing release. Triggered solely by pushes of v* tags.
+      - name: Zip Focal.exe for release
+        id: zip
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          ZIP="Focal-${TAG}-windows-x64.zip"
+          cd build/Focal_artefacts/Release
+          7z a "${GITHUB_WORKSPACE}/${ZIP}" Focal.exe
+          echo "zip=${ZIP}" >> "${GITHUB_OUTPUT}"
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.zip.outputs.zip }}
+          fail_on_unmatched_files: true
+          generate_release_notes: true
 
   tests:
     name: Catch2 tests (MSVC x64 Release)
