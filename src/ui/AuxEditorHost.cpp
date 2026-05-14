@@ -4,6 +4,55 @@
 
 namespace focal
 {
+class AuxEditorHost::EditorPanel final : public juce::Component
+{
+public:
+    explicit EditorPanel (juce::Component& editorIn) : editorSafe (&editorIn)
+    {
+        addAndMakeVisible (editorIn);
+    }
+
+    void resized() override
+    {
+        auto* editor = editorSafe.getComponent();
+        if (editor == nullptr) return;
+
+        if (auto* ape = dynamic_cast<juce::AudioProcessorEditor*> (editor))
+        {
+            if (ape->isResizable())
+            {
+                editor->setBounds (getLocalBounds());
+            }
+            else
+            {
+                const int ew = editor->getWidth();
+                const int eh = editor->getHeight();
+                const int x = juce::jmax (0, (getWidth()  - ew) / 2);
+                const int y = juce::jmax (0, (getHeight() - eh) / 2);
+                editor->setTopLeftPosition (x, y);
+            }
+        }
+        else
+        {
+            // Non-AudioProcessorEditor branch: centre at native size instead
+            // of stretching (matches the fixed-layout AudioProcessorEditor
+            // branch above). Falls back to fill if the editor reports zero
+            // size so it stays visible.
+            const int ew = editor->getWidth();
+            const int eh = editor->getHeight();
+            if (ew > 0 && eh > 0)
+                editor->setBounds (getLocalBounds().withSizeKeepingCentre (ew, eh));
+            else
+                editor->setBounds (getLocalBounds());
+        }
+    }
+
+    juce::Component* getEditor() const noexcept { return editorSafe.getComponent(); }
+
+private:
+    juce::Component::SafePointer<juce::Component> editorSafe;
+};
+
 AuxEditorHost::AuxEditorHost (const juce::String& title,
                                 juce::Component& editor,
                                 juce::AudioProcessor* processorForResizability,
@@ -30,7 +79,16 @@ AuxEditorHost::AuxEditorHost (const juce::String& title,
     setResizable (false, false);
     setWantsKeyboardFocus (false);
 
-    setContentNonOwned (&editor, /*resizeToFitContent*/ true);
+    editorPanel = std::make_unique<EditorPanel> (editor);
+    editorPanel->setSize (juce::jmax (200, editor.getWidth()),
+                          juce::jmax (200, editor.getHeight()));
+    setContentNonOwned (editorPanel.get(), /*resizeToFitContent*/ true);
+
+    // Without an explicit setVisible(true) the peer is mapped but the
+    // window arrives iconified on Mutter/XWayland, forcing the user to
+    // click the slot to surface the UI. PluginEditorWindow has the same
+    // line for the channel-strip path.
+    setVisible (true);
 
     // Bring above the main window so the user sees the editor immediately.
     juce::Component::SafePointer<AuxEditorHost> safeThis (this);
@@ -99,28 +157,21 @@ void AuxEditorHost::resized()
 
 void AuxEditorHost::applyEditorLayout()
 {
-    auto* content = getContentComponent();
-    if (content == nullptr) return;
-    const int hostW = content->getWidth();
-    const int hostH = content->getHeight();
-    if (hostW <= 0 || hostH <= 0) return;
-
-    if (auto* ape = dynamic_cast<juce::AudioProcessorEditor*> (trackedEditor))
+    if (editorPanel == nullptr) return;
+    // LV2 + some VST3 editors finalise their preferred size on a later
+    // idle pump than construction. If the editor has grown since we last
+    // sized the panel, the inner editor will clip when resized() centres
+    // it. Resize the panel to fit the editor's current native size first,
+    // then run the layout so resizable editors stretch and non-resizable
+    // editors recentre cleanly.
+    if (auto* editor = editorPanel->getEditor())
     {
-        if (ape->isResizable())
-        {
-            // Resizable plugin: stretch to fill the lane.
-            if (ape->getWidth() != hostW || ape->getHeight() != hostH)
-                ape->setSize (hostW, hostH);
-        }
-        else
-        {
-            // Fixed-layout plugin: keep at native, centre within host.
-            // Overflow clips at the host frame.
-            const int x = juce::jmax (0, (hostW - ape->getWidth())  / 2);
-            const int y = juce::jmax (0, (hostH - ape->getHeight()) / 2);
-            ape->setTopLeftPosition (x, y);
-        }
+        const int ew = editor->getWidth();
+        const int eh = editor->getHeight();
+        if (ew > editorPanel->getWidth() || eh > editorPanel->getHeight())
+            editorPanel->setSize (juce::jmax (editorPanel->getWidth(),  ew),
+                                    juce::jmax (editorPanel->getHeight(), eh));
     }
+    editorPanel->resized();
 }
 } // namespace focal

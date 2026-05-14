@@ -42,9 +42,12 @@ public:
 private:
     void applyEditorLayout();
 
+    class EditorPanel;
+
     juce::Component* trackedEditor = nullptr;
     juce::AudioProcessor* processor = nullptr;   // for isResizable check on the editor
     class AudioEngine* enginePtr = nullptr;
     juce::Rectangle<int> lastBounds;             // suppress redundant setBounds + Component-listener loops
+    std::unique_ptr<EditorPanel> editorPanel;    // wraps the editor so the host can be larger than it (centers non-resizable plugins)
 };
 } // namespace focal

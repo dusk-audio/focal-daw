@@ -39,7 +39,13 @@ public:
     {
         setUsingNativeTitleBar (true);
         setContentOwned (new MainComponent(), true);
-        setResizable (true, true);  // resizable + corner resizer
+        // Native title bar already provides edge resize handles on every OS
+        // we ship to. Passing `true` for useBottomRightCornerResizer adds
+        // JUCE's overlay resizer, which on macOS sits ON TOP of the OS
+        // window's lower-right corner and intercepts the live-resize
+        // events the system sends during the fullscreen animation,
+        // leaving the content stuck at its pre-fullscreen size.
+        setResizable (true, false);
         // Min height keeps the console usable; the tape strip is collapsible
         // so we don't need to budget for it in the floor.
         setResizeLimits (ConsoleView::minimumContentWidth() + 24, 750, 32768, 32768);

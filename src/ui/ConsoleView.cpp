@@ -134,20 +134,49 @@ void ConsoleView::resized()
         busW     = juce::jmax (kMinBusWidth,     (int) std::round (kRefBusWidth     * scale));
         masterW  = juce::jmax (kMinMasterWidth,  (int) std::round (kRefMasterWidth  * scale));
 
-        // Secondary fit-to-budget pass: if any kMin floor pushed the total
-        // above availForStrips, shrink everything uniformly until it fits.
-        // We accept going under kMin in the very-narrow case - slightly
-        // squished knobs are better than the master strip being clipped
-        // off the right edge of the window.
-        const int totalContent = visibleChannels * channelW
-                               + Session::kNumBuses * busW
-                               + masterW;
-        if (totalContent > availForStrips && totalContent > 0)
+        // Secondary fit-to-budget pass: if the kMin floors pushed total
+        // above availForStrips, shrink CHANNELS first (they have the most
+        // budget and channel-strip widgets tolerate cramping better than
+        // the master's 5-knob comp row). Only spill into bus + master
+        // shrinks once channels can't compress any further. Master is
+        // protected the longest because its 5 × 40 px comp knob row will
+        // clip the rightmost knob the instant the strip goes below 210.
+        const auto totalOf = [&]
         {
-            const float secondary = (float) availForStrips / (float) totalContent;
-            channelW = juce::jmax (1, (int) std::floor (channelW * secondary));
-            busW     = juce::jmax (1, (int) std::floor (busW     * secondary));
-            masterW  = juce::jmax (1, (int) std::floor (masterW  * secondary));
+            return visibleChannels * channelW
+                 + Session::kNumBuses * busW
+                 + masterW;
+        };
+        if (totalOf() > availForStrips)
+        {
+            int overflow = totalOf() - availForStrips;
+            // Step 1: shrink channels (floor 1 px).
+            if (overflow > 0 && visibleChannels > 0)
+            {
+                const int channelGiveable = juce::jmax (0, channelW - 1);
+                // Ceiling division so the per-channel shrink covers the
+                // remainder without the extra +1 that overshoots when
+                // overflow divides evenly.
+                const int eachReducible   = juce::jmin (
+                    (overflow + visibleChannels - 1) / visibleChannels,
+                    channelGiveable);
+                channelW -= eachReducible;
+                overflow = totalOf() - availForStrips;
+            }
+            // Step 2: shrink buses if channels couldn't absorb everything.
+            if (overflow > 0 && Session::kNumBuses > 0)
+            {
+                const int busGiveable   = juce::jmax (0, busW - 1);
+                const int eachReducible = juce::jmin (
+                    (overflow + Session::kNumBuses - 1) / Session::kNumBuses,
+                    busGiveable);
+                busW -= eachReducible;
+                overflow = totalOf() - availForStrips;
+            }
+            // Step 3: as a last resort, shrink master (the comp row will
+            // start clipping past here).
+            if (overflow > 0)
+                masterW = juce::jmax (1, masterW - overflow);
         }
     }
 
