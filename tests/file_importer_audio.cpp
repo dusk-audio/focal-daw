@@ -106,7 +106,7 @@ TEST_CASE ("FileImporter: 44.1k mono -> 48k session preserves length", "[FileImp
     const auto src = tmp.dir.getChildFile ("source.wav");
     constexpr double kSrcSr = 44100.0;
     constexpr int    kSrcLen = (int) kSrcSr;   // 1 second
-    writeTestWav (src, kSrcSr, 1, kSrcLen, [] (int, int n)
+    writeTestWav (src, kSrcSr, 1, kSrcLen, [&] (int, int n)
     {
         return 0.5f * (float) std::sin (2.0 * kPi * 440.0 * (double) n / kSrcSr);
     });
@@ -139,7 +139,7 @@ TEST_CASE ("FileImporter: 96k mono -> 48k session preserves length", "[FileImpor
     const auto src = tmp.dir.getChildFile ("source.wav");
     constexpr double kSrcSr = 96000.0;
     constexpr int    kSrcLen = (int) kSrcSr;
-    writeTestWav (src, kSrcSr, 1, kSrcLen, [] (int, int n)
+    writeTestWav (src, kSrcSr, 1, kSrcLen, [&] (int, int n)
     {
         return 0.5f * (float) std::sin (2.0 * kPi * 220.0 * (double) n / kSrcSr);
     });
@@ -194,7 +194,7 @@ TEST_CASE ("FileImporter: mono -> stereo duplicates to L and R", "[FileImporter]
     constexpr int    kLen = 4800;
     constexpr float  kAmp = 0.4f;
 
-    writeTestWav (src, kSr, 1, kLen, [] (int, int) { return kAmp; });
+    writeTestWav (src, kSr, 1, kLen, [&] (int, int) { return kAmp; });
 
     focal::fileimport::AudioImportRequest req;
     req.source            = src;
