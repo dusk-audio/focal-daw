@@ -5,6 +5,13 @@ namespace focal
 {
 namespace
 {
+// SSL-style release knob: top of travel = AUTO. File-scope so the slider
+// callbacks (which outlive the constructor) reference them without
+// having to capture function-local constexpr values - which MSVC
+// rejects under its strict reading of the lambda-capture rules.
+constexpr double kAutoThreshold = 1000.0;
+constexpr double kAutoEps       = 1.0e-3;
+
 void styleSmallKnob (juce::Slider& s, double minV, double maxV, double midPt,
                       double initialV, juce::Colour col, const juce::String& suffix,
                       int decimals)
@@ -131,8 +138,6 @@ BusComponent::BusComponent (Bus& b, Session& s, int idx)
     // "AUTO" only at the top detent; everywhere else shows the ms value.
     // Threshold is the slider's max with a tiny eps so floating-point
     // rounding can't accidentally drop a typed 999.8 into AUTO.
-    constexpr double kAutoThreshold = 1000.0;
-    constexpr double kAutoEps       = 1.0e-3;
     compRelease.textFromValueFunction = [] (double v) -> juce::String
     {
         return std::abs (v - kAutoThreshold) <= kAutoEps

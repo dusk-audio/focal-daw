@@ -2602,7 +2602,7 @@ void ChannelStripComponent::paint (juce::Graphics& g)
     //    just a clean input bar with a peak-hold tick.
     constexpr float kFloorDb   = -60.0f;
     constexpr float kCeilingDb =  +6.0f;   // match kFaderTicks's top label
-    auto dbToFrac = [] (float db) {
+    auto dbToFrac = [&] (float db) {
         return juce::jlimit (0.0f, 1.0f, (db - kFloorDb) / (kCeilingDb - kFloorDb));
     };
 

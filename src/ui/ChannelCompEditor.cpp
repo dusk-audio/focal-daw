@@ -667,8 +667,8 @@ void ChannelCompEditor::resized()
 
     constexpr int kKnobBlockH = 56 + 18 + 4;
 
-    auto layoutPair = [&area] (juce::Slider& kA, juce::Label& lA,
-                                juce::Slider* kB, juce::Label* lB)
+    auto layoutPair = [&] (juce::Slider& kA, juce::Label& lA,
+                            juce::Slider* kB, juce::Label* lB)
     {
         auto labelRow = area.removeFromTop (14);
         auto knobRow  = area.removeFromTop (kKnobBlockH);
