@@ -841,6 +841,33 @@ ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
     styleCombo (midiChannelSelector);
     addChildComponent (midiChannelSelector);
 
+    // ── MIDI OUTPUT selector. Routes this track's per-block MIDI buffer
+    // to a hardware synth port in addition to (or instead of) the
+    // loaded instrument plugin. Visible in MIDI mode only.
+    rebuildMidiOutputDropdown();
+    midiOutputSelector.onChange = [this]
+    {
+        const int id = midiOutputSelector.getSelectedId();
+        const int idx = id <= 1 ? -1 : (id - 2);
+        track.midiOutputIndex.store (idx, std::memory_order_relaxed);
+        if (idx >= 0)
+        {
+            const auto& outs = engine.getMidiOutputDevices();
+            track.midiOutputIdentifier = (idx < outs.size())
+                                           ? outs[idx].identifier
+                                           : juce::String();
+            // Eagerly open the port so the first audio-thread emission
+            // doesn't race a synchronous ALSA snd_seq_connect.
+            engine.ensureMidiOutputOpen (idx);
+        }
+        else
+        {
+            track.midiOutputIdentifier = juce::String();
+        }
+    };
+    styleCombo (midiOutputSelector);
+    addChildComponent (midiOutputSelector);
+
     // MIDI activity LED. Tiny custom paint inside a juce::Component child;
     // intercepts no clicks. Blink state is owned by ChannelStripComponent —
     // timerCallback flips midiActivityLit from track.midiActivity (clear-
@@ -999,8 +1026,9 @@ void ChannelStripComponent::changeListenerCallback (juce::ChangeBroadcaster*)
 {
     // Engine signalled a MIDI device-list refresh (post-rebuild). The
     // device order may have changed; re-resolve our track's index from
-    // its saved identifier and rebuild both dropdowns.
+    // its saved identifier and rebuild both dropdowns (input + output).
     rebuildMidiInputDropdown();
+    rebuildMidiOutputDropdown();
 }
 
 void ChannelStripComponent::rebuildMidiInputDropdown()
@@ -1033,6 +1061,37 @@ void ChannelStripComponent::rebuildMidiInputDropdown()
     track.midiInputIndex.store (idx, std::memory_order_relaxed);
     midiInputSelector.setSelectedId (idx >= 0 ? (2 + idx) : 1,
                                       juce::dontSendNotification);
+}
+
+void ChannelStripComponent::rebuildMidiOutputDropdown()
+{
+    // Mirror of rebuildMidiInputDropdown for the output side. ID 1 =
+    // "(none)" (= idx -1, no external output); 2..N = device index.
+    midiOutputSelector.clear (juce::dontSendNotification);
+    midiOutputSelector.addItem ("(none)", 1);
+    const auto& outs = engine.getMidiOutputDevices();
+    for (int i = 0; i < outs.size(); ++i)
+        midiOutputSelector.addItem (outs[i].name, 2 + i);
+
+    int idx = -1;
+    if (track.midiOutputIdentifier.isNotEmpty())
+    {
+        for (int i = 0; i < outs.size(); ++i)
+        {
+            if (outs[i].identifier == track.midiOutputIdentifier)
+            {
+                idx = i; break;
+            }
+        }
+    }
+    else
+    {
+        idx = track.midiOutputIndex.load (std::memory_order_relaxed);
+        if (idx >= outs.size()) idx = -1;
+    }
+    track.midiOutputIndex.store (idx, std::memory_order_relaxed);
+    midiOutputSelector.setSelectedId (idx >= 0 ? (2 + idx) : 1,
+                                        juce::dontSendNotification);
 }
 
 void ChannelStripComponent::setEqSectionVisible (bool visible)
@@ -1113,6 +1172,7 @@ void ChannelStripComponent::setMixingMode (bool mixing)
     midiInputSelector  .setVisible (! mixing);
     midiChannelSelector.setVisible (! mixing);
     midiActivityLed    .setVisible (! mixing);
+    midiOutputSelector .setVisible (! mixing);
     monitorButton      .setVisible (! mixing);
     armButton          .setVisible (! mixing);
     printButton        .setVisible (! mixing);
@@ -2572,6 +2632,7 @@ void ChannelStripComponent::refreshInputSelectorVisibility()
     midiInputSelector  .setVisible (trackingVisible && isMidi);
     midiChannelSelector.setVisible (trackingVisible && isMidi);
     midiActivityLed    .setVisible (trackingVisible && isMidi);
+    midiOutputSelector .setVisible (trackingVisible && isMidi);
 }
 
 void ChannelStripComponent::onHpfKnobChanged()
@@ -2864,6 +2925,7 @@ void ChannelStripComponent::resized()
         {
             // Row 1: [ MIDI input (wide) ][LED]
             // Row 2: [ MIDI channel (full width) ]
+            // Row 3: [ MIDI output (full width) ]
             constexpr int kLedW = 14;
             auto led = inputRow.removeFromRight (kLedW);
             midiActivityLed.setBounds (led.reduced (1));
@@ -2872,6 +2934,10 @@ void ChannelStripComponent::resized()
             area.removeFromTop (2);
             auto chRow = area.removeFromTop (18);
             midiChannelSelector.setBounds (chRow);
+
+            area.removeFromTop (2);
+            auto outRow = area.removeFromTop (18);
+            midiOutputSelector.setBounds (outRow);
         }
 
         area.removeFromTop (3);
