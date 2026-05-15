@@ -910,6 +910,9 @@ bool SessionSerializer::save (const Session& s, const juce::File& target)
     tport->setProperty ("snap_resolution",   (int) s.snapResolution);
     tport->setProperty ("edit_mode",         (int) s.editMode);
     tport->setProperty ("tempo_bpm",         s.tempoBpm.load());
+    tport->setProperty ("sync_source_input",  s.syncSourceInputIdentifier);
+    tport->setProperty ("sync_follow_tempo",
+                          s.externalSyncFollowsTempo.load());
     tport->setProperty ("beats_per_bar",     s.beatsPerBar.load());
     tport->setProperty ("beat_unit",         s.beatUnit.load());
     tport->setProperty ("metronome_enabled", s.metronomeEnabled.load());
@@ -1111,6 +1114,10 @@ bool SessionSerializer::load (Session& s, const juce::File& source)
             if (i >= 0 && i <= (int) EditMode::Draw) s.editMode = (EditMode) i;
         }
         if (tport.hasProperty ("tempo_bpm"))         s.tempoBpm.store         ((float) (double) tport["tempo_bpm"]);
+        if (tport.hasProperty ("sync_source_input"))
+            s.syncSourceInputIdentifier = tport["sync_source_input"].toString();
+        if (tport.hasProperty ("sync_follow_tempo"))
+            s.externalSyncFollowsTempo.store ((bool) tport["sync_follow_tempo"]);
         if (tport.hasProperty ("beats_per_bar"))     s.beatsPerBar.store      ((int)    tport["beats_per_bar"]);
         if (tport.hasProperty ("beat_unit"))         s.beatUnit.store         ((int)    tport["beat_unit"]);
         if (tport.hasProperty ("metronome_enabled")) s.metronomeEnabled.store ((bool)   tport["metronome_enabled"]);
@@ -1169,6 +1176,8 @@ bool SessionSerializer::load (Session& s, const juce::File& source)
                     case (int) MidiBindingTarget::BusPan:
                     case (int) MidiBindingTarget::BusMute:
                     case (int) MidiBindingTarget::BusSolo:
+                    case (int) MidiBindingTarget::AuxLaneFader:
+                    case (int) MidiBindingTarget::AuxLaneMute:
                     case (int) MidiBindingTarget::MasterFader:
                         b.target = (MidiBindingTarget) rawTgt; break;
                     default:
@@ -1181,11 +1190,13 @@ bool SessionSerializer::load (Session& s, const juce::File& source)
                 const int rawIdx = v.hasProperty ("target_idx") ? (int) v["target_idx"] : 0;
                 const int maxIdx = needsBusIndex (b.target)
                     ? Session::kNumBuses - 1
-                    : (needsPackedTrackAuxIndex (b.target)
-                        ? Session::kNumTracks * ChannelStripParams::kNumAuxSends - 1
-                        : (needsPackedTrackEqIndex (b.target)
-                            ? Session::kNumTracks * kPackedEqBands - 1
-                            : Session::kNumTracks - 1));
+                    : (needsAuxLaneIndex (b.target)
+                        ? Session::kNumAuxLanes - 1
+                        : (needsPackedTrackAuxIndex (b.target)
+                            ? Session::kNumTracks * ChannelStripParams::kNumAuxSends - 1
+                            : (needsPackedTrackEqIndex (b.target)
+                                ? Session::kNumTracks * kPackedEqBands - 1
+                                : Session::kNumTracks - 1)));
                 b.targetIndex = juce::jlimit (0, maxIdx, rawIdx);
                 if (b.isValid())
                     fresh->push_back (b);

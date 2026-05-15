@@ -27,6 +27,8 @@ const char* nameForTarget (MidiBindingTarget t) noexcept
         case MidiBindingTarget::BusPan:          return "Bus pan";
         case MidiBindingTarget::BusMute:         return "Bus mute";
         case MidiBindingTarget::BusSolo:         return "Bus solo";
+        case MidiBindingTarget::AuxLaneFader:    return "AUX return";
+        case MidiBindingTarget::AuxLaneMute:     return "AUX mute";
         case MidiBindingTarget::MasterFader:     return "Master fader";
     }
     return "?";

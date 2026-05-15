@@ -25,15 +25,20 @@ class Session;
 //
 // Also hosts a "Run Self-Test" button that opens the SelfTestPanel - a
 // headless test of the audio engine pipeline plus a backend cycle.
-class AudioSettingsPanel final : public juce::Component
+class AudioSettingsPanel final : public juce::Component,
+                                  public juce::ChangeListener
 {
 public:
     AudioSettingsPanel (juce::AudioDeviceManager& dm,
                          AudioEngine& engine,
                          Session& session);
-    ~AudioSettingsPanel() override = default;
+    ~AudioSettingsPanel() override;
 
     void resized() override;
+    // ChangeListener: the engine broadcasts on MIDI-bank rebuild (hot-
+    // plug, manual rescan). Refreshes the sync-source combo so newly
+    // appearing inputs become available without reopening the panel.
+    void changeListenerCallback (juce::ChangeBroadcaster*) override;
 
 private:
     juce::AudioDeviceManager& deviceManager;
@@ -61,6 +66,14 @@ private:
     juce::Label    oversamplingLabel { {}, "Effect Oversampling" };
     juce::ComboBox oversamplingCombo;
 
+    // MIDI Clock sync source. Lists every registered MIDI input plus
+    // "(none)" as the first entry. The engine resolves the selection
+    // to a real input index on every hot-plug rebuild and feeds clock
+    // bytes from that input to its MidiSyncReceiver. v1 follows tempo
+    // only - the chase + Start/Stop chase land in a later phase.
+    juce::Label    syncSourceLabel { {}, "MIDI Sync Source" };
+    juce::ComboBox syncSourceCombo;
+
     juce::Label  uiScaleLabel  { {}, "UI scale" };
     juce::Slider uiScaleSlider;
     juce::Label  uiScaleHint;
@@ -73,5 +86,7 @@ private:
     void applyUiScaleChange();
     void applyRescan();
     void openSelfTest();
+    void populateSyncSourceCombo();
+    void applySyncSourceChange();
 };
 } // namespace focal

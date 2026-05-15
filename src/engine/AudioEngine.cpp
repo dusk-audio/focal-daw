@@ -242,6 +242,25 @@ void AudioEngine::rebuildMidiInputBank()
     virtualKeyboardCollectorIndex = (int) midiInputCollectors.size() - 1;
 
     perInputMidi.assign ((size_t) midiInputDevices.size(), juce::MidiBuffer{});
+
+    // Resolve session.syncSourceInputIdentifier -> syncSourceInputIdx.
+    // Done on every rebuild so a hot-plug doesn't strand the index at
+    // a stale slot. Empty identifier or no match -> -1 (no sync).
+    int resolvedSyncIdx = -1;
+    const auto& wantedId = session.syncSourceInputIdentifier;
+    if (wantedId.isNotEmpty())
+    {
+        for (int i = 0; i < midiInputDevices.size(); ++i)
+        {
+            if (midiInputDevices[i].identifier == wantedId)
+            {
+                resolvedSyncIdx = i;
+                break;
+            }
+        }
+    }
+    session.syncSourceInputIdx.store (resolvedSyncIdx, std::memory_order_release);
+    midiSyncReceiver.reset();
 }
 
 juce::MidiMessageCollector* AudioEngine::getVirtualKeyboardCollector() noexcept
@@ -806,6 +825,11 @@ void AudioEngine::prepareForSelfTest (double sr, int bs)
     for (auto& a : busStrips)     a.prepare (sr, bs, oxFactor);
     for (auto& a : auxLaneStrips) a.prepare (sr, bs);
     master.prepare (sr, bs, oxFactor);
+
+    // Sync receiver uses the same sample-clock the engine derives its
+    // per-block playhead from. Reset on every prepare so a sample-rate
+    // change drops stale BPM history.
+    midiSyncReceiver.prepare (sr);
 #if FOCAL_HAS_DUSK_DSP
     // TapeMachine animates its reels + level-integration timing from
     // getPlayHead()->getPosition(). Without a playhead the donor reads
@@ -915,6 +939,49 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         testInjectMidi.clear();
         testInjectReady.store (false, std::memory_order_release);
     }
+
+    // External MIDI Clock sync. Feed the chosen input's per-block
+    // buffer to the receiver; if it derived a fresh BPM and the
+    // follow-tempo flag is on, push the value into session.tempoBpm
+    // so PlaybackEngine + the metronome track the master. Status
+    // atoms feed the UI's "EXT" badge.
+    //
+    // Timestamping uses a private monotonic sample clock that ticks by
+    // numSamples each block. transport.getPlayhead() jumps on loop
+    // wrap / Cmd-jump / scrub - using it for clock intervals would
+    // produce wild BPM swings whenever the user moves the playhead.
+    const int syncIdx = session.syncSourceInputIdx.load (std::memory_order_relaxed);
+    if (syncIdx != lastSyncSourceIdx)
+    {
+        // Source changed (or first run). Reset both the receiver's
+        // history and the local sample clock so the new source starts
+        // from a clean baseline.
+        midiSyncReceiver.reset();
+        midiSyncSampleClock = 0;
+        lastSyncSourceIdx = syncIdx;
+    }
+    if (syncIdx >= 0 && (size_t) syncIdx < perInputMidi.size())
+    {
+        midiSyncReceiver.process (perInputMidi[(size_t) syncIdx], midiSyncSampleClock);
+        const float ext = midiSyncReceiver.getBpm();
+        session.externalBpm.store (ext, std::memory_order_relaxed);
+        session.externalSyncRolling.store (midiSyncReceiver.isRolling(),
+                                              std::memory_order_relaxed);
+        if (ext > 0.0f
+            && session.externalSyncFollowsTempo.load (std::memory_order_relaxed))
+        {
+            session.tempoBpm.store (ext, std::memory_order_relaxed);
+        }
+    }
+    else
+    {
+        // Clear the readouts when no source is selected so the UI badge
+        // doesn't stay frozen at the last value after the user turns
+        // sync off.
+        session.externalBpm.store (0.0f, std::memory_order_relaxed);
+        session.externalSyncRolling.store (false, std::memory_order_relaxed);
+    }
+    midiSyncSampleClock += numSamples;
 
     // Held-MIDI-notes tracking for the chord display. Walk every drained
     // MIDI buffer and flip the per-note atomic on Note On / Note Off.
@@ -1201,6 +1268,23 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                                 const bool was = session.bus (b.targetIndex)
                                                        .strip.solo.load (std::memory_order_relaxed);
                                 session.setBusSoloed (b.targetIndex, ! was);
+                            }
+                            break;
+                        case MidiBindingTarget::AuxLaneFader:
+                            if (b.targetIndex >= 0 && b.targetIndex < Session::kNumAuxLanes)
+                            {
+                                const float frac = (float) val / 127.0f;
+                                const float db = -90.0f + frac * (12.0f + 90.0f);
+                                session.auxLane (b.targetIndex).params.returnLevelDb
+                                    .store (db, std::memory_order_relaxed);
+                            }
+                            break;
+                        case MidiBindingTarget::AuxLaneMute:
+                            if (val >= 64 && b.targetIndex >= 0 && b.targetIndex < Session::kNumAuxLanes)
+                            {
+                                auto& a = session.auxLane (b.targetIndex).params.mute;
+                                a.store (! a.load (std::memory_order_relaxed),
+                                          std::memory_order_relaxed);
                             }
                             break;
 

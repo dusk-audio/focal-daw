@@ -1159,6 +1159,23 @@ public:
     std::atomic<int>         midiLearnPending       { -1 };
     std::atomic<juce::int64> midiLearnCapture       { 0 };
 
+    // External MIDI sync. syncSourceInputIdx selects which entry in the
+    // engine's midiInputDevices list drives clock chase; -1 = no sync,
+    // tempo stays user-controlled. Persisted as a device identifier
+    // string in session JSON; the engine resolves the string to an
+    // index on load + on every hot-plug rebuild.
+    // externalBpm is the smoothed BPM derived by MidiSyncReceiver. UI
+    // polls this for the "EXT: N BPM" badge; the engine pushes the
+    // value into tempoBpm when externalSyncFollowsTempo is true.
+    // externalSyncRolling mirrors the master's Start/Stop transport
+    // bytes (FA / FC). v1 is "tempo only" - the engine reads the BPM
+    // but ignores the rolling flag.
+    juce::String              syncSourceInputIdentifier;          // empty = off
+    std::atomic<int>          syncSourceInputIdx      { -1 };
+    mutable std::atomic<float> externalBpm            { 0.0f };
+    mutable std::atomic<bool>  externalSyncRolling    { false };
+    std::atomic<bool>          externalSyncFollowsTempo { true };
+
     // Resolve the audio device input channel that this track should read from.
     // -2 (default) means "follow the track index", -1 means "no input".
     int resolveInputForTrack (int trackIndex) const noexcept;

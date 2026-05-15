@@ -55,6 +55,9 @@ enum class MidiBindingTarget : int
     BusMute           = 152, // discrete on press
     BusSolo           = 153, // discrete on press
 
+    AuxLaneFader      = 160, // continuous; targetIndex = lane 0..kNumAuxLanes-1
+    AuxLaneMute       = 161, // discrete on press
+
     MasterFader       = 200, // continuous
 };
 
@@ -71,6 +74,7 @@ constexpr bool isContinuousTarget (MidiBindingTarget t) noexcept
         || t == MidiBindingTarget::TrackCompMakeup
         || t == MidiBindingTarget::BusFader
         || t == MidiBindingTarget::BusPan
+        || t == MidiBindingTarget::AuxLaneFader
         || t == MidiBindingTarget::MasterFader;
 }
 
@@ -93,6 +97,13 @@ constexpr bool needsBusIndex (MidiBindingTarget t) noexcept
         || t == MidiBindingTarget::BusPan
         || t == MidiBindingTarget::BusMute
         || t == MidiBindingTarget::BusSolo;
+}
+
+// True when the target needs an aux-lane index (0..kNumAuxLanes-1).
+constexpr bool needsAuxLaneIndex (MidiBindingTarget t) noexcept
+{
+    return t == MidiBindingTarget::AuxLaneFader
+        || t == MidiBindingTarget::AuxLaneMute;
 }
 
 // True when the target packs two indices (track + aux-lane) into

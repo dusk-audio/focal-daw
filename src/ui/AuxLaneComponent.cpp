@@ -7,6 +7,7 @@
 #include "../engine/AudioEngine.h"
 #include "../engine/PluginSlot.h"
 #include "../engine/Transport.h"
+#include "../session/MidiBindings.h"
 
 namespace focal
 {
@@ -204,6 +205,9 @@ AuxLaneComponent::AuxLaneComponent (AuxLane& l, AuxLaneStrip& s, int idx,
         lane.params.returnLevelDb.store ((float) returnFader.getValue(),
                                            std::memory_order_relaxed);
     };
+    // Right-click on fader or mute → MIDI Learn menu (mouseDown handler
+    // checks eventComponent).
+    returnFader.addMouseListener (this, false);
     addAndMakeVisible (returnFader);
 
     muteButton.setClickingTogglesState (true);
@@ -215,6 +219,7 @@ AuxLaneComponent::AuxLaneComponent (AuxLane& l, AuxLaneStrip& s, int idx,
     {
         lane.params.mute.store (muteButton.getToggleState(), std::memory_order_relaxed);
     };
+    muteButton.addMouseListener (this, false);
     addAndMakeVisible (muteButton);
 
     stripMeter = std::make_unique<StripMeter> (lane.params);
@@ -605,5 +610,28 @@ void AuxLaneComponent::resized()
     if (sendPanel != nullptr) sendPanel->setBounds (getSendPanelArea());
 
     repositionEditorHosts();
+}
+
+void AuxLaneComponent::mouseDown (const juce::MouseEvent& e)
+{
+    if (! e.mods.isPopupMenu()) return;
+    auto& session = engine.getSession();
+    // Per-control MIDI Learn routes. The strip is registered as a mouse
+    // listener on its return fader + mute toggle (see ctor); eventComponent
+    // resolves to whichever was right-clicked. Anything else (background
+    // pixels, plugin-slot column) is ignored - the strip has no other
+    // context menu.
+    if (e.eventComponent == &returnFader)
+    {
+        midilearn::showLearnMenu (returnFader, session,
+                                    MidiBindingTarget::AuxLaneFader, laneIndex);
+        return;
+    }
+    if (e.eventComponent == &muteButton)
+    {
+        midilearn::showLearnMenu (muteButton, session,
+                                    MidiBindingTarget::AuxLaneMute, laneIndex);
+        return;
+    }
 }
 } // namespace focal

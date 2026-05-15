@@ -82,6 +82,28 @@ AudioSettingsPanel::AudioSettingsPanel (juce::AudioDeviceManager& dm,
     oversamplingCombo.onChange = [this] { applyOversamplingChange(); };
     addAndMakeVisible (oversamplingCombo);
 
+    // MIDI sync source. Populated on construction + re-populated on
+    // every engine MIDI-bank rebuild via the engine's ChangeBroadcaster
+    // (hot-plug, refreshMidiInputs). Selection writes session's saved
+    // identifier; the engine's rebuild path resolves it back to an
+    // index. Tooltip explains the v1 "tempo only" semantics.
+    syncSourceLabel.setJustificationType (juce::Justification::centredRight);
+    addAndMakeVisible (syncSourceLabel);
+    syncSourceCombo.setTooltip (
+        "MIDI Clock sync source. When set, Focal's tempo "
+        "follows incoming MIDI Clock (24 PPQN) from the chosen "
+        "input. Start/Stop chase is not wired yet - this is "
+        "tempo-only sync in v1.");
+    syncSourceCombo.onChange = [this] { applySyncSourceChange(); };
+    addAndMakeVisible (syncSourceCombo);
+    populateSyncSourceCombo();
+
+    // Subscribe to the engine's ChangeBroadcaster so a hot-plug MIDI
+    // device rebuild repopulates the sync-source combo. Without this,
+    // a user who plugs in a new MIDI device after opening the panel
+    // would have to close + reopen to see it.
+    engine.addChangeListener (this);
+
     // UI scale - user override on top of JUCE's per-display DPI. Lives
     // in app config (per-machine), separate from session state.
     uiScaleLabel.setJustificationType (juce::Justification::centredRight);
@@ -143,6 +165,11 @@ void AudioSettingsPanel::resized()
     uiScaleLabel.setBounds  (scaleRow.removeFromLeft (180).reduced (4, 2));
     uiScaleSlider.setBounds (scaleRow.removeFromLeft (260).reduced (4, 2));
     uiScaleHint.setBounds   (scaleRow.reduced (4, 2));
+
+    // Row above scale: MIDI Clock sync source picker.
+    auto syncRow = area.removeFromBottom (28);
+    syncSourceLabel.setBounds (syncRow.removeFromLeft (180).reduced (4, 2));
+    syncSourceCombo.setBounds (syncRow.removeFromLeft (300).reduced (4, 2));
 
     selector->setBounds (area);
 }
@@ -232,5 +259,52 @@ void AudioSettingsPanel::applyOversamplingChange()
     // which is the cheapest way to apply the change without restarting.
     auto setup = deviceManager.getAudioDeviceSetup();
     deviceManager.setAudioDeviceSetup (setup, /*treatAsChosenDevice*/ true);
+}
+
+AudioSettingsPanel::~AudioSettingsPanel()
+{
+    engine.removeChangeListener (this);
+}
+
+void AudioSettingsPanel::changeListenerCallback (juce::ChangeBroadcaster*)
+{
+    // Engine broadcasts after refreshMidiInputs / hot-plug. Repopulate
+    // so a newly-arrived device appears in the picker (and conversely,
+    // a removed one disappears + falls back to "(none)" if it was
+    // selected).
+    populateSyncSourceCombo();
+}
+
+void AudioSettingsPanel::populateSyncSourceCombo()
+{
+    // ID 1 = "(none)"; IDs 2..N+1 map to engine.midiInputDevices[i-2].
+    // Identifier-based selection because indices shift on hot-plug.
+    syncSourceCombo.clear (juce::dontSendNotification);
+    syncSourceCombo.addItem ("(none)", 1);
+    const auto& devices = engine.getMidiInputDevices();
+    int matchId = 1;
+    for (int i = 0; i < devices.size(); ++i)
+    {
+        syncSourceCombo.addItem (devices[i].name, i + 2);
+        if (devices[i].identifier == session.syncSourceInputIdentifier)
+            matchId = i + 2;
+    }
+    syncSourceCombo.setSelectedId (matchId, juce::dontSendNotification);
+}
+
+void AudioSettingsPanel::applySyncSourceChange()
+{
+    const int id = syncSourceCombo.getSelectedId();
+    if (id <= 1)
+    {
+        session.syncSourceInputIdentifier = juce::String();
+        session.syncSourceInputIdx.store (-1, std::memory_order_release);
+        return;
+    }
+    const auto& devices = engine.getMidiInputDevices();
+    const int idx = id - 2;
+    if (idx < 0 || idx >= devices.size()) return;
+    session.syncSourceInputIdentifier = devices[idx].identifier;
+    session.syncSourceInputIdx.store (idx, std::memory_order_release);
 }
 } // namespace focal

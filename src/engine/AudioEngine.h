@@ -12,6 +12,7 @@
 #include "../dsp/MasteringChain.h"
 #include "../dsp/Metronome.h"
 #include "../dsp/PitchDetector.h"
+#include "MidiSyncReceiver.h"
 #include "../session/Session.h"
 #include "MasteringPlayer.h"
 #include "PlaybackEngine.h"
@@ -342,6 +343,23 @@ private:
     MasteringChain   masteringChain;
     Metronome        metronome;
     PitchDetector    pitchDetector;
+    // External MIDI Clock sync. The engine drains the per-block buffer
+    // for session.syncSourceInputIdx (set by the message thread via the
+    // Audio Settings panel) and feeds clock / Start / Stop bytes here.
+    // The receiver derives a smoothed BPM + a rolling hint that the UI
+    // reads via session.externalBpm / externalSyncRolling atoms. v1 is
+    // tempo-only - the rolling hint is exposed but doesn't drive the
+    // engine's Transport state machine yet.
+    MidiSyncReceiver midiSyncReceiver;
+
+    // Monotonic sample clock the sync receiver timestamps clock ticks
+    // against. Increments by numSamples each block; reset when the
+    // session's syncSourceInputIdx changes (so old interval history
+    // from the previous source doesn't poison the new source's BPM
+    // computation). transport.getPlayhead() can jump (Cmd-jump, loop
+    // wrap) - not safe to use for inter-tick interval math.
+    juce::int64 midiSyncSampleClock = 0;
+    int         lastSyncSourceIdx   = -1;
     std::atomic<Stage> stage { Stage::Mixing };
 
     std::array<ChannelStrip, Session::kNumTracks> strips;

@@ -806,6 +806,19 @@ void TransportBar::refreshButtonStates()
         bpmValue.setText (juce::String ((int) engine.getSession().tempoBpm.load()),
                            juce::dontSendNotification);
 
+    // BPM caption flips to "EXT" + amber tint when external MIDI Clock
+    // sync is producing a stable BPM. Otherwise reads "BPM" in the
+    // neutral grey. Single-source-of-truth cue that the tempo display
+    // is being driven by an external master.
+    {
+        const float ext = engine.getSession().externalBpm.load (std::memory_order_relaxed);
+        const bool externalActive = ext > 0.0f;
+        bpmCaption.setText (externalActive ? "EXT" : "BPM", juce::dontSendNotification);
+        bpmCaption.setColour (juce::Label::textColourId,
+            externalActive ? juce::Colour (0xffe0c060)
+                            : juce::Colour (0xff707074));
+    }
+
     juce::String hint;
     switch (state)
     {
