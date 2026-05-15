@@ -13,6 +13,7 @@
 #include "../dsp/Metronome.h"
 #include "../dsp/PitchDetector.h"
 #include "MidiSyncReceiver.h"
+#include "MidiClockEmitter.h"
 #include "../session/Session.h"
 #include "MasteringPlayer.h"
 #include "PlaybackEngine.h"
@@ -351,6 +352,12 @@ private:
     // tempo-only - the rolling hint is exposed but doesn't drive the
     // engine's Transport state machine yet.
     MidiSyncReceiver midiSyncReceiver;
+    MidiClockEmitter midiClockEmitter;
+    // Scratch buffer the emitter writes F8/FA/FC bytes into before the
+    // engine hands it off to MidiOutput::sendBlockOfMessages. Allocated
+    // once via clear()/reserve-on-first-use semantics of juce::MidiBuffer.
+    juce::MidiBuffer midiClockOutScratch;
+    int              lastSyncOutputIdx = -1;
 
     // Monotonic sample clock the sync receiver timestamps clock ticks
     // against. Increments by numSamples each block; reset when the
@@ -360,6 +367,11 @@ private:
     // wrap) - not safe to use for inter-tick interval math.
     juce::int64 midiSyncSampleClock = 0;
     int         lastSyncSourceIdx   = -1;
+    // Edge detector for external transport chase. We act on the
+    // rolling-flag transition (false -> true = Start/Continue,
+    // true -> false = Stop), not the steady state, so a long Start
+    // signal doesn't keep restarting the transport every block.
+    bool        lastExtRolling      = false;
     std::atomic<Stage> stage { Stage::Mixing };
 
     std::array<ChannelStrip, Session::kNumTracks> strips;

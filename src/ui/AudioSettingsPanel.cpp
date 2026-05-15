@@ -98,6 +98,48 @@ AudioSettingsPanel::AudioSettingsPanel (juce::AudioDeviceManager& dm,
     addAndMakeVisible (syncSourceCombo);
     populateSyncSourceCombo();
 
+    // Chase-transport toggle. v1 Phase 2 - off by default so existing
+    // "tempo follower" workflows aren't surprised by the master also
+    // starting/stopping local playback.
+    syncChaseTransportToggle.setToggleState (
+        session.externalSyncChasesTransport.load (std::memory_order_relaxed),
+        juce::dontSendNotification);
+    syncChaseTransportToggle.setTooltip (
+        "When on, MIDI Start (FA / FB) plays Focal and MIDI Stop (FC) "
+        "stops it. Off = tempo-only sync; the user controls Focal's "
+        "transport locally.");
+    syncChaseTransportToggle.onClick = [this]
+    {
+        session.externalSyncChasesTransport.store (
+            syncChaseTransportToggle.getToggleState(), std::memory_order_relaxed);
+    };
+    addAndMakeVisible (syncChaseTransportToggle);
+
+    // MIDI sync OUTPUT picker + emit toggle (Focal as master).
+    syncOutputLabel.setJustificationType (juce::Justification::centredRight);
+    addAndMakeVisible (syncOutputLabel);
+    syncOutputCombo.setTooltip (
+        "Pick a MIDI output port to send Clock + Start/Stop to. "
+        "Used when Focal acts as the master. Emission only fires "
+        "while the 'Emit clock' toggle is on.");
+    syncOutputCombo.onChange = [this] { applySyncOutputChange(); };
+    addAndMakeVisible (syncOutputCombo);
+    populateSyncOutputCombo();
+
+    syncEmitClockToggle.setToggleState (
+        session.syncOutputEmitClock.load (std::memory_order_relaxed),
+        juce::dontSendNotification);
+    syncEmitClockToggle.setTooltip (
+        "When on, Focal emits 24-PPQN MIDI Clock + Start/Stop "
+        "transport bytes to the chosen output. Drum machines and "
+        "external sequencers will follow Focal's tempo + transport.");
+    syncEmitClockToggle.onClick = [this]
+    {
+        session.syncOutputEmitClock.store (
+            syncEmitClockToggle.getToggleState(), std::memory_order_relaxed);
+    };
+    addAndMakeVisible (syncEmitClockToggle);
+
     // Subscribe to the engine's ChangeBroadcaster so a hot-plug MIDI
     // device rebuild repopulates the sync-source combo. Without this,
     // a user who plugs in a new MIDI device after opening the panel
@@ -166,10 +208,17 @@ void AudioSettingsPanel::resized()
     uiScaleSlider.setBounds (scaleRow.removeFromLeft (260).reduced (4, 2));
     uiScaleHint.setBounds   (scaleRow.reduced (4, 2));
 
-    // Row above scale: MIDI Clock sync source picker.
+    // MIDI Clock OUTPUT row (master mode): output picker + emit toggle.
+    auto syncOutRow = area.removeFromBottom (28);
+    syncOutputLabel.setBounds (syncOutRow.removeFromLeft (180).reduced (4, 2));
+    syncOutputCombo.setBounds (syncOutRow.removeFromLeft (300).reduced (4, 2));
+    syncEmitClockToggle.setBounds (syncOutRow.reduced (8, 2));
+
+    // MIDI Clock INPUT row: source picker + chase toggle.
     auto syncRow = area.removeFromBottom (28);
     syncSourceLabel.setBounds (syncRow.removeFromLeft (180).reduced (4, 2));
     syncSourceCombo.setBounds (syncRow.removeFromLeft (300).reduced (4, 2));
+    syncChaseTransportToggle.setBounds (syncRow.reduced (8, 2));
 
     selector->setBounds (area);
 }
@@ -271,8 +320,10 @@ void AudioSettingsPanel::changeListenerCallback (juce::ChangeBroadcaster*)
     // Engine broadcasts after refreshMidiInputs / hot-plug. Repopulate
     // so a newly-arrived device appears in the picker (and conversely,
     // a removed one disappears + falls back to "(none)" if it was
-    // selected).
+    // selected). Both input + output combos refresh - the rebuild path
+    // touches both banks.
     populateSyncSourceCombo();
+    populateSyncOutputCombo();
 }
 
 void AudioSettingsPanel::populateSyncSourceCombo()
@@ -306,5 +357,41 @@ void AudioSettingsPanel::applySyncSourceChange()
     if (idx < 0 || idx >= devices.size()) return;
     session.syncSourceInputIdentifier = devices[idx].identifier;
     session.syncSourceInputIdx.store (idx, std::memory_order_release);
+}
+
+void AudioSettingsPanel::populateSyncOutputCombo()
+{
+    // Identical shape to populateSyncSourceCombo but reads from the
+    // engine's MIDI OUTPUT bank.
+    syncOutputCombo.clear (juce::dontSendNotification);
+    syncOutputCombo.addItem ("(none)", 1);
+    const auto& devices = engine.getMidiOutputDevices();
+    int matchId = 1;
+    for (int i = 0; i < devices.size(); ++i)
+    {
+        syncOutputCombo.addItem (devices[i].name, i + 2);
+        if (devices[i].identifier == session.syncOutputIdentifier)
+            matchId = i + 2;
+    }
+    syncOutputCombo.setSelectedId (matchId, juce::dontSendNotification);
+}
+
+void AudioSettingsPanel::applySyncOutputChange()
+{
+    const int id = syncOutputCombo.getSelectedId();
+    if (id <= 1)
+    {
+        session.syncOutputIdentifier = juce::String();
+        session.syncOutputIdx.store (-1, std::memory_order_release);
+        return;
+    }
+    const auto& devices = engine.getMidiOutputDevices();
+    const int idx = id - 2;
+    if (idx < 0 || idx >= devices.size()) return;
+    session.syncOutputIdentifier = devices[idx].identifier;
+    session.syncOutputIdx.store (idx, std::memory_order_release);
+    // Eagerly open the port so the first audio-thread emission doesn't
+    // race with a synchronous ALSA snd_seq_connect.
+    engine.ensureMidiOutputOpen (idx);
 }
 } // namespace focal

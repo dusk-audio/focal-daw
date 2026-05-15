@@ -179,6 +179,7 @@ target_sources(Focal PRIVATE
     src/engine/BounceEngine.cpp
     src/engine/FileImporter.cpp
     src/engine/MasteringPlayer.cpp
+    src/engine/MidiClockEmitter.cpp
     src/engine/MidiSyncReceiver.cpp
     src/engine/PlaybackEngine.cpp
     src/engine/PluginManager.cpp

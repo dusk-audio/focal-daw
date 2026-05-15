@@ -73,6 +73,15 @@ private:
     // only - the chase + Start/Stop chase land in a later phase.
     juce::Label    syncSourceLabel { {}, "MIDI Sync Source" };
     juce::ComboBox syncSourceCombo;
+    // When checked, FA/FB (Start) and FC (Stop) from the master drive
+    // the engine's Transport state, not just the tempo display.
+    juce::ToggleButton syncChaseTransportToggle { "Chase transport (Start/Stop)" };
+
+    // MIDI Clock OUTPUT: Focal as master. Picker selects one of the
+    // engine's MIDI output ports; toggle enables F8 + FA/FC emission.
+    juce::Label    syncOutputLabel { {}, "MIDI Sync Output" };
+    juce::ComboBox syncOutputCombo;
+    juce::ToggleButton syncEmitClockToggle { "Emit clock (Focal as master)" };
 
     juce::Label  uiScaleLabel  { {}, "UI scale" };
     juce::Slider uiScaleSlider;
@@ -88,5 +97,7 @@ private:
     void openSelfTest();
     void populateSyncSourceCombo();
     void applySyncSourceChange();
+    void populateSyncOutputCombo();
+    void applySyncOutputChange();
 };
 } // namespace focal

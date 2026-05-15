@@ -1175,6 +1175,20 @@ public:
     mutable std::atomic<float> externalBpm            { 0.0f };
     mutable std::atomic<bool>  externalSyncRolling    { false };
     std::atomic<bool>          externalSyncFollowsTempo { true };
+    // When true, FA/FB (Start/Continue) and FC (Stop) bytes drive the
+    // engine's Transport state - Focal plays/stops in lock-step with
+    // the external master. Off by default so v1's "tempo-only" mode
+    // stays the baseline; user opts in via the Audio Settings panel.
+    std::atomic<bool>          externalSyncChasesTransport { false };
+
+    // MIDI Clock OUTPUT (master mode). syncOutputIdentifier picks one
+    // entry from the engine's midiOutputDevices list; -1 idx = off.
+    // syncOutputEmitClock toggles F8 + FA/FC emission to that port.
+    // v1 emits to a single port; multi-port emission can layer on
+    // later by widening syncOutputIdentifier to a comma-sep list.
+    juce::String              syncOutputIdentifier;          // empty = off
+    std::atomic<int>          syncOutputIdx        { -1 };
+    std::atomic<bool>         syncOutputEmitClock  { false };
 
     // Resolve the audio device input channel that this track should read from.
     // -2 (default) means "follow the track index", -1 means "no input".

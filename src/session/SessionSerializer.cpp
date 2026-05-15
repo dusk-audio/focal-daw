@@ -913,6 +913,10 @@ bool SessionSerializer::save (const Session& s, const juce::File& target)
     tport->setProperty ("sync_source_input",  s.syncSourceInputIdentifier);
     tport->setProperty ("sync_follow_tempo",
                           s.externalSyncFollowsTempo.load());
+    tport->setProperty ("sync_chase_transport",
+                          s.externalSyncChasesTransport.load());
+    tport->setProperty ("sync_output",         s.syncOutputIdentifier);
+    tport->setProperty ("sync_emit_clock",     s.syncOutputEmitClock.load());
     tport->setProperty ("beats_per_bar",     s.beatsPerBar.load());
     tport->setProperty ("beat_unit",         s.beatUnit.load());
     tport->setProperty ("metronome_enabled", s.metronomeEnabled.load());
@@ -1118,6 +1122,12 @@ bool SessionSerializer::load (Session& s, const juce::File& source)
             s.syncSourceInputIdentifier = tport["sync_source_input"].toString();
         if (tport.hasProperty ("sync_follow_tempo"))
             s.externalSyncFollowsTempo.store ((bool) tport["sync_follow_tempo"]);
+        if (tport.hasProperty ("sync_chase_transport"))
+            s.externalSyncChasesTransport.store ((bool) tport["sync_chase_transport"]);
+        if (tport.hasProperty ("sync_output"))
+            s.syncOutputIdentifier = tport["sync_output"].toString();
+        if (tport.hasProperty ("sync_emit_clock"))
+            s.syncOutputEmitClock.store ((bool) tport["sync_emit_clock"]);
         if (tport.hasProperty ("beats_per_bar"))     s.beatsPerBar.store      ((int)    tport["beats_per_bar"]);
         if (tport.hasProperty ("beat_unit"))         s.beatUnit.store         ((int)    tport["beat_unit"]);
         if (tport.hasProperty ("metronome_enabled")) s.metronomeEnabled.store ((bool)   tport["metronome_enabled"]);

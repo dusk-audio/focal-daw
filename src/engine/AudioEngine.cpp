@@ -288,6 +288,27 @@ void AudioEngine::rebuildMidiOutputBank()
     // for what's actually routed.
     midiOutputDevices = juce::MidiOutput::getAvailableDevices();
     midiOutputs.resize ((size_t) midiOutputDevices.size());  // all nullptr
+
+    // Resolve session.syncOutputIdentifier -> syncOutputIdx + eagerly
+    // open the chosen port so the first clock byte the audio thread
+    // emits doesn't have to wait on a synchronous ALSA connect. Empty
+    // identifier or no match -> -1 (no emission).
+    int resolvedSyncOutIdx = -1;
+    const auto& wantedOutId = session.syncOutputIdentifier;
+    if (wantedOutId.isNotEmpty())
+    {
+        for (int i = 0; i < midiOutputDevices.size(); ++i)
+        {
+            if (midiOutputDevices[i].identifier == wantedOutId)
+            {
+                resolvedSyncOutIdx = i;
+                ensureMidiOutputOpen (i);
+                break;
+            }
+        }
+    }
+    session.syncOutputIdx.store (resolvedSyncOutIdx, std::memory_order_release);
+    midiClockEmitter.reset();
 }
 
 bool AudioEngine::ensureMidiOutputOpen (int index)
@@ -830,6 +851,7 @@ void AudioEngine::prepareForSelfTest (double sr, int bs)
     // per-block playhead from. Reset on every prepare so a sample-rate
     // change drops stale BPM history.
     midiSyncReceiver.prepare (sr);
+    midiClockEmitter.prepare (sr);
 #if FOCAL_HAS_DUSK_DSP
     // TapeMachine animates its reels + level-integration timing from
     // getPlayHead()->getPosition(). Without a playhead the donor reads
@@ -964,14 +986,37 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     {
         midiSyncReceiver.process (perInputMidi[(size_t) syncIdx], midiSyncSampleClock);
         const float ext = midiSyncReceiver.getBpm();
+        const bool extRolling = midiSyncReceiver.isRolling();
         session.externalBpm.store (ext, std::memory_order_relaxed);
-        session.externalSyncRolling.store (midiSyncReceiver.isRolling(),
-                                              std::memory_order_relaxed);
+        session.externalSyncRolling.store (extRolling, std::memory_order_relaxed);
         if (ext > 0.0f
             && session.externalSyncFollowsTempo.load (std::memory_order_relaxed))
         {
             session.tempoBpm.store (ext, std::memory_order_relaxed);
         }
+
+        // Transport chase. Edge-triggered on the rolling flag so a
+        // long-running Start signal doesn't restart the transport
+        // every block. The actual play()/stop() calls are message-
+        // thread - we signal via pendingTransportAction and let the
+        // engine's existing timer drain it (same path MIDI Learn
+        // transport bindings use).
+        if (session.externalSyncChasesTransport.load (std::memory_order_relaxed))
+        {
+            if (extRolling && ! lastExtRolling)
+            {
+                session.pendingTransportAction.store (
+                    (int) PendingTransportAction::Play,
+                    std::memory_order_relaxed);
+            }
+            else if (! extRolling && lastExtRolling)
+            {
+                session.pendingTransportAction.store (
+                    (int) PendingTransportAction::Stop,
+                    std::memory_order_relaxed);
+            }
+        }
+        lastExtRolling = extRolling;
     }
     else
     {
@@ -980,8 +1025,51 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         // sync off.
         session.externalBpm.store (0.0f, std::memory_order_relaxed);
         session.externalSyncRolling.store (false, std::memory_order_relaxed);
+        lastExtRolling = false;
     }
     midiSyncSampleClock += numSamples;
+
+    // MIDI Clock OUTPUT (master mode). Generates F8 + FA/FC bytes into
+    // a scratch MidiBuffer and hands it to the chosen MidiOutput's
+    // background delivery thread. Uses the same monotonic sync clock
+    // so receiver + emitter share a sample-time origin (matters when
+    // a user has Focal as both slave AND master - rare but possible
+    // via a MIDI thru).
+    const int syncOutIdx = session.syncOutputIdx.load (std::memory_order_relaxed);
+    if (syncOutIdx != lastSyncOutputIdx)
+    {
+        midiClockEmitter.reset();
+        lastSyncOutputIdx = syncOutIdx;
+    }
+    const bool emitClock = session.syncOutputEmitClock.load (std::memory_order_relaxed)
+                         && syncOutIdx >= 0
+                         && (size_t) syncOutIdx < midiOutputs.size()
+                         && midiOutputs[(size_t) syncOutIdx] != nullptr;
+    if (emitClock)
+    {
+        // Rolling state from the engine's transport - the bytes drive
+        // SLAVES, so they need to mirror Focal's local state, not the
+        // external master's.
+        const bool rolling = transport.isPlaying() || transport.isRecording();
+        const float emitBpm = session.tempoBpm.load (std::memory_order_relaxed);
+        midiClockOutScratch.clear();
+        midiClockEmitter.generateBlock (midiSyncSampleClock - numSamples,
+                                          numSamples, emitBpm, rolling,
+                                          midiClockOutScratch);
+        if (! midiClockOutScratch.isEmpty())
+        {
+            // sendBlockOfMessages places the buffer into JUCE's background
+            // delivery queue. The timestamp arg is the "now" wall-clock
+            // ms used to scale the per-event sample offsets. sr > 0
+            // guaranteed by audioDeviceAboutToStart so the divide is
+            // safe here.
+            const double srSend = currentSampleRate.load (std::memory_order_relaxed);
+            midiOutputs[(size_t) syncOutIdx]->sendBlockOfMessages (
+                midiClockOutScratch,
+                juce::Time::getMillisecondCounterHiRes(),
+                srSend > 0.0 ? srSend : 48000.0);
+        }
+    }
 
     // Held-MIDI-notes tracking for the chord display. Walk every drained
     // MIDI buffer and flip the per-note atomic on Note On / Note Off.
