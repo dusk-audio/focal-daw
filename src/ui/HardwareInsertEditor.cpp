@@ -202,12 +202,16 @@ void HardwareInsertEditor::timerCallback()
 
             // Inline success status. Adds the ms equivalent so the user
             // can sanity-check the result against the interface's buffer
-            // size without doing arithmetic.
+            // size without doing arithmetic. When no audio device is
+            // open / sample rate is unknown, fall back to "? ms" rather
+            // than printing a misleading "0.00 ms".
             auto* device = deviceManager.getCurrentAudioDevice();
             const double sr = device != nullptr ? device->getCurrentSampleRate() : 0.0;
-            const double ms = sr > 0.0 ? (double) lag * 1000.0 / sr : 0.0;
+            const juce::String msPart = sr > 0.0
+                ? juce::String::formatted ("%.2f ms", (double) lag * 1000.0 / sr)
+                : juce::String ("? ms");
             pingStatusLabel.setText (
-                juce::String::formatted ("Detected: %d sam (%.2f ms)", lag, ms),
+                "Detected: " + juce::String (lag) + " sam (" + msPart + ")",
                 juce::dontSendNotification);
             pingStatusLabel.setColour (juce::Label::textColourId,
                                          juce::Colour (0xff70d090));

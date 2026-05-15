@@ -1941,8 +1941,14 @@ void TapeStrip::showRegionContextMenu (const RegionHit& hit, juce::Point<int> sc
                  hitCopy = hit, takeIdx = i]
                 {
                     if (safeThis == nullptr) return;
-                    const auto& cur = safeThis->session.track (hitCopy.track)
-                                            .regions[(size_t) hitCopy.regionIdx];
+                    // The region (or whole track) may have been deleted
+                    // between menu open + click - bounds-check before
+                    // indexing. Matches the MIDI variant's guard.
+                    if (hitCopy.track < 0 || hitCopy.track >= Session::kNumTracks) return;
+                    const auto& regs = safeThis->session.track (hitCopy.track).regions;
+                    if (hitCopy.regionIdx < 0
+                        || hitCopy.regionIdx >= (int) regs.size()) return;
+                    const auto& cur = regs[(size_t) hitCopy.regionIdx];
                     if (takeIdx < 0 || takeIdx >= (int) cur.previousTakes.size()) return;
 
                     AudioRegion before = cur;
@@ -2414,7 +2420,9 @@ void TapeStrip::paint (juce::Graphics& g)
                 && regionRect.getWidth()  >= 24)
             {
                 const int padX = 4;
-                const int badgeOffset = ! region.previousTakes.empty() ? 18 : 0;
+                // Badge is 36 px wide (see take-badge paint below) plus
+                // 2 px breathing room before the label starts.
+                const int badgeOffset = ! region.previousTakes.empty() ? 38 : 0;
                 auto labelArea = regionRect.withTrimmedLeft (padX + badgeOffset)
                                             .withTrimmedRight (padX);
                 if (labelArea.getWidth() > 0)
@@ -2635,7 +2643,8 @@ void TapeStrip::paint (juce::Graphics& g)
                 && regionRect.getHeight() >= 10
                 && regionRect.getWidth()  >= 24)
             {
-                const int badgeOffset = ! region.previousTakes.empty() ? 18 : 0;
+                // 36 px badge + 2 px breathing room.
+                const int badgeOffset = ! region.previousTakes.empty() ? 38 : 0;
                 auto labelArea = regionRect.withTrimmedLeft (4 + badgeOffset)
                                             .withTrimmedRight (4);
                 if (labelArea.getWidth() > 0)
