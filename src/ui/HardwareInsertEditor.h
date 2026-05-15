@@ -62,6 +62,11 @@ private:
 
     juce::Label      latencyLabel;
     juce::TextButton pingButton  { "Ping" };
+    // Inline status next to the Ping button. Reads "Measuring..." while
+    // in-flight, "Detected: N sam (X ms)" on success (green), or
+    // "Ping failed - check level / cables" on failure (red). Replaces
+    // the AlertWindow popup so the user keeps their eyes on the editor.
+    juce::Label      pingStatusLabel;
     juce::Label      latencySamplesLabel;
     juce::Slider     latencySlider;
 

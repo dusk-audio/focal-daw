@@ -91,8 +91,16 @@ HardwareInsertEditor::HardwareInsertEditor (HardwareInsertParams& paramsRef,
         params.pingPending.store (true,  std::memory_order_release);
         pingButton.setButtonText ("Pinging...");
         pingButton.setEnabled (false);
+        pingStatusLabel.setText ("Measuring...", juce::dontSendNotification);
+        pingStatusLabel.setColour (juce::Label::textColourId,
+                                     juce::Colour (0xff909094));
     };
     addAndMakeVisible (pingButton);
+
+    pingStatusLabel.setJustificationType (juce::Justification::centredLeft);
+    pingStatusLabel.setFont (juce::Font (juce::FontOptions (11.0f)));
+    pingStatusLabel.setColour (juce::Label::textColourId, juce::Colour (0xff909094));
+    addAndMakeVisible (pingStatusLabel);
 
     // Poll the audio-thread result + the strip's measured latency at
     // 10 Hz. Result-snapshot pattern: pingPending flips back to false
@@ -172,16 +180,15 @@ void HardwareInsertEditor::timerCallback()
         pingButton.setButtonText ("Ping");
         if (lag < 0)
         {
-            juce::AlertWindow::showAsync (
-                juce::MessageBoxOptions()
-                    .withIconType (juce::MessageBoxIconType::WarningIcon)
-                    .withTitle ("Latency Detection")
-                    .withMessage ("Ping failed - no clean return detected. "
-                                  "Check the SEND/RETURN cables, raise the "
-                                  "Output Volume, or measure the latency "
-                                  "manually and type the sample count.")
-                    .withButton ("OK"),
-                nullptr);
+            // Inline failure status - replaces the AlertWindow popup so
+            // the user can immediately retry without dismissing a modal.
+            // The full troubleshooting hint (cable / level / manual offset)
+            // lives in the editor's existing copy + tooltip on the ping
+            // button; the inline message names just the failure cause.
+            pingStatusLabel.setText ("Ping failed - check level / cables.",
+                                       juce::dontSendNotification);
+            pingStatusLabel.setColour (juce::Label::textColourId,
+                                         juce::Colour (0xffe06060));
         }
         else
         {
@@ -192,6 +199,18 @@ void HardwareInsertEditor::timerCallback()
             // that lands in the routing snapshot.
             latencySlider.setValue ((double) lag, juce::dontSendNotification);
             publishRoutingFromUi();
+
+            // Inline success status. Adds the ms equivalent so the user
+            // can sanity-check the result against the interface's buffer
+            // size without doing arithmetic.
+            auto* device = deviceManager.getCurrentAudioDevice();
+            const double sr = device != nullptr ? device->getCurrentSampleRate() : 0.0;
+            const double ms = sr > 0.0 ? (double) lag * 1000.0 / sr : 0.0;
+            pingStatusLabel.setText (
+                juce::String::formatted ("Detected: %d sam (%.2f ms)", lag, ms),
+                juce::dontSendNotification);
+            pingStatusLabel.setColour (juce::Label::textColourId,
+                                         juce::Colour (0xff70d090));
         }
     }
 }
@@ -333,6 +352,8 @@ void HardwareInsertEditor::resized()
         latencyLabel.setBounds (row.removeFromLeft (kLabelW));
         row.removeFromLeft (kControlPadL);
         pingButton.setBounds (row.removeFromLeft (90));
+        row.removeFromLeft (8);
+        pingStatusLabel.setBounds (row);
         bounds.removeFromTop (kRowGap);
     }
     layoutRow (latencySamplesLabel, latencySlider);
