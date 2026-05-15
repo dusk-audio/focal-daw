@@ -1049,6 +1049,161 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                                           std::memory_order_relaxed);
                             }
                             break;
+                        case MidiBindingTarget::TrackAuxSend:
+                        {
+                            // Decode the packed (track, aux) index and map
+                            // CC 0..127 onto the aux-send dB range. CC 0
+                            // lands on the kAuxSendOffDb sentinel so a
+                            // fully-down controller hard-mutes the send
+                            // (matches the UI knob's CCW behaviour).
+                            const int trk = unpackTrackAuxTrack (b.targetIndex);
+                            const int aux = unpackTrackAuxLane  (b.targetIndex);
+                            if (trk >= 0 && trk < Session::kNumTracks
+                                && aux >= 0 && aux < ChannelStripParams::kNumAuxSends)
+                            {
+                                const float db = (val == 0)
+                                    ? ChannelStripParams::kAuxSendOffDb
+                                    : ChannelStripParams::kAuxSendMinDb
+                                       + ((float) val / 127.0f)
+                                          * (ChannelStripParams::kAuxSendMaxDb
+                                             - ChannelStripParams::kAuxSendMinDb);
+                                session.track (trk).strip.auxSendDb[(size_t) aux]
+                                    .store (db, std::memory_order_relaxed);
+                            }
+                            break;
+                        }
+                        case MidiBindingTarget::TrackHpfFreq:
+                        {
+                            // CC 0 maps to kHpfOffHz (bypass sentinel). 1..127
+                            // is log-mapped over the rest of the range so the
+                            // perceived sweep stays linear across the band.
+                            if (b.targetIndex >= 0 && b.targetIndex < Session::kNumTracks)
+                            {
+                                float freq;
+                                if (val == 0)
+                                {
+                                    freq = ChannelStripParams::kHpfOffHz;
+                                }
+                                else
+                                {
+                                    const float lo = ChannelStripParams::kHpfMinHz;
+                                    const float hi = ChannelStripParams::kHpfMaxHz;
+                                    const float frac = (float) val / 127.0f;
+                                    freq = lo * std::exp (std::log (hi / lo) * frac);
+                                }
+                                session.track (b.targetIndex).strip.hpfFreq
+                                    .store (freq, std::memory_order_relaxed);
+                                session.track (b.targetIndex).strip.hpfEnabled
+                                    .store (freq > ChannelStripParams::kHpfOffHz + 0.5f,
+                                             std::memory_order_relaxed);
+                            }
+                            break;
+                        }
+                        case MidiBindingTarget::TrackEqGain:
+                        {
+                            // CC 0..127 -> -15..+15 dB linearly. Band index
+                            // 0=LF, 1=LM, 2=HM, 3=HF; the apply path writes
+                            // the matching atom on the strip.
+                            const int trk  = unpackTrackEqTrack (b.targetIndex);
+                            const int band = unpackTrackEqBand  (b.targetIndex);
+                            if (trk >= 0 && trk < Session::kNumTracks
+                                && band >= 0 && band < kPackedEqBands)
+                            {
+                                const float frac = (float) val / 127.0f;
+                                const float db = -15.0f + frac * 30.0f;
+                                auto& strip = session.track (trk).strip;
+                                switch (band)
+                                {
+                                    case 0: strip.lfGainDb.store (db, std::memory_order_relaxed); break;
+                                    case 1: strip.lmGainDb.store (db, std::memory_order_relaxed); break;
+                                    case 2: strip.hmGainDb.store (db, std::memory_order_relaxed); break;
+                                    case 3: strip.hfGainDb.store (db, std::memory_order_relaxed); break;
+                                }
+                            }
+                            break;
+                        }
+                        case MidiBindingTarget::TrackCompThresh:
+                        case MidiBindingTarget::TrackCompMakeup:
+                        {
+                            // Mode-aware: the strip exposes Opto / FET / VCA
+                            // each with its own "threshold-ish" and "makeup-
+                            // ish" knob, on different ranges. Pick the atom
+                            // matching the CURRENT mode and remap CC 0..127
+                            // onto that range. A single binding therefore
+                            // tracks whatever mode the user has selected.
+                            if (b.targetIndex < 0 || b.targetIndex >= Session::kNumTracks)
+                                break;
+                            auto& strip = session.track (b.targetIndex).strip;
+                            const int mode = juce::jlimit (0, 2,
+                                strip.compMode.load (std::memory_order_relaxed));
+                            const float frac = (float) val / 127.0f;
+                            const bool isMakeup = (b.target == MidiBindingTarget::TrackCompMakeup);
+                            auto remap = [frac] (float lo, float hi)
+                            {
+                                return lo + frac * (hi - lo);
+                            };
+                            if (isMakeup)
+                            {
+                                switch (mode)
+                                {
+                                    case 0: strip.compOptoGain.store (remap (0.0f, 100.0f), std::memory_order_relaxed); break;
+                                    case 1: strip.compFetOutput.store (remap (-20.0f, 20.0f), std::memory_order_relaxed); break;
+                                    case 2: strip.compVcaOutput.store (remap (-20.0f, 20.0f), std::memory_order_relaxed); break;
+                                }
+                                // Mirror to the unified makeup atom so the
+                                // FET threshold math stays composed (see
+                                // ChannelStripParams::compMakeupDb comment).
+                                strip.compMakeupDb.store (remap (-20.0f, 20.0f), std::memory_order_relaxed);
+                            }
+                            else // threshold
+                            {
+                                switch (mode)
+                                {
+                                    case 0: strip.compOptoPeakRed.store (remap (0.0f, 100.0f), std::memory_order_relaxed); break;
+                                    case 1: strip.compFetInput.store    (remap (-20.0f, 40.0f), std::memory_order_relaxed); break;
+                                    case 2: strip.compVcaThreshDb.store (remap (-38.0f, 12.0f), std::memory_order_relaxed); break;
+                                }
+                            }
+                            break;
+                        }
+                        case MidiBindingTarget::BusFader:
+                            if (b.targetIndex >= 0 && b.targetIndex < Session::kNumBuses)
+                            {
+                                const float frac = (float) val / 127.0f;
+                                const float db = -90.0f + frac * (12.0f + 90.0f);
+                                session.bus (b.targetIndex).strip.faderDb.store (
+                                    db, std::memory_order_relaxed);
+                            }
+                            break;
+                        case MidiBindingTarget::BusPan:
+                            if (b.targetIndex >= 0 && b.targetIndex < Session::kNumBuses)
+                            {
+                                const float p = ((float) val / 127.0f) * 2.0f - 1.0f;
+                                session.bus (b.targetIndex).strip.pan.store (
+                                    p, std::memory_order_relaxed);
+                            }
+                            break;
+                        case MidiBindingTarget::BusMute:
+                            if (val >= 64 && b.targetIndex >= 0 && b.targetIndex < Session::kNumBuses)
+                            {
+                                auto& a = session.bus (b.targetIndex).strip.mute;
+                                a.store (! a.load (std::memory_order_relaxed),
+                                          std::memory_order_relaxed);
+                            }
+                            break;
+                        case MidiBindingTarget::BusSolo:
+                            // Routes through Session::setBusSoloed so the
+                            // anyBusSoloed counter stays in sync (the audio
+                            // thread relies on it for O(1) "is any bus
+                            // soloed?" checks).
+                            if (val >= 64 && b.targetIndex >= 0 && b.targetIndex < Session::kNumBuses)
+                            {
+                                const bool was = session.bus (b.targetIndex)
+                                                       .strip.solo.load (std::memory_order_relaxed);
+                                session.setBusSoloed (b.targetIndex, ! was);
+                            }
+                            break;
+
                         case MidiBindingTarget::MasterFader:
                         {
                             const float frac = (float) val / 127.0f;

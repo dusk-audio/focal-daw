@@ -18,6 +18,15 @@ const char* nameForTarget (MidiBindingTarget t) noexcept
         case MidiBindingTarget::TrackMute:       return "Track mute";
         case MidiBindingTarget::TrackSolo:       return "Track solo";
         case MidiBindingTarget::TrackArm:        return "Track arm";
+        case MidiBindingTarget::TrackAuxSend:    return "AUX send";
+        case MidiBindingTarget::TrackHpfFreq:    return "HPF cutoff";
+        case MidiBindingTarget::TrackEqGain:     return "EQ band gain";
+        case MidiBindingTarget::TrackCompThresh: return "Comp threshold";
+        case MidiBindingTarget::TrackCompMakeup: return "Comp makeup";
+        case MidiBindingTarget::BusFader:        return "Bus fader";
+        case MidiBindingTarget::BusPan:          return "Bus pan";
+        case MidiBindingTarget::BusMute:         return "Bus mute";
+        case MidiBindingTarget::BusSolo:         return "Bus solo";
         case MidiBindingTarget::MasterFader:     return "Master fader";
     }
     return "?";

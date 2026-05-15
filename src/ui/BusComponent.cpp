@@ -1,5 +1,6 @@
 #include "BusComponent.h"
 #include "FocalLookAndFeel.h"  // fourKColors palette
+#include "../session/MidiBindings.h"
 
 namespace focal
 {
@@ -209,6 +210,16 @@ BusComponent::BusComponent (Bus& b, Session& s, int idx)
     };
     addAndMakeVisible (soloButton);
 
+    // Mouse listeners so the strip's mouseDown sees right-clicks on each
+    // child (e.eventComponent identifies which control was hit). Matches
+    // the ChannelStripComponent pattern - the strip body handles all
+    // right-click routing in one place rather than each control owning
+    // its own MIDI Learn menu.
+    faderSlider.addMouseListener (this, false);
+    muteButton .addMouseListener (this, false);
+    soloButton .addMouseListener (this, false);
+    panKnob    .addMouseListener (this, false);
+
     auto styleReadout = [] (juce::Label& lbl, juce::Colour col)
     {
         lbl.setJustificationType (juce::Justification::centred);
@@ -279,7 +290,38 @@ void BusComponent::timerCallback()
 
 void BusComponent::mouseDown (const juce::MouseEvent& e)
 {
-    if (e.mods.isPopupMenu()) showColourMenu();
+    if (e.mods.isPopupMenu())
+    {
+        // Per-child MIDI Learn routes. The strip is registered as a
+        // mouse listener on each control above; eventComponent tells us
+        // which one was right-clicked. Falls through to the colour menu
+        // on background clicks (no eventComponent match).
+        if (e.eventComponent == &faderSlider)
+        {
+            midilearn::showLearnMenu (faderSlider, sessionRef,
+                                        MidiBindingTarget::BusFader, busIndex);
+            return;
+        }
+        if (e.eventComponent == &muteButton)
+        {
+            midilearn::showLearnMenu (muteButton, sessionRef,
+                                        MidiBindingTarget::BusMute, busIndex);
+            return;
+        }
+        if (e.eventComponent == &soloButton)
+        {
+            midilearn::showLearnMenu (soloButton, sessionRef,
+                                        MidiBindingTarget::BusSolo, busIndex);
+            return;
+        }
+        if (e.eventComponent == &panKnob)
+        {
+            midilearn::showLearnMenu (panKnob, sessionRef,
+                                        MidiBindingTarget::BusPan, busIndex);
+            return;
+        }
+        showColourMenu();
+    }
 }
 
 void BusComponent::applyBusColour (juce::Colour c) { bus.colour = c; repaint(); }

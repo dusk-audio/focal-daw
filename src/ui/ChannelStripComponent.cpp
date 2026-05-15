@@ -156,6 +156,7 @@ ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
     };
     hpfKnob.setValue (track.strip.hpfFreq.load (std::memory_order_relaxed), juce::dontSendNotification);
     hpfKnob.onValueChange = [this] { onHpfKnobChanged(); };
+    hpfKnob.addMouseListener (this, false);
     addAndMakeVisible (hpfKnob);
 
     // ── EQ region ──
@@ -249,6 +250,11 @@ ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
     setupCompKnob (optoGainKnob, optoGainLabel, "GAIN",
                    0.0, 100.0, 50.0, 0.0, "Output gain (% - 50 = unity)",
                    track.strip.compOptoGain, "", 0);
+    // Comp threshold + makeup right-click hooks. Each per-mode "threshold-
+    // ish" / "makeup-ish" knob routes to the same logical MIDI Learn
+    // target so one binding tracks the user's mode switches.
+    optoPeakRedKnob.addMouseListener (this, false);
+    optoGainKnob   .addMouseListener (this, false);
     addAndMakeVisible (optoPeakRedKnob);  addAndMakeVisible (optoPeakRedLabel);
     addAndMakeVisible (optoGainKnob);     addAndMakeVisible (optoGainLabel);
 
@@ -280,6 +286,8 @@ ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
     setupCompKnob (fetReleaseKnob, fetReleaseLabel, "REL",
                    50.0, 1100.0, 400.0, 300.0, "Release (ms)",
                    track.strip.compFetRelease, "", 0);
+    fetInputKnob .addMouseListener (this, false);
+    fetOutputKnob.addMouseListener (this, false);
     addAndMakeVisible (fetInputKnob);   addAndMakeVisible (fetInputLabel);
     addAndMakeVisible (fetOutputKnob);  addAndMakeVisible (fetOutputLabel);
     addAndMakeVisible (fetAttackKnob);  addAndMakeVisible (fetAttackLabel);
@@ -331,6 +339,7 @@ ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
     setupCompKnob (vcaOutputKnob,  vcaOutputLabel,  "OUT",
                    -20.0, 20.0, 0.0, 0.0, "Output gain (dB)",
                    track.strip.compVcaOutput, "", 1);
+    vcaOutputKnob.addMouseListener (this, false);
     addAndMakeVisible (vcaRatioKnob);    addAndMakeVisible (vcaRatioLabel);
     addAndMakeVisible (vcaAttackKnob);   addAndMakeVisible (vcaAttackLabel);
     addAndMakeVisible (vcaReleaseKnob);  addAndMakeVisible (vcaReleaseLabel);
@@ -371,6 +380,9 @@ ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
                 atomicPtr->store ((float) knob->getValue(), std::memory_order_relaxed);
             };
         }
+        // Mouse listener so the strip's mouseDown handler can route a
+        // right-click on this band's gain slider to MIDI Learn.
+        row.gain->addMouseListener (this, false);
         addAndMakeVisible (row.gain.get());
 
         row.freq = std::make_unique<juce::Slider>();
@@ -911,6 +923,9 @@ ChannelStripComponent::ChannelStripComponent (int idx, Track& t, Session& s,
         {
             track.strip.auxSendTouched[(size_t) idx].store (false, std::memory_order_release);
         };
+        // Route right-clicks on the aux knob through the strip's mouseDown
+        // so MIDI Learn picks up `e.eventComponent == auxKnobs[i].get()`.
+        knob->addMouseListener (this, false);
         addChildComponent (knob.get());
         auxKnobs[(size_t) i] = std::move (knob);
 
@@ -2292,6 +2307,67 @@ void ChannelStripComponent::mouseDown (const juce::MouseEvent& e)
         {
             midilearn::showLearnMenu (armButton, session,
                                         MidiBindingTarget::TrackArm, trackIndex);
+            return;
+        }
+        // Right-click on any aux knob -> MIDI Learn for that (track, aux)
+        // pair. The packed index encodes track * kNumAuxSends + aux so
+        // one binding can address any of the 16 x 4 = 64 send positions.
+        for (int i = 0; i < (int) auxKnobs.size(); ++i)
+        {
+            if (auxKnobs[(size_t) i] != nullptr
+                && e.eventComponent == auxKnobs[(size_t) i].get())
+            {
+                midilearn::showLearnMenu (*auxKnobs[(size_t) i], session,
+                                            MidiBindingTarget::TrackAuxSend,
+                                            packTrackAux (trackIndex, i));
+                return;
+            }
+        }
+        // HPF + EQ band gains. Same eventComponent-match shape as the
+        // other strip controls. Freq + Q knobs aren't bindable in v1 -
+        // gain is the most-automated EQ knob in practice.
+        if (e.eventComponent == &hpfKnob)
+        {
+            midilearn::showLearnMenu (hpfKnob, session,
+                                        MidiBindingTarget::TrackHpfFreq, trackIndex);
+            return;
+        }
+        for (int i = 0; i < (int) eqRows.size(); ++i)
+        {
+            if (eqRows[(size_t) i].gain != nullptr
+                && e.eventComponent == eqRows[(size_t) i].gain.get())
+            {
+                midilearn::showLearnMenu (*eqRows[(size_t) i].gain, session,
+                                            MidiBindingTarget::TrackEqGain,
+                                            packTrackEqBand (trackIndex, i));
+                return;
+            }
+        }
+        // Comp threshold/makeup: each per-mode knob routes to the LOGICAL
+        // target so the binding survives mode swaps (audio thread reads
+        // compMode and writes to the matching atom). VCA threshold has
+        // no dedicated knob in the UI (it lives on the GR-strip drag
+        // handle); right-clicking the Opto/FET threshold knob binds it
+        // for all modes.
+        if (e.eventComponent == &optoPeakRedKnob
+            || e.eventComponent == &fetInputKnob)
+        {
+            auto& src = (e.eventComponent == &optoPeakRedKnob)
+                            ? optoPeakRedKnob : fetInputKnob;
+            midilearn::showLearnMenu (src, session,
+                                        MidiBindingTarget::TrackCompThresh, trackIndex);
+            return;
+        }
+        if (e.eventComponent == &optoGainKnob
+            || e.eventComponent == &fetOutputKnob
+            || e.eventComponent == &vcaOutputKnob)
+        {
+            auto& src = (e.eventComponent == &optoGainKnob)
+                            ? optoGainKnob
+                            : (e.eventComponent == &fetOutputKnob ? fetOutputKnob
+                                                                    : vcaOutputKnob);
+            midilearn::showLearnMenu (src, session,
+                                        MidiBindingTarget::TrackCompMakeup, trackIndex);
             return;
         }
     }

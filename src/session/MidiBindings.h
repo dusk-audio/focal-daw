@@ -37,6 +37,23 @@ enum class MidiBindingTarget : int
     TrackMute         = 102, // discrete on press
     TrackSolo         = 103, // discrete on press
     TrackArm          = 104, // discrete on press
+    TrackAuxSend      = 105, // continuous; targetIndex packs track + aux
+                              // (track * kNumAuxSends + auxIdx)
+    TrackHpfFreq      = 106, // continuous; targetIndex = track
+    TrackEqGain       = 107, // continuous; targetIndex packs track + band
+                              // (track * 4 + band, band 0=LF 1=LM 2=HM 3=HF)
+    // Mode-aware compressor bindings. The strip has 3 comp models
+    // (Opto/FET/VCA); each has its own threshold + makeup knob with a
+    // different range. These targets bind the LOGICAL knob: the apply
+    // path reads `compMode` per block and writes to the matching
+    // per-mode atom so a single binding survives mode flips.
+    TrackCompThresh   = 108, // continuous; targetIndex = track
+    TrackCompMakeup   = 109, // continuous; targetIndex = track
+
+    BusFader          = 150, // continuous; targetIndex = bus 0..kNumBuses-1
+    BusPan            = 151, // continuous; -1..+1
+    BusMute           = 152, // discrete on press
+    BusSolo           = 153, // discrete on press
 
     MasterFader       = 200, // continuous
 };
@@ -47,11 +64,19 @@ constexpr bool isContinuousTarget (MidiBindingTarget t) noexcept
 {
     return t == MidiBindingTarget::TrackFader
         || t == MidiBindingTarget::TrackPan
+        || t == MidiBindingTarget::TrackAuxSend
+        || t == MidiBindingTarget::TrackHpfFreq
+        || t == MidiBindingTarget::TrackEqGain
+        || t == MidiBindingTarget::TrackCompThresh
+        || t == MidiBindingTarget::TrackCompMakeup
+        || t == MidiBindingTarget::BusFader
+        || t == MidiBindingTarget::BusPan
         || t == MidiBindingTarget::MasterFader;
 }
 
-// True when the target needs a track index. False = global target
-// (transport / master / etc.).
+// True when the target needs a strip index. Track + bus targets both
+// use targetIndex; the apply path disambiguates via the enum value.
+// False = global target (transport / master / etc.).
 constexpr bool needsTrackIndex (MidiBindingTarget t) noexcept
 {
     return t == MidiBindingTarget::TrackFader
@@ -59,6 +84,51 @@ constexpr bool needsTrackIndex (MidiBindingTarget t) noexcept
         || t == MidiBindingTarget::TrackMute
         || t == MidiBindingTarget::TrackSolo
         || t == MidiBindingTarget::TrackArm;
+}
+
+// True when the target needs a bus index (0..kNumBuses-1).
+constexpr bool needsBusIndex (MidiBindingTarget t) noexcept
+{
+    return t == MidiBindingTarget::BusFader
+        || t == MidiBindingTarget::BusPan
+        || t == MidiBindingTarget::BusMute
+        || t == MidiBindingTarget::BusSolo;
+}
+
+// True when the target packs two indices (track + aux-lane) into
+// targetIndex via packTrackAux(). The apply path decodes back to the
+// (track, aux) pair before reading the right atom.
+constexpr bool needsPackedTrackAuxIndex (MidiBindingTarget t) noexcept
+{
+    return t == MidiBindingTarget::TrackAuxSend;
+}
+
+// Packing helpers for TrackAuxSend. Bus + aux range fits within the
+// 0..255 budget for targetIndex (kNumTracks=16 x kNumAuxSends=4 = 64).
+// kNumAuxSendsLanes is the multiplier - hard-coded so the helper stays
+// header-only (Session.h pulls in too much).
+constexpr int kPackedAuxLanes = 4;
+constexpr int packTrackAux (int track, int aux) noexcept
+{
+    return track * kPackedAuxLanes + aux;
+}
+constexpr int unpackTrackAuxTrack (int packed) noexcept { return packed / kPackedAuxLanes; }
+constexpr int unpackTrackAuxLane  (int packed) noexcept { return packed % kPackedAuxLanes; }
+
+// Same packing shape for TrackEqGain: 4 bands per track (LF / LM / HM / HF).
+// Range fits in targetIndex (kNumTracks 16 * 4 = 64).
+constexpr int kPackedEqBands = 4;
+constexpr int packTrackEqBand (int track, int band) noexcept
+{
+    return track * kPackedEqBands + band;
+}
+constexpr int unpackTrackEqTrack (int packed) noexcept { return packed / kPackedEqBands; }
+constexpr int unpackTrackEqBand  (int packed) noexcept { return packed % kPackedEqBands; }
+
+// True when the target packs a (track, band) pair like TrackEqGain.
+constexpr bool needsPackedTrackEqIndex (MidiBindingTarget t) noexcept
+{
+    return t == MidiBindingTarget::TrackEqGain;
 }
 
 struct MidiBinding

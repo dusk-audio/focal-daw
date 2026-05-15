@@ -1160,13 +1160,33 @@ bool SessionSerializer::load (Session& s, const juce::File& source)
                     case (int) MidiBindingTarget::TrackMute:
                     case (int) MidiBindingTarget::TrackSolo:
                     case (int) MidiBindingTarget::TrackArm:
+                    case (int) MidiBindingTarget::TrackAuxSend:
+                    case (int) MidiBindingTarget::TrackHpfFreq:
+                    case (int) MidiBindingTarget::TrackEqGain:
+                    case (int) MidiBindingTarget::TrackCompThresh:
+                    case (int) MidiBindingTarget::TrackCompMakeup:
+                    case (int) MidiBindingTarget::BusFader:
+                    case (int) MidiBindingTarget::BusPan:
+                    case (int) MidiBindingTarget::BusMute:
+                    case (int) MidiBindingTarget::BusSolo:
                     case (int) MidiBindingTarget::MasterFader:
                         b.target = (MidiBindingTarget) rawTgt; break;
                     default:
                         b.target = MidiBindingTarget::None; break;
                 }
-                b.targetIndex = juce::jlimit (0, Session::kNumTracks - 1,
-                    v.hasProperty ("target_idx") ? (int) v["target_idx"] : 0);
+                // Bus targets index 0..kNumBuses-1; aux-send targets pack
+                // (track, aux) so range is 0..(kNumTracks*kNumAuxSends-1);
+                // everything else uses 0..kNumTracks-1 (global targets
+                // ignore the field).
+                const int rawIdx = v.hasProperty ("target_idx") ? (int) v["target_idx"] : 0;
+                const int maxIdx = needsBusIndex (b.target)
+                    ? Session::kNumBuses - 1
+                    : (needsPackedTrackAuxIndex (b.target)
+                        ? Session::kNumTracks * ChannelStripParams::kNumAuxSends - 1
+                        : (needsPackedTrackEqIndex (b.target)
+                            ? Session::kNumTracks * kPackedEqBands - 1
+                            : Session::kNumTracks - 1));
+                b.targetIndex = juce::jlimit (0, maxIdx, rawIdx);
                 if (b.isValid())
                     fresh->push_back (b);
             }
