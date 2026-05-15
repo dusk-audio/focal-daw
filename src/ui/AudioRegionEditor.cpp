@@ -837,6 +837,19 @@ void AudioRegionEditor::mouseDown (const juce::MouseEvent& e)
                                                    getWidth(),
                                                    getHeight() - kIconRowHeight - kRulerHeight - kStatusBarH);
 
+    // Middle-mouse-drag pans the timeline. Captured before any other
+    // branch so it never gets shadowed by handle / range / context-menu
+    // logic. Active inside the wave area only - middle-click on the
+    // ruler / status bar does nothing.
+    if (e.mods.isMiddleButtonDown() && waveArea.contains (e.x, e.y))
+    {
+        dragMode = DragMode::Pan;
+        panStartMouseX = e.x;
+        panStartScroll = scrollSamples;
+        setMouseCursor (juce::MouseCursor::DraggingHandCursor);
+        return;
+    }
+
     // Right-click → context menu (split / reset gain / reset fades / mute /
     // lock / colour). Captured here so it doesn't slip through to the
     // edit-cursor branch below. Right-click on a fade handle goes to the
@@ -1097,6 +1110,23 @@ void AudioRegionEditor::mouseDrag (const juce::MouseEvent& e)
                                                    getWidth(),
                                                    getHeight() - kIconRowHeight - kRulerHeight - kStatusBarH);
 
+    // Pan drag: convert the mouse-x delta to a sample delta and apply
+    // against the captured scroll origin so the timeline tracks the
+    // cursor 1:1. Inverted because dragging right should move the
+    // timeline left (revealing content to the right of the visible
+    // window).
+    if (dragMode == DragMode::Pan)
+    {
+        const int dxPixels = e.x - panStartMouseX;
+        const auto dxSamples = (juce::int64) std::round (
+            - (double) dxPixels / juce::jmax (1.0e-5f, pixelsPerSample));
+        scrollSamples = juce::jlimit<juce::int64> (0,
+            juce::jmax<juce::int64> (0, anchorTimelineLength - 1),
+            panStartScroll + dxSamples);
+        repaint();
+        return;
+    }
+
     // Snap-on-drag. Cmd bypasses (matches TransportBar's snap-toggle UI:
     // permanent toggle for the default, modifier-key escape for one-off
     // overrides). Snap operates in TIMELINE space (where the user reads
@@ -1264,6 +1294,14 @@ void AudioRegionEditor::mouseDrag (const juce::MouseEvent& e)
 void AudioRegionEditor::mouseUp (const juce::MouseEvent&)
 {
     auto* r = region();
+    // Pan ends with no undo entry / no state to commit - just clear the
+    // drag state and restore the default cursor.
+    if (dragMode == DragMode::Pan)
+    {
+        dragMode = DragMode::None;
+        setMouseCursor (juce::MouseCursor::NormalCursor);
+        return;
+    }
     if (dragMode == DragMode::Range)
     {
         // Normalise so start <= end (drag-leftwards still works).
@@ -1497,8 +1535,13 @@ void AudioRegionEditor::showFadeShapeMenu (juce::Point<int> screenPos, bool isFa
             AudioRegion after = before;
             if (isFadeIn) { after.fadeInShape  = picked; after.fadeInAuto  = false; }
             else          { after.fadeOutShape = picked; after.fadeOutAuto = false; }
-            if (after.fadeInShape == before.fadeInShape
-                && after.fadeOutShape == before.fadeOutShape) return;
+            // Compare auto flags too: picking the same shape that's
+            // already active still needs to clear the auto flag, which
+            // is a real change that should produce an undo entry.
+            if (after.fadeInShape  == before.fadeInShape
+                && after.fadeOutShape == before.fadeOutShape
+                && after.fadeInAuto  == before.fadeInAuto
+                && after.fadeOutAuto == before.fadeOutAuto) return;
             auto& um = self->engine.getUndoManager();
             um.beginNewTransaction (isFadeIn ? "Fade-in shape" : "Fade-out shape");
             um.perform (new RegionEditAction (
@@ -1530,16 +1573,21 @@ void AudioRegionEditor::mouseWheelMove (const juce::MouseEvent& e,
         const auto cursorSampleAfterRaw = sampleForX (e.x, waveArea);
         scrollSamples += (cursorSampleBefore - cursorSampleAfterRaw);
         scrollSamples = juce::jlimit<juce::int64> (0,
-            juce::jmax<juce::int64> (0, r->lengthInSamples - 1), scrollSamples);
+            juce::jmax<juce::int64> (0, anchorTimelineLength - 1), scrollSamples);
         repaint();
         return;
     }
 
-    // Plain wheel = horizontal scroll.
+    // Plain wheel / trackpad = horizontal scroll. Prefer deltaX when the
+    // trackpad reports one (macOS two-finger horizontal swipe) and fall
+    // back to deltaY so vertical-wheel-only mice keep panning the timeline
+    // (matches the legacy behaviour and the PianoRoll convention).
+    const float deltaForPan = std::abs (w.deltaX) > 0.001f ? w.deltaX
+                                                              : w.deltaY;
     const auto step = (juce::int64) std::round (
-        - (double) w.deltaY * 64.0 / juce::jmax (1.0e-5f, pixelsPerSample));
+        - (double) deltaForPan * 64.0 / juce::jmax (1.0e-5f, pixelsPerSample));
     scrollSamples = juce::jlimit<juce::int64> (0,
-        juce::jmax<juce::int64> (0, r->lengthInSamples - 1),
+        juce::jmax<juce::int64> (0, anchorTimelineLength - 1),
         scrollSamples + step);
     repaint();
 }
@@ -1906,7 +1954,7 @@ void AudioRegionEditor::zoomByFactor (float factor)
     const auto anchorSampleAfterRaw = sampleForX (anchorXBefore, waveArea);
     scrollSamples += (editCursorSample - anchorSampleAfterRaw);
     scrollSamples = juce::jlimit<juce::int64> (0,
-        juce::jmax<juce::int64> (0, r->lengthInSamples - 1), scrollSamples);
+        juce::jmax<juce::int64> (0, anchorTimelineLength - 1), scrollSamples);
     repaint();
 }
 

@@ -1816,6 +1816,27 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
     auto* r = region();
     if (r == nullptr) return;
 
+    // Middle-mouse-drag in the grid pans the timeline + keyboard range
+    // together. Captured first so it never gets shadowed by note hits /
+    // range select / context menus. Constrained to the grid area
+    // (right of the keyboard, above the velocity / cc strips) so middle-
+    // clicking the toolbar / keyboard / strips still does nothing.
+    const int gridTop    = kToolbarHeight + kHeaderHeight;
+    const int ccTop      = getHeight() - kStatusBarH - ccStripH;
+    const int velTopY    = ccTop - velocityStripH;
+    if (e.mods.isMiddleButtonDown()
+        && e.x >= kKeyboardWidth
+        && e.y >= gridTop && e.y < velTopY)
+    {
+        dragMode        = DragMode::Pan;
+        panStartMouseX  = e.x;
+        panStartMouseY  = e.y;
+        panStartScrollX = scrollX;
+        panStartScrollY = scrollY;
+        setMouseCursor (juce::MouseCursor::DraggingHandCursor);
+        return;
+    }
+
     // Right-click on a note opens the per-note properties popup.
     // If the clicked note isn't already selected, promote it to a
     // single-note selection first so the menu's actions have a
@@ -2064,6 +2085,24 @@ void PianoRollComponent::mouseDrag (const juce::MouseEvent& e)
     auto* r = region();
     if (r == nullptr) return;
 
+    // Pan drag - translate scrollX + scrollY by the absolute mouse
+    // delta from the drag origin. Inverted so dragging right moves the
+    // timeline left (revealing content to the right). Y clamped to the
+    // valid scroll range; X is open on the right (the user can pan past
+    // the region's end, matching the editor's "open-ended grid" model).
+    if (dragMode == DragMode::Pan)
+    {
+        const int dx = e.x - panStartMouseX;
+        const int dy = e.y - panStartMouseY;
+        scrollX = juce::jmax (0, panStartScrollX - dx);
+        const int maxScrollY = juce::jmax (0,
+            kFullGridHeight - (getHeight() - kToolbarHeight - kHeaderHeight
+                                  - velocityStripH - ccStripH - kStatusBarH));
+        scrollY = juce::jlimit (0, maxScrollY, panStartScrollY - dy);
+        repaint();
+        return;
+    }
+
     if (dragMode == DragMode::BoxSelect)
     {
         // Rubber band tracks from mouseDown origin to current point.
@@ -2245,6 +2284,15 @@ void PianoRollComponent::mouseMove (const juce::MouseEvent& e)
 
 void PianoRollComponent::mouseUp (const juce::MouseEvent&)
 {
+    // Pan ends with no state to commit - clear the drag state and
+    // restore the default cursor (mouseMove will update it on the next
+    // motion to reflect whatever the cursor is now hovering over).
+    if (dragMode == DragMode::Pan)
+    {
+        dragMode = DragMode::None;
+        setMouseCursor (juce::MouseCursor::NormalCursor);
+        return;
+    }
     if (dragMode == DragMode::BoxSelect)
     {
         // Finalise selection: every note whose painted rect intersects

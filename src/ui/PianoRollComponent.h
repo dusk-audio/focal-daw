@@ -181,8 +181,16 @@ private:
 
     enum class DragMode { None, MoveNote, ResizeNote, CreateNote, EditVelocity, BoxSelect,
                            EditCcValue, EditNoteVelocity,
-                           ResizeVelocityStrip, ResizeCcStrip, RangeSelect };
+                           ResizeVelocityStrip, ResizeCcStrip, RangeSelect, Pan };
     DragMode dragMode = DragMode::None;
+
+    // Pan-drag state. Middle-mouse-drag in the grid pans the timeline +
+    // the keyboard range together so an off-screen note can be reached
+    // without flipping between scroll modifiers.
+    int panStartMouseX = 0;
+    int panStartMouseY = 0;
+    int panStartScrollX = 0;
+    int panStartScrollY = 0;
 
     // Time-range selection driven by drag in the bar/beat ruler. When
     // active, paints a translucent yellow band over the grid and all

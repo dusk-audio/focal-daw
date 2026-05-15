@@ -101,7 +101,7 @@ private:
     // is not undoable; the rest are.
     // MoveRegion (Phase 2) drags a slice's timelineStart so the user
     // can reposition a chunk after splitting it out.
-    enum class DragMode { None, FadeIn, FadeOut, Gain, TrimStart, TrimEnd, MoveCursor, Range, MoveRegion };
+    enum class DragMode { None, FadeIn, FadeOut, Gain, TrimStart, TrimEnd, MoveCursor, Range, MoveRegion, Pan };
     DragMode dragMode = DragMode::None;
     juce::int64 dragOriginTimelineSample = 0;  // anchor for MoveRegion drag
     // Range selection on the waveform - inclusive [start, end) in
@@ -114,6 +114,13 @@ private:
     juce::int64 dragOriginSample  = 0;    // edit-cursor anchor for relative drags
     int         dragOriginMouseY  = 0;    // for the gain drag (vertical)
     float       dragOriginGainDb  = 0.0f;
+    // Pan-drag state. Middle-mouse-drag in the wave area pans the view;
+    // panStartMouseX captures the down-x in component coords, panStartScroll
+    // is the scrollSamples value at drag start so mouseDrag can compute an
+    // absolute delta without accumulating float errors. Cursor flips to
+    // DraggingHandCursor while DragMode::Pan is active.
+    int         panStartMouseX    = 0;
+    juce::int64 panStartScroll    = 0;
 
     // Ctrl/Cmd+click on a neighborhood region toggles it into this set.
     // The focused regionIdx is the "primary" selection and is always
