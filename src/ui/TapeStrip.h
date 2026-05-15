@@ -73,6 +73,14 @@ public:
     // the region can't move past the timeline origin. deltaSamples is
     // signed - negative values move the region earlier.
     bool nudgeSelectedRegion (juce::int64 deltaSamples);
+    // Cycle the selected region's take stack. Forward = the next
+    // previous take becomes live, the old live moves to the back of
+    // previousTakes. Backward = the last previous take becomes live,
+    // the old live moves to the front. Returns false when nothing is
+    // selected or the region has no take history. Routes through
+    // RegionEditAction / MidiRegionEditAction so undo/redo work.
+    bool cycleSelectedTakeForward();
+    bool cycleSelectedTakeBackward();
 
     // Double-click hooks. Single-click is reserved for direct
     // manipulation (move / trim / fade / gain on audio; future drag

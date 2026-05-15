@@ -1921,6 +1921,57 @@ void TapeStrip::showRegionContextMenu (const RegionHit& hit, juce::Point<int> sc
 
     m.addSeparator();
 
+    // Takes submenu (audio). Shown when the recorder has absorbed older
+    // takes into previousTakes. Selecting a previous take swaps its
+    // payload (file / sourceOffset / lengthInSamples) into the live
+    // region; the displaced live take drops back into the slot the
+    // chosen take came from so the cycle is reversible.
+    if (! region.previousTakes.empty())
+    {
+        juce::PopupMenu takesSub;
+        const int numTakes = (int) region.previousTakes.size() + 1;
+        takesSub.addSectionHeader (juce::String::formatted ("%d takes", numTakes));
+        takesSub.addItem ("Take 1 (current)", false, true, [] {});
+        for (int i = 0; i < (int) region.previousTakes.size(); ++i)
+        {
+            const int takeNumber = i + 2;
+            takesSub.addItem (
+                juce::String::formatted ("Take %d", takeNumber),
+                [safeThis = juce::Component::SafePointer<TapeStrip> (this),
+                 hitCopy = hit, takeIdx = i]
+                {
+                    if (safeThis == nullptr) return;
+                    const auto& cur = safeThis->session.track (hitCopy.track)
+                                            .regions[(size_t) hitCopy.regionIdx];
+                    if (takeIdx < 0 || takeIdx >= (int) cur.previousTakes.size()) return;
+
+                    AudioRegion before = cur;
+                    AudioRegion after  = cur;
+                    TakeRef oldLive;
+                    oldLive.file            = after.file;
+                    oldLive.sourceOffset    = after.sourceOffset;
+                    oldLive.lengthInSamples = after.lengthInSamples;
+
+                    const TakeRef chosen = after.previousTakes[(size_t) takeIdx];
+                    after.file            = chosen.file;
+                    after.sourceOffset    = chosen.sourceOffset;
+                    after.lengthInSamples = chosen.lengthInSamples;
+                    after.previousTakes[(size_t) takeIdx] = oldLive;
+
+                    auto& um = safeThis->engine.getUndoManager();
+                    um.beginNewTransaction (
+                        juce::String::formatted ("Swap to take %d", takeIdx + 2));
+                    um.perform (new RegionEditAction (
+                        safeThis->session, safeThis->engine,
+                        hitCopy.track, hitCopy.regionIdx,
+                        before, after));
+                    safeThis->repaint();
+                });
+        }
+        m.addSubMenu ("Takes", takesSub);
+        m.addSeparator();
+    }
+
     // Color submenu - 8 curated accent options + "Reset to track
     // colour". Setting goes through RegionEditAction so undo/redo
     // round-trip cleanly. Acts on every selected region (the user's
@@ -2093,6 +2144,71 @@ void TapeStrip::showMidiRegionContextMenu (int trackIdx, int regionIdx,
                 });
 
     m.addSeparator();
+
+    // Takes submenu (MIDI). Same shape as the audio version - swap the
+    // live region's musical payload (notes / ccs / lengthInTicks) with
+    // a previously-absorbed take. lengthInSamples is recomputed from
+    // lengthInTicks at the session's current BPM so the rendered span
+    // stays correct after the swap.
+    if (! region.previousTakes.empty())
+    {
+        juce::PopupMenu takesSub;
+        const int numTakes = (int) region.previousTakes.size() + 1;
+        takesSub.addSectionHeader (juce::String::formatted ("%d takes", numTakes));
+        takesSub.addItem ("Take 1 (current)", false, true, [] {});
+        for (int i = 0; i < (int) region.previousTakes.size(); ++i)
+        {
+            const int takeNumber = i + 2;
+            takesSub.addItem (
+                juce::String::formatted ("Take %d", takeNumber),
+                [safeThis = juce::Component::SafePointer<TapeStrip> (this),
+                 trackIdx, regionIdx, takeIdx = i]
+                {
+                    if (safeThis == nullptr) return;
+                    const auto& curList = safeThis->session.track (trackIdx)
+                                                .midiRegions.current();
+                    if (regionIdx < 0 || regionIdx >= (int) curList.size()) return;
+                    const auto& cur = curList[(size_t) regionIdx];
+                    if (takeIdx < 0 || takeIdx >= (int) cur.previousTakes.size()) return;
+
+                    MidiRegion before = cur;
+                    MidiRegion after  = cur;
+                    MidiTakeRef oldLive;
+                    oldLive.lengthInTicks = after.lengthInTicks;
+                    oldLive.notes         = std::move (after.notes);
+                    oldLive.ccs           = std::move (after.ccs);
+
+                    after.lengthInTicks = after.previousTakes[(size_t) takeIdx].lengthInTicks;
+                    after.notes         = std::move (after.previousTakes[(size_t) takeIdx].notes);
+                    after.ccs           = std::move (after.previousTakes[(size_t) takeIdx].ccs);
+                    after.previousTakes[(size_t) takeIdx] = std::move (oldLive);
+
+                    // Recompute lengthInSamples from the new lengthInTicks
+                    // at the session's current tempo. PlaybackEngine will
+                    // also rebuild on the next preparePlayback if tempo
+                    // changes later.
+                    const double sr = safeThis->engine.getCurrentSampleRate();
+                    const float bpm = safeThis->session.tempoBpm.load (std::memory_order_relaxed);
+                    if (sr > 0.0 && bpm > 0.0f)
+                    {
+                        const double samplesPerTick =
+                            (sr * 60.0) / ((double) bpm * (double) kMidiTicksPerQuarter);
+                        after.lengthInSamples = (juce::int64) std::llround (
+                            (double) after.lengthInTicks * samplesPerTick);
+                    }
+
+                    auto& um = safeThis->engine.getUndoManager();
+                    um.beginNewTransaction (
+                        juce::String::formatted ("Swap to take %d", takeIdx + 2));
+                    um.perform (new MidiRegionEditAction (
+                        safeThis->session, safeThis->engine,
+                        trackIdx, regionIdx, before, after));
+                    safeThis->repaint();
+                });
+        }
+        m.addSubMenu ("Takes", takesSub);
+        m.addSeparator();
+    }
 
     // Same 8-colour palette + Reset as the audio menu.
     juce::PopupMenu colourSub;
@@ -2336,6 +2452,29 @@ void TapeStrip::paint (juce::Graphics& g)
                 g.fillEllipse (cx - 2.0f, cy - 2.0f, 4.0f, 4.0f);
             }
 
+            // Take badge: "T 1/3" at the top-left of the region body
+            // when previousTakes is non-empty. Tells the user at a
+            // glance that the region has alternates, and which slot is
+            // currently live. Hidden on very narrow / short regions so
+            // the badge doesn't visually crowd a thin slice.
+            if (! region.previousTakes.empty()
+                && regionRect.getWidth()  >= 40
+                && regionRect.getHeight() >= 12)
+            {
+                const int total = (int) region.previousTakes.size() + 1;
+                const auto badgeLabel = juce::String::formatted ("T 1/%d", total);
+                const int badgeW = 36;
+                const int badgeH = 10;
+                juce::Rectangle<int> badge (regionRect.getX() + 2,
+                                              regionRect.getY() + 1,
+                                              badgeW, badgeH);
+                g.setColour (juce::Colours::black.withAlpha (0.55f));
+                g.fillRoundedRectangle (badge.toFloat(), 1.5f);
+                g.setColour (juce::Colour (0xffa0c0e0));
+                g.setFont (juce::Font (juce::FontOptions (8.0f, juce::Font::bold)));
+                g.drawText (badgeLabel, badge, juce::Justification::centred, false);
+            }
+
             // Region-gain badge: small "+3.0 dB" / "-6.0 dB" readout
             // at the top-right of the region body. Only painted when
             // gain is meaningfully off unity so an unedited timeline
@@ -2488,12 +2627,17 @@ void TapeStrip::paint (juce::Graphics& g)
             }
 
             // User-supplied label, top-left of the region body. Same
-            // shadow + white-text combo the audio painter uses.
+            // shadow + white-text combo the audio painter uses. Shift
+            // right by the take-badge width when previousTakes is non-
+            // empty so the label and the "T 1/N" pill don't overlap;
+            // matches the audio painter's badgeOffset.
             if (region.label.isNotEmpty()
                 && regionRect.getHeight() >= 10
                 && regionRect.getWidth()  >= 24)
             {
-                auto labelArea = regionRect.withTrimmedLeft (4).withTrimmedRight (4);
+                const int badgeOffset = ! region.previousTakes.empty() ? 18 : 0;
+                auto labelArea = regionRect.withTrimmedLeft (4 + badgeOffset)
+                                            .withTrimmedRight (4);
                 if (labelArea.getWidth() > 0)
                 {
                     g.setColour (juce::Colours::black.withAlpha (0.55f));
@@ -2517,6 +2661,26 @@ void TapeStrip::paint (juce::Graphics& g)
                 g.fillEllipse (cx - 3.0f, cy - 3.0f, 6.0f, 6.0f);
                 g.setColour (juce::Colour (0xffe0c060));
                 g.fillEllipse (cx - 2.0f, cy - 2.0f, 4.0f, 4.0f);
+            }
+
+            // Take badge - matches the audio painter so MIDI take cycles
+            // surface the same affordance.
+            if (! region.previousTakes.empty()
+                && regionRect.getWidth()  >= 40
+                && regionRect.getHeight() >= 12)
+            {
+                const int total = (int) region.previousTakes.size() + 1;
+                const auto badgeLabel = juce::String::formatted ("T 1/%d", total);
+                const int badgeW = 36;
+                const int badgeH = 10;
+                juce::Rectangle<int> badge (regionRect.getX() + 2,
+                                              regionRect.getY() + 1,
+                                              badgeW, badgeH);
+                g.setColour (juce::Colours::black.withAlpha (0.55f));
+                g.fillRoundedRectangle (badge.toFloat(), 1.5f);
+                g.setColour (juce::Colour (0xffa0c0e0));
+                g.setFont (juce::Font (juce::FontOptions (8.0f, juce::Font::bold)));
+                g.drawText (badgeLabel, badge, juce::Justification::centred, false);
             }
 
             // Note dots. Walk the region's notes; each note's start tick
@@ -3053,6 +3217,164 @@ bool TapeStrip::nudgeSelectedRegion (juce::int64 deltaSamples)
     }
     repaint();
     return true;
+}
+
+bool TapeStrip::cycleSelectedTakeForward()
+{
+    // Audio take cycle: rotate the take stack so the next previous take
+    // becomes live and the displaced live drops to the back of the
+    // stack. Walks every selected region and applies the rotation.
+    // No-op when no region in the selection has take history.
+    // MIDI fallback: when the selection is a MIDI region (no audio
+    // RegionId), rotate the MIDI take stack instead.
+    auto selection = allSelectedRegions();
+    bool didAny = false;
+    auto& um = engine.getUndoManager();
+    if (! selection.empty())
+    {
+        for (const auto& id : selection)
+        {
+            const auto& regs = session.track (id.track).regions;
+            if (id.regionIdx < 0 || id.regionIdx >= (int) regs.size()) continue;
+            const auto& cur = regs[(size_t) id.regionIdx];
+            if (cur.previousTakes.empty()) continue;
+
+            AudioRegion before = cur;
+            AudioRegion after  = cur;
+            TakeRef oldLive { after.file, after.sourceOffset, after.lengthInSamples };
+            const TakeRef chosen = after.previousTakes.front();
+            after.previousTakes.erase (after.previousTakes.begin());
+            after.file            = chosen.file;
+            after.sourceOffset    = chosen.sourceOffset;
+            after.lengthInSamples = chosen.lengthInSamples;
+            after.previousTakes.push_back (oldLive);
+
+            if (! didAny) um.beginNewTransaction ("Cycle take");
+            um.perform (new RegionEditAction (session, engine,
+                                                id.track, id.regionIdx,
+                                                before, after));
+            didAny = true;
+        }
+    }
+    if (! didAny
+        && selectedMidiTrack >= 0 && selectedMidiTrack < Session::kNumTracks
+        && selectedMidiRegion >= 0)
+    {
+        const auto& curList = session.track (selectedMidiTrack).midiRegions.current();
+        if (selectedMidiRegion < (int) curList.size())
+        {
+            const auto& cur = curList[(size_t) selectedMidiRegion];
+            if (! cur.previousTakes.empty())
+            {
+                MidiRegion before = cur;
+                MidiRegion after  = cur;
+                MidiTakeRef oldLive { after.lengthInTicks,
+                                       std::move (after.notes),
+                                       std::move (after.ccs) };
+                after.lengthInTicks = after.previousTakes.front().lengthInTicks;
+                after.notes         = std::move (after.previousTakes.front().notes);
+                after.ccs           = std::move (after.previousTakes.front().ccs);
+                after.previousTakes.erase (after.previousTakes.begin());
+                after.previousTakes.push_back (std::move (oldLive));
+
+                const double sr = engine.getCurrentSampleRate();
+                const float bpm = session.tempoBpm.load (std::memory_order_relaxed);
+                if (sr > 0.0 && bpm > 0.0f)
+                {
+                    const double samplesPerTick =
+                        (sr * 60.0) / ((double) bpm * (double) kMidiTicksPerQuarter);
+                    after.lengthInSamples = (juce::int64) std::llround (
+                        (double) after.lengthInTicks * samplesPerTick);
+                }
+
+                um.beginNewTransaction ("Cycle take");
+                um.perform (new MidiRegionEditAction (session, engine,
+                                                        selectedMidiTrack, selectedMidiRegion,
+                                                        before, after));
+                didAny = true;
+            }
+        }
+    }
+    if (didAny) repaint();
+    return didAny;
+}
+
+bool TapeStrip::cycleSelectedTakeBackward()
+{
+    // Reverse-cycle: the LAST previous take becomes live; the displaced
+    // live drops to the FRONT of the stack. Symmetric to forward cycle
+    // so the user can step in either direction through the history.
+    auto selection = allSelectedRegions();
+    bool didAny = false;
+    auto& um = engine.getUndoManager();
+    if (! selection.empty())
+    {
+        for (const auto& id : selection)
+        {
+            const auto& regs = session.track (id.track).regions;
+            if (id.regionIdx < 0 || id.regionIdx >= (int) regs.size()) continue;
+            const auto& cur = regs[(size_t) id.regionIdx];
+            if (cur.previousTakes.empty()) continue;
+
+            AudioRegion before = cur;
+            AudioRegion after  = cur;
+            TakeRef oldLive { after.file, after.sourceOffset, after.lengthInSamples };
+            const TakeRef chosen = after.previousTakes.back();
+            after.previousTakes.pop_back();
+            after.file            = chosen.file;
+            after.sourceOffset    = chosen.sourceOffset;
+            after.lengthInSamples = chosen.lengthInSamples;
+            after.previousTakes.insert (after.previousTakes.begin(), oldLive);
+
+            if (! didAny) um.beginNewTransaction ("Cycle take");
+            um.perform (new RegionEditAction (session, engine,
+                                                id.track, id.regionIdx,
+                                                before, after));
+            didAny = true;
+        }
+    }
+    if (! didAny
+        && selectedMidiTrack >= 0 && selectedMidiTrack < Session::kNumTracks
+        && selectedMidiRegion >= 0)
+    {
+        const auto& curList = session.track (selectedMidiTrack).midiRegions.current();
+        if (selectedMidiRegion < (int) curList.size())
+        {
+            const auto& cur = curList[(size_t) selectedMidiRegion];
+            if (! cur.previousTakes.empty())
+            {
+                MidiRegion before = cur;
+                MidiRegion after  = cur;
+                MidiTakeRef oldLive { after.lengthInTicks,
+                                       std::move (after.notes),
+                                       std::move (after.ccs) };
+                after.lengthInTicks = after.previousTakes.back().lengthInTicks;
+                after.notes         = std::move (after.previousTakes.back().notes);
+                after.ccs           = std::move (after.previousTakes.back().ccs);
+                after.previousTakes.pop_back();
+                after.previousTakes.insert (after.previousTakes.begin(),
+                                              std::move (oldLive));
+
+                const double sr = engine.getCurrentSampleRate();
+                const float bpm = session.tempoBpm.load (std::memory_order_relaxed);
+                if (sr > 0.0 && bpm > 0.0f)
+                {
+                    const double samplesPerTick =
+                        (sr * 60.0) / ((double) bpm * (double) kMidiTicksPerQuarter);
+                    after.lengthInSamples = (juce::int64) std::llround (
+                        (double) after.lengthInTicks * samplesPerTick);
+                }
+
+                um.beginNewTransaction ("Cycle take");
+                um.perform (new MidiRegionEditAction (session, engine,
+                                                        selectedMidiTrack, selectedMidiRegion,
+                                                        before, after));
+                didAny = true;
+            }
+        }
+    }
+    if (didAny) repaint();
+    return didAny;
 }
 
 bool TapeStrip::splitSelectedAtPlayhead()

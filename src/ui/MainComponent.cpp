@@ -586,6 +586,20 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
         return true;
     }
 
+    // ── Take cycling. Alt+T = forward (next take), Alt+Shift+T = backward.
+    // Routes through TapeStrip's selection state; no-op when no region
+    // is selected or the selection has no take history. T (plain) is
+    // already claimed by split-at-playhead, hence the Alt modifier.
+    if (code == 'T' && mods.isAltDown() && ! cmd)
+    {
+        if (tapeStrip != nullptr)
+        {
+            const bool ok = shift ? tapeStrip->cycleSelectedTakeBackward()
+                                   : tapeStrip->cycleSelectedTakeForward();
+            if (ok) return true;
+        }
+    }
+
     // ── TapeStrip zoom: '=' / '+' zoom in, '-' zoom out, '0' fit.
     // Skipped when a modal editor (audio / piano roll) has focus —
     // those have their own zoom keypress paths and grab focus first.
