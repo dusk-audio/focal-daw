@@ -391,9 +391,9 @@ MainComponent::MainComponent()
     tapeStrip->setVisible (tapeStripExpanded);
     tapeStrip->onMidiRegionDoubleClicked  = [this] (int t, int r) { openPianoRoll   (t, r); };
     tapeStrip->onAudioRegionDoubleClicked = [this] (int t, int r) { openAudioEditor (t, r); };
-    tapeStrip->onFileDropped = [this] (juce::File file,
-                                         juce::int64 timelineStart,
-                                         int trackHint)
+    tapeStrip->onFilesDropped = [this] (juce::Array<juce::File> files,
+                                          juce::int64 timelineStart,
+                                          int trackHint)
     {
         if (! engine.getTransport().isStopped())
         {
@@ -401,11 +401,7 @@ MainComponent::MainComponent()
                               "Stop playback before importing files.");
             return;
         }
-        const auto ext = file.getFileExtension().toLowerCase();
-        if (ext == ".mid" || ext == ".midi")
-            runMidiImportFlow (file, timelineStart, trackHint);
-        else
-            runAudioImportFlow (file, timelineStart, trackHint);
+        enqueueImports (std::move (files), timelineStart, trackHint);
     };
     addAndMakeVisible (tapeStrip.get());
 
@@ -1931,11 +1927,13 @@ void MainComponent::runAudioImportFlow (const juce::File& source,
             // preparePlayback.
             track.regions.push_back (std::move (res.region));
             if (self->tapeStrip != nullptr) self->tapeStrip->repaint();
+            self->pendingImportLastCommitted = trackIndex;
+            self->kickNextImport();
         },
         [safeThis = juce::Component::SafePointer<MainComponent> (this)]
         {
             if (auto* self = safeThis.getComponent())
-                self->importTargetModal.close();
+                self->cancelImportChain();
         });
 
     importTargetModal.show (*this, std::move (picker));
@@ -2031,11 +2029,13 @@ void MainComponent::runMidiImportFlow (const juce::File& source,
                 v.push_back (std::move (res.region));
             });
             if (self->tapeStrip != nullptr) self->tapeStrip->repaint();
+            self->pendingImportLastCommitted = trackIndex;
+            self->kickNextImport();
         },
         [safeThis = juce::Component::SafePointer<MainComponent> (this)]
         {
             if (auto* self = safeThis.getComponent())
-                self->importTargetModal.close();
+                self->cancelImportChain();
         });
 
     importTargetModal.show (*this, std::move (picker));
@@ -2051,12 +2051,13 @@ void MainComponent::importAudioPrompt()
 
     const auto startDir = juce::File::getSpecialLocation (juce::File::userMusicDirectory);
     importFileChooser = std::make_unique<juce::FileChooser> (
-        "Import audio file",
+        "Import audio file(s)",
         startDir,
         "*.wav;*.aiff;*.aif;*.flac");
 
     const auto chooserFlags = juce::FileBrowserComponent::openMode
-                            | juce::FileBrowserComponent::canSelectFiles;
+                            | juce::FileBrowserComponent::canSelectFiles
+                            | juce::FileBrowserComponent::canSelectMultipleItems;
 
     importFileChooser->launchAsync (chooserFlags,
         [safeThis = juce::Component::SafePointer<MainComponent> (this)]
@@ -2064,11 +2065,11 @@ void MainComponent::importAudioPrompt()
     {
         auto* self = safeThis.getComponent();
         if (self == nullptr) return;
-        const auto chosen = fc.getResult();
-        if (chosen == juce::File()) return;
-        self->runAudioImportFlow (chosen,
-                                     self->engine.getTransport().getPlayhead(),
-                                     -1);
+        const auto chosen = fc.getResults();
+        if (chosen.isEmpty()) return;
+        self->enqueueImports (chosen,
+                                self->engine.getTransport().getPlayhead(),
+                                -1);
     });
 }
 
@@ -2082,12 +2083,13 @@ void MainComponent::importMidiPrompt()
 
     const auto startDir = juce::File::getSpecialLocation (juce::File::userMusicDirectory);
     importFileChooser = std::make_unique<juce::FileChooser> (
-        "Import MIDI file",
+        "Import MIDI file(s)",
         startDir,
         "*.mid;*.midi");
 
     const auto chooserFlags = juce::FileBrowserComponent::openMode
-                            | juce::FileBrowserComponent::canSelectFiles;
+                            | juce::FileBrowserComponent::canSelectFiles
+                            | juce::FileBrowserComponent::canSelectMultipleItems;
 
     importFileChooser->launchAsync (chooserFlags,
         [safeThis = juce::Component::SafePointer<MainComponent> (this)]
@@ -2095,12 +2097,53 @@ void MainComponent::importMidiPrompt()
     {
         auto* self = safeThis.getComponent();
         if (self == nullptr) return;
-        const auto chosen = fc.getResult();
-        if (chosen == juce::File()) return;
-        self->runMidiImportFlow (chosen,
-                                    self->engine.getTransport().getPlayhead(),
-                                    -1);
+        const auto chosen = fc.getResults();
+        if (chosen.isEmpty()) return;
+        self->enqueueImports (chosen,
+                                self->engine.getTransport().getPlayhead(),
+                                -1);
     });
+}
+
+void MainComponent::enqueueImports (juce::Array<juce::File> files,
+                                       juce::int64 timelineStart,
+                                       int trackHint)
+{
+    pendingImportQueue.clear();
+    pendingImportLastCommitted = -2;
+    pendingImportInitialHint   = trackHint;
+    pendingImportTimelineStart = timelineStart;
+    for (const auto& f : files)
+        pendingImportQueue.push_back (f);
+    kickNextImport();
+}
+
+void MainComponent::kickNextImport()
+{
+    if (pendingImportQueue.empty()) return;
+    auto file = pendingImportQueue.front();
+    pendingImportQueue.erase (pendingImportQueue.begin());
+
+    // Sequential hint: after the first commit, push subsequent files to
+    // adjacent tracks so a drop on track 2 fills 2/3/4 unless the user
+    // overrides each pick in the modal.
+    const int hint = pendingImportLastCommitted >= 0
+                       ? juce::jmin (pendingImportLastCommitted + 1,
+                                       Session::kNumTracks - 1)
+                       : pendingImportInitialHint;
+
+    const auto ext = file.getFileExtension().toLowerCase();
+    if (ext == ".mid" || ext == ".midi")
+        runMidiImportFlow (file, pendingImportTimelineStart, hint);
+    else
+        runAudioImportFlow (file, pendingImportTimelineStart, hint);
+}
+
+void MainComponent::cancelImportChain()
+{
+    pendingImportQueue.clear();
+    pendingImportLastCommitted = -2;
+    importTargetModal.close();
 }
 
 // ── MenuBarModel ─────────────────────────────────────────────────────────

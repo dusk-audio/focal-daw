@@ -112,6 +112,24 @@ private:
                               juce::int64 timelineStart,
                               int trackHint);
 
+    // Multi-file batch import. The chooser / drop site builds the queue
+    // and the initial hint, then calls kickNextImport. Each runFlow's
+    // onCommit pops the next file via kickNextImport; onCancel clears
+    // the queue so a single Cancel aborts the rest. Sequential commits
+    // bump the per-file hint to lastCommitted+1 so a 3-file drop on
+    // track 2 lands on tracks 2/3/4 by default (still overridable per
+    // picker).
+    void enqueueImports (juce::Array<juce::File> files,
+                          juce::int64 timelineStart,
+                          int trackHint);
+    void kickNextImport();
+    void cancelImportChain();
+
+    std::vector<juce::File> pendingImportQueue;
+    juce::int64 pendingImportTimelineStart = 0;
+    int  pendingImportInitialHint   = -1;
+    int  pendingImportLastCommitted = -2;
+
     // Autosave: a juce::Timer fires every 30s and writes a session.json.autosave
     // sibling using the same atomic temp+rename pattern as the manual save. On
     // session load (loadSessionFromJson) we check whether the autosave is newer

@@ -92,21 +92,19 @@ public:
     std::function<void (int trackIdx, int regionIdx)> onAudioRegionDoubleClicked;
 
     // File drag-and-drop callback. Fires when the user drops an audio /
-    // MIDI file onto the strip. trackHint is the row under the drop
+    // MIDI files onto the strip. trackHint is the row under the drop
     // (0..15) or -1 if dropped on the ruler / outside any row; the host
-    // can use it to bias the import-target picker's pre-selection.
-    // timelineStart is the timeline sample the drop X-coordinate maps to.
-    std::function<void (juce::File file,
+    // can use it as the FIRST file's pre-selection. timelineStart is
+    // the timeline sample the drop X-coordinate maps to. The host (a
+    // batch-import chain) is responsible for picking adjacent tracks
+    // for subsequent files in the array.
+    std::function<void (juce::Array<juce::File> files,
                          juce::int64 timelineStart,
-                         int trackHint)> onFileDropped;
+                         int trackHint)> onFilesDropped;
 
     // juce::FileDragAndDropTarget. Accept any file whose extension is
     // in the WAV / AIFF / FLAC / MID set; filesDropped routes to
-    // onFileDropped after computing timelineStart + trackHint.
-    // Multi-file drops: only the FIRST compatible file in the array is
-    // forwarded — the rest are silently ignored. Picking one file per
-    // drop keeps the import-target picker modal usable; batch-import
-    // would need a different UI flow.
+    // onFilesDropped after computing timelineStart + trackHint.
     bool isInterestedInFileDrag (const juce::StringArray& files) override;
     void fileDragEnter (const juce::StringArray& files, int x, int y) override;
     void fileDragMove  (const juce::StringArray& files, int x, int y) override;

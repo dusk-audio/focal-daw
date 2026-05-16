@@ -3484,7 +3484,7 @@ void TapeStrip::filesDropped (const juce::StringArray& files, int x, int y)
     dropHoverX     = -1;
     repaint();
 
-    if (files.isEmpty() || ! onFileDropped) return;
+    if (files.isEmpty() || ! onFilesDropped) return;
 
     int trackHint = -1;
     for (int t = 0; t < Session::kNumTracks; ++t)
@@ -3494,19 +3494,16 @@ void TapeStrip::filesDropped (const juce::StringArray& files, int x, int y)
     const int clampedX = juce::jlimit (col.getX(), col.getRight(), x);
     const auto timelineStart = sampleAtX (clampedX);
 
-    // Route the first compatible file. Multi-file drop is out of scope
-    // for the initial drag-and-drop iteration; we ignore everything past
-    // the first WAV/AIFF/FLAC/MID in the drop list.
+    juce::Array<juce::File> compatible;
     for (const auto& path : files)
     {
         const juce::File f (path);
         const auto ext = f.getFileExtension().toLowerCase();
         if (ext == ".wav" || ext == ".aiff" || ext == ".aif"
             || ext == ".flac" || ext == ".mid" || ext == ".midi")
-        {
-            onFileDropped (f, timelineStart, trackHint);
-            return;
-        }
+            compatible.add (f);
     }
+    if (! compatible.isEmpty())
+        onFilesDropped (compatible, timelineStart, trackHint);
 }
 } // namespace focal
