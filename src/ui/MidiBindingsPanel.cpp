@@ -164,12 +164,12 @@ void MidiBindingsPanel::exportPreset()
     // final path; we just seed the dialog with something sensible.
     const auto defaultDir = juce::File::getSpecialLocation (
         juce::File::userDocumentsDirectory);
-    presetChooser = std::make_unique<juce::FileChooser> (
+    exportChooser = std::make_unique<juce::FileChooser> (
         "Save MIDI bindings preset",
         defaultDir.getChildFile ("focal-bindings.json"),
         "*.json");
     juce::Component::SafePointer<MidiBindingsPanel> safe (this);
-    presetChooser->launchAsync (
+    exportChooser->launchAsync (
         juce::FileBrowserComponent::saveMode
             | juce::FileBrowserComponent::canSelectFiles
             | juce::FileBrowserComponent::warnAboutOverwriting,
@@ -178,7 +178,7 @@ void MidiBindingsPanel::exportPreset()
             auto* self = safe.getComponent();
             if (self == nullptr) return;
             const auto file = fc.getResult();
-            if (file == juce::File()) { self->presetChooser.reset(); return; }
+            if (file == juce::File()) { self->exportChooser.reset(); return; }
             const auto json = serializeBindingsPreset (
                 self->session.midiBindings.current());
             // Append .json if the user typed a bare name.
@@ -194,7 +194,7 @@ void MidiBindingsPanel::exportPreset()
                         .withButton ("OK"),
                     nullptr);
             }
-            self->presetChooser.reset();
+            self->exportChooser.reset();
         });
 }
 
@@ -202,12 +202,12 @@ void MidiBindingsPanel::importPreset()
 {
     const auto defaultDir = juce::File::getSpecialLocation (
         juce::File::userDocumentsDirectory);
-    presetChooser = std::make_unique<juce::FileChooser> (
+    importChooser = std::make_unique<juce::FileChooser> (
         "Load MIDI bindings preset",
         defaultDir,
         "*.json");
     juce::Component::SafePointer<MidiBindingsPanel> safe (this);
-    presetChooser->launchAsync (
+    importChooser->launchAsync (
         juce::FileBrowserComponent::openMode
             | juce::FileBrowserComponent::canSelectFiles,
         [safe] (const juce::FileChooser& fc)
@@ -215,7 +215,7 @@ void MidiBindingsPanel::importPreset()
             auto* self = safe.getComponent();
             if (self == nullptr) return;
             const auto file = fc.getResult();
-            if (file == juce::File()) { self->presetChooser.reset(); return; }
+            if (file == juce::File()) { self->importChooser.reset(); return; }
             const auto json = file.loadFileAsString();
             auto parsed = deserializeBindingsPreset (json);
             if (parsed.empty())
@@ -228,7 +228,7 @@ void MidiBindingsPanel::importPreset()
                                     + ". File may be missing, empty, or malformed.")
                         .withButton ("OK"),
                     nullptr);
-                self->presetChooser.reset();
+                self->importChooser.reset();
                 return;
             }
             // Replace semantics. Atomic snapshot publish so the audio
@@ -239,7 +239,7 @@ void MidiBindingsPanel::importPreset()
                     binds = parsed;
                 });
             self->rebuildRows();
-            self->presetChooser.reset();
+            self->importChooser.reset();
         });
 }
 } // namespace focal
