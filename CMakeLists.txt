@@ -251,6 +251,35 @@ else()
     target_sources(Focal PRIVATE src/ui/PlatformWindowing_Linux.cpp)
 endif()
 
+# ASIO (Windows only). Steinberg's ASIO SDK can't be bundled because of its
+# licence, so the build looks for the SDK on disk. Resolution order:
+#   1. -DASIOSDK_PATH=<dir>           (CMake cache override)
+#   2. $ASIOSDK_PATH environment var  (CI / shell config)
+#   3. sibling directory ../asiosdk   (mirrors the JUCE / plugins pattern)
+# The SDK's `common/` folder must contain iasiodrv.h. When found, JUCE_ASIO
+# is set so juce_audio_devices' juce_ASIO_windows.cpp compiles in the
+# driver class; the audio settings panel then shows ASIO devices alongside
+# WASAPI / DirectSound. Missing SDK is non-fatal - the build falls back to
+# the JUCE-default WASAPI/DirectSound backends and prints a status note.
+if(WIN32)
+    set(_asio_candidate "")
+    if(DEFINED ASIOSDK_PATH AND EXISTS "${ASIOSDK_PATH}/common/iasiodrv.h")
+        set(_asio_candidate "${ASIOSDK_PATH}")
+    elseif(DEFINED ENV{ASIOSDK_PATH} AND EXISTS "$ENV{ASIOSDK_PATH}/common/iasiodrv.h")
+        set(_asio_candidate "$ENV{ASIOSDK_PATH}")
+    elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../asiosdk/common/iasiodrv.h")
+        set(_asio_candidate "${CMAKE_CURRENT_SOURCE_DIR}/../asiosdk")
+    endif()
+    if(NOT "${_asio_candidate}" STREQUAL "")
+        message(STATUS "Focal: ASIO SDK found at ${_asio_candidate} - enabling JUCE_ASIO")
+        target_include_directories(Focal PRIVATE "${_asio_candidate}/common")
+        target_compile_definitions(Focal PRIVATE JUCE_ASIO=1)
+    else()
+        message(STATUS "Focal: ASIO SDK not found (set -DASIOSDK_PATH=... or place at ../asiosdk to enable). "
+                       "Falling back to WASAPI / DirectSound.")
+    endif()
+endif()
+
 # Focal-owned ALSA backend - a juce::AudioIODevice + AudioIODeviceType pair
 # written from scratch using Ardour's libs/backends/alsa/ as a reference for
 # patterns (xrun recovery, sw_params choices, format priority, channel-mask
