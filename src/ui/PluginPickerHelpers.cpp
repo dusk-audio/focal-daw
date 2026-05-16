@@ -83,6 +83,7 @@ void rejectMismatchedKind (PluginSlot& slot, PluginKind kind)
 void openFileChooser (PluginSlot& slot,
                        std::unique_ptr<juce::FileChooser>& chooserOwner,
                        std::function<void()> onChange,
+                       juce::Component::SafePointer<juce::Component> parentForLifetime,
                        PluginKind expectedKind)
 {
     // VST3 plugins are bundles (directories), so the chooser allows both
@@ -106,8 +107,16 @@ void openFileChooser (PluginSlot& slot,
         juce::FileBrowserComponent::openMode |
         juce::FileBrowserComponent::canSelectFiles |
         juce::FileBrowserComponent::canSelectDirectories,
-        [&slot, &chooserOwner, onChange = std::move (onChange), expectedKind] (const juce::FileChooser& chooser)
+        [&slot, &chooserOwner, onChange = std::move (onChange),
+         parentForLifetime, expectedKind] (const juce::FileChooser& chooser)
         {
+            // If the owning UI component has been destroyed (user
+            // switched stages / quit) while the OS dialog was open,
+            // the chooserOwner unique_ptr it lives on is also gone.
+            // Bail without touching it. JUCE FileChooser self-cleans
+            // after this callback returns, so the chooser itself is
+            // fine - we just must not deref the now-dead unique_ptr.
+            if (parentForLifetime.getComponent() == nullptr) return;
             const auto file = chooser.getResult();
 
             if (file == juce::File())
@@ -269,7 +278,8 @@ void openPickerMenu (PluginSlot& slot,
             }
             if (result == kIdBrowseFile)
             {
-                openFileChooser (*slotPtr, *chooserOwnerPtr, std::move (onChangeCopy), kind);
+                openFileChooser (*slotPtr, *chooserOwnerPtr,
+                                  std::move (onChangeCopy), safeTarget, kind);
                 return;
             }
 

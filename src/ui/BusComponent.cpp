@@ -241,7 +241,14 @@ BusComponent::BusComponent (Bus& b, Session& s, int idx)
     startTimerHz (30);
 }
 
-BusComponent::~BusComponent() = default;
+BusComponent::~BusComponent()
+{
+    // stopTimer() must run before any member destructor so the timer
+    // thread can't fire timerCallback on freed atomics. juce::Timer's
+    // own destructor calls stopTimer too but that's the BASE-class
+    // destructor - it runs AFTER derived-class members destruct.
+    stopTimer();
+}
 
 void BusComponent::timerCallback()
 {

@@ -106,7 +106,12 @@ ChannelCompEditor::ChannelCompEditor (Track& t) : track (t)
     startTimerHz (30);
 }
 
-ChannelCompEditor::~ChannelCompEditor() = default;
+ChannelCompEditor::~ChannelCompEditor()
+{
+    // See BusComponent::~BusComponent - explicit stopTimer() prevents
+    // the timer callback from racing member destruction.
+    stopTimer();
+}
 
 void ChannelCompEditor::setMode (int modeIndex)
 {

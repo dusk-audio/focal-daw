@@ -64,11 +64,16 @@ void runScanModal (PluginManager& manager);
 // async callback. `onChange` runs on successful load. `expectedKind`
 // gates the load: if the picked plugin's effect/instrument flag doesn't
 // match (e.g. user browses to a synth on an audio track expecting an
-// effect), the slot is unloaded and an alert is shown. PluginKind::Effects
-// rejects instruments; PluginKind::Instruments rejects effects.
+// effect), the slot is unloaded and an alert is shown.
+//
+// `parentForLifetime` is a SafePointer to the UI component that owns
+// `chooserOwner`. The async callback captures it and bails if the
+// parent is destroyed while the dialog is still open (user switches
+// stages, quits, etc.) - prevents a UAF deref on the now-dead unique_ptr.
 void openFileChooser (PluginSlot& slot,
                        std::unique_ptr<juce::FileChooser>& chooserOwner,
                        std::function<void()> onChange,
+                       juce::Component::SafePointer<juce::Component> parentForLifetime,
                        PluginKind expectedKind = PluginKind::Effects);
 }
 } // namespace focal

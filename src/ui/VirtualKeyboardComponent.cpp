@@ -59,6 +59,10 @@ VirtualKeyboardComponent::VirtualKeyboardComponent (AudioEngine& engineRef)
 
 VirtualKeyboardComponent::~VirtualKeyboardComponent()
 {
+    // Stop the timer BEFORE releaseAll() so the timerCallback can't
+    // fire on a half-released keyboard state. See BusComponent::
+    // ~BusComponent for the broader rationale.
+    stopTimer();
     releaseAll();
 }
 

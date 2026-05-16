@@ -223,6 +223,10 @@ MasterStripComponent::MasterStripComponent (MasterBusParams& p,
 
 MasterStripComponent::~MasterStripComponent()
 {
+    // See BusComponent::~BusComponent - explicit stopTimer() runs
+    // before any modal / member teardown so the timer thread can't
+    // fire on objects we're about to clean up.
+    stopTimer();
     if (tapeMachineDim != nullptr)
         tapeMachineDim->onClick = nullptr;
     if (auto* m = tapeMachineModal.getComponent())

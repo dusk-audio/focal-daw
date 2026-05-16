@@ -280,6 +280,11 @@ AuxLaneComponent::AuxLaneComponent (AuxLane& l, AuxLaneStrip& s, int idx,
 
 AuxLaneComponent::~AuxLaneComponent()
 {
+    // Stop FIRST so the timer thread can't fire on members that are
+    // about to destruct. JUCE's Timer base destructor would stop it
+    // eventually, but base-class destruction runs AFTER member
+    // destruction - leaving a window for a UAF.
+    stopTimer();
     for (int i = 0; i < AuxLaneParams::kMaxLanePlugins; ++i)
         destroyEditorHostForSlot (i);
     for (auto& s : slots)
