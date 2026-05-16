@@ -42,6 +42,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <string>
 #include <thread>
@@ -265,6 +266,38 @@ bool parsePluginDescriptionXml (const juce::String& xml,
     return false;
 }
 
+// Park the audio worker so the socket-reader-thread handler can mutate
+// the plugin (prepareToPlay / releaseResources / get/setStateInformation)
+// without overlapping processBlock. JUCE's contract is that those calls
+// MUST NOT overlap on the same instance; a sizeable share of real-world
+// plugins crash hard if the host violates it (the parent uses the same
+// pattern around its own state I/O via AtomicPark.h).
+//
+// Mechanism: clear currentInstance so the worker no-ops on any new
+// cmdSeq bump, then wait until cmdSeq == replySeq (worker has drained
+// every command it had in flight). 50 ms ceiling caps the stall if the
+// worker somehow falls behind; we'd rather risk one stale audio block
+// than wedge the control channel.
+template <typename Fn>
+void withParkedWorker (HostState& host, Fn&& fn)
+{
+    host.currentInstance.store (nullptr, std::memory_order_release);
+    const auto deadline = std::chrono::steady_clock::now()
+                         + std::chrono::milliseconds (50);
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        const auto cs = host.hdr->cmdSeq .load (std::memory_order_acquire);
+        const auto rs = host.hdr->replySeq.load (std::memory_order_acquire);
+        if (cs == rs) break;
+        std::this_thread::sleep_for (std::chrono::microseconds (200));
+    }
+    fn();
+    // Restore from ownedInstance; fn may have replaced or cleared it
+    // (handleRelease nulls it out, handleLoadPlugin would swap it).
+    host.currentInstance.store (host.ownedInstance.get(),
+                                  std::memory_order_release);
+}
+
 // Control-plane handlers. Each returns the status field for the reply
 // (0 = ok). They run on the socket-reader thread; ones that touch JUCE
 // APIs marked message-thread-only acquire MessageManagerLock first.
@@ -332,23 +365,25 @@ std::uint32_t handlePrepareToPlay (HostState& host,
     PrepareToPlayPayload p {};
     std::memcpy (&p, payload.data(), sizeof (p));
     if (host.ownedInstance == nullptr) return 0;  // nothing to prepare
-    host.currentInstance.store (nullptr, std::memory_order_release);
-    host.ownedInstance->prepareToPlay (p.sampleRate, p.blockSize);
-    host.currentSampleRate = p.sampleRate;
-    host.currentBlockSize  = p.blockSize;
-    host.currentInstance.store (host.ownedInstance.get(),
-                                  std::memory_order_release);
+    withParkedWorker (host, [&]
+    {
+        host.ownedInstance->prepareToPlay (p.sampleRate, p.blockSize);
+        host.currentSampleRate = p.sampleRate;
+        host.currentBlockSize  = p.blockSize;
+    });
     return 0;
 }
 
 std::uint32_t handleRelease (HostState& host)
 {
-    host.currentInstance.store (nullptr, std::memory_order_release);
-    if (host.ownedInstance != nullptr)
+    withParkedWorker (host, [&]
     {
-        host.ownedInstance->releaseResources();
-        host.ownedInstance.reset();
-    }
+        if (host.ownedInstance != nullptr)
+        {
+            host.ownedInstance->releaseResources();
+            host.ownedInstance.reset();
+        }
+    });
     return 0;
 }
 
@@ -357,10 +392,11 @@ std::uint32_t handleGetState (HostState& host,
 {
     if (host.ownedInstance == nullptr) return 1;
     juce::MemoryBlock mb;
+    withParkedWorker (host, [&]
     {
         const juce::MessageManagerLock mml;  // some plugins need it
         host.ownedInstance->getStateInformation (mb);
-    }
+    });
     if (mb.getSize() > kStateBytes) return 2;
     std::memcpy (static_cast<char*> (host.shm) + kStateOffset,
                   mb.getData(), mb.getSize());
@@ -378,11 +414,12 @@ std::uint32_t handleSetState (HostState& host,
     std::uint32_t sz = 0;
     std::memcpy (&sz, payload.data(), sizeof (sz));
     if (sz > kStateBytes) return 3;
+    withParkedWorker (host, [&]
     {
         const juce::MessageManagerLock mml;
         host.ownedInstance->setStateInformation (
             static_cast<const char*> (host.shm) + kStateOffset, (int) sz);
-    }
+    });
     return 0;
 }
 
