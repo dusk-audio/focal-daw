@@ -944,6 +944,7 @@ bool SessionSerializer::save (const Session& s, const juce::File& target)
             o->setProperty ("trigger",     (int) b.trigger);
             o->setProperty ("target",      (int) b.target);
             o->setProperty ("target_idx",  b.targetIndex);
+            o->setProperty ("param_idx",   b.paramIndex);
             arr.add (juce::var (o));
         }
         tport->setProperty ("midi_bindings", arr);
@@ -1182,6 +1183,7 @@ bool SessionSerializer::load (Session& s, const juce::File& source)
                     case (int) MidiBindingTarget::TrackEqGain:
                     case (int) MidiBindingTarget::TrackCompThresh:
                     case (int) MidiBindingTarget::TrackCompMakeup:
+                    case (int) MidiBindingTarget::TrackPluginParam:
                     case (int) MidiBindingTarget::BusFader:
                     case (int) MidiBindingTarget::BusPan:
                     case (int) MidiBindingTarget::BusMute:
@@ -1208,6 +1210,12 @@ bool SessionSerializer::load (Session& s, const juce::File& source)
                                 ? Session::kNumTracks * kPackedEqBands - 1
                                 : Session::kNumTracks - 1)));
                 b.targetIndex = juce::jlimit (0, maxIdx, rawIdx);
+                // paramIndex only meaningful for TrackPluginParam, but
+                // round-trip unconditionally for forward-compat. Clamp
+                // wide so future plugins with hundreds of params
+                // round-trip cleanly.
+                if (v.hasProperty ("param_idx"))
+                    b.paramIndex = juce::jlimit (0, 65535, (int) v["param_idx"]);
                 if (b.isValid())
                     fresh->push_back (b);
             }

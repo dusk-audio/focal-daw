@@ -23,6 +23,7 @@ const char* nameForTarget (MidiBindingTarget t) noexcept
         case MidiBindingTarget::TrackEqGain:     return "EQ band gain";
         case MidiBindingTarget::TrackCompThresh: return "Comp threshold";
         case MidiBindingTarget::TrackCompMakeup: return "Comp makeup";
+        case MidiBindingTarget::TrackPluginParam: return "Plugin parameter";
         case MidiBindingTarget::BusFader:        return "Bus fader";
         case MidiBindingTarget::BusPan:          return "Bus pan";
         case MidiBindingTarget::BusMute:         return "Bus mute";

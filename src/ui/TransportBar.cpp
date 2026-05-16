@@ -736,6 +736,38 @@ void TransportBar::timerCallback()
             b.trigger     = unpackLearnCaptureTrigger (cap);
             b.target      = unpackLearnTargetKind (learnTarget);
             b.targetIndex = unpackLearnTargetIndex (learnTarget);
+            // TrackPluginParam needs a second index (which parameter
+            // of the loaded plugin). Read it from the slot's
+            // last-touched tracker - the user must have moved the
+            // target parameter via the plugin's own UI between
+            // clicking Learn and triggering the MIDI source.
+            //
+            // -1 is the documented sentinel for "no parameter touched
+            // since the slot was loaded" (see PluginSlot::
+            // lastTouchedParamIndex declaration). The unload() path
+            // resets to -1; load() also resets to -1 + installs the
+            // listener that stamps the next user-touch. If a future
+            // refactor changes that sentinel, the < 0 check here +
+            // the < 0 guard in AudioEngine.cpp's apply path both need
+            // to move with it.
+            if (b.target == MidiBindingTarget::TrackPluginParam
+                && b.targetIndex >= 0
+                && b.targetIndex < Session::kNumTracks)
+            {
+                b.paramIndex = engine.getChannelStrip (b.targetIndex)
+                                     .getPluginSlot()
+                                     .getLastTouchedParamIndex();
+                if (b.paramIndex < 0)
+                {
+                    // No parameter touched since the slot loaded -
+                    // bail without writing a bogus binding. The
+                    // learn-pending state clears so the user can
+                    // retry after moving a knob.
+                    s.midiLearnCapture.store (0, std::memory_order_relaxed);
+                    s.midiLearnPending.store (-1, std::memory_order_relaxed);
+                    return;
+                }
+            }
             // Drop any existing binding from the same source before
             // appending the new one - prevents stacking duplicate
             // mappings if a user re-learns the same fader.

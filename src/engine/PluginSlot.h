@@ -216,6 +216,24 @@ public:
         return cachedLatencySamples.load (std::memory_order_relaxed);
     }
 
+    // Index of the parameter the user most recently moved via the
+    // plugin's own UI. -1 = no touch since the slot loaded. Driven by
+    // a juce::AudioProcessorParameter::Listener wired on load + torn
+    // down on unload. Read by the channel strip's right-click MIDI
+    // Learn handler so the user can bind "the knob I just touched"
+    // without picking from a parameter list.
+    int getLastTouchedParamIndex() const noexcept
+    {
+        return lastTouchedParamIndex.load (std::memory_order_relaxed);
+    }
+
+    // Audio-thread-safe setter for the normalised value (0..1) of a
+    // parameter by index. No-op when no plugin is loaded or the
+    // index is out of range. Uses setValue (no notify) to avoid the
+    // host-notify path's listener calls from the audio thread; the
+    // plugin re-reads the new value on its next processBlock.
+    void setParamNormalised (int paramIndex, float value01) noexcept;
+
     // Session save/restore. The XML form encodes a juce::PluginDescription
     // (uid + format + path + display name); the state blob is whatever
     // opaque bytes the plugin wants persisted (its getStateInformation
@@ -295,6 +313,32 @@ private:
     // calling juce::AudioPluginInstance::getLatencySamples() directly,
     // which isn't documented as RT-safe.
     std::atomic<int> cachedLatencySamples { 0 };
+
+    // MIDI Learn "last touched" target. Updated by a parameter
+    // listener attached on load; cleared on unload. The channel
+    // strip's right-click handler reads this so the user can bind
+    // "the knob I just moved" without picking from a parameter list.
+    std::atomic<int> lastTouchedParamIndex { -1 };
+    // Per-parameter listener that just updates lastTouchedParamIndex.
+    // Owned by PluginSlot so the lifetime matches the loaded plugin
+    // (added on load, removed on unload + destructor). Single instance
+    // is attached to every parameter; JUCE's Listener interface is
+    // value-only so no per-param storage is needed. Defined inline so
+    // unique_ptr's deleter can instantiate against a complete type.
+    class LastTouchedListener final : public juce::AudioProcessorParameter::Listener
+    {
+    public:
+        explicit LastTouchedListener (std::atomic<int>& atomRef) noexcept
+            : indexAtom (atomRef) {}
+        void parameterValueChanged (int parameterIndex, float) override
+        {
+            indexAtom.store (parameterIndex, std::memory_order_relaxed);
+        }
+        void parameterGestureChanged (int, bool) override {}
+    private:
+        std::atomic<int>& indexAtom;
+    };
+    std::unique_ptr<LastTouchedListener> lastTouchedListener;
 
     // Watchdog state. Audio-thread-only; no other thread reads these.
     //   • blocksSinceLoad: skips the budget check while a freshly-loaded

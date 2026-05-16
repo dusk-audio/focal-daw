@@ -49,6 +49,9 @@ enum class MidiBindingTarget : int
     // per-mode atom so a single binding survives mode flips.
     TrackCompThresh   = 108, // continuous; targetIndex = track
     TrackCompMakeup   = 109, // continuous; targetIndex = track
+    TrackPluginParam  = 110, // continuous; targetIndex = track,
+                              // paramIndex (separate field) = plugin
+                              // parameter slot in the loaded instance.
 
     BusFader          = 150, // continuous; targetIndex = bus 0..kNumBuses-1
     BusPan            = 151, // continuous; -1..+1
@@ -72,6 +75,7 @@ constexpr bool isContinuousTarget (MidiBindingTarget t) noexcept
         || t == MidiBindingTarget::TrackEqGain
         || t == MidiBindingTarget::TrackCompThresh
         || t == MidiBindingTarget::TrackCompMakeup
+        || t == MidiBindingTarget::TrackPluginParam
         || t == MidiBindingTarget::BusFader
         || t == MidiBindingTarget::BusPan
         || t == MidiBindingTarget::AuxLaneFader
@@ -149,6 +153,11 @@ struct MidiBinding
     MidiBindingTrigger trigger = MidiBindingTrigger::CC;
     MidiBindingTarget  target  = MidiBindingTarget::None;
     int targetIndex = 0;             // track index for per-strip targets
+    // Secondary index used only for TrackPluginParam: which parameter
+    // slot inside the loaded plugin instance. Filled at learn-resolve
+    // time from PluginSlot::getLastTouchedParamIndex. Zero / unused
+    // for every other target.
+    int paramIndex = 0;
 
     // True when this binding is live (target != None and dataNumber valid).
     bool isValid() const noexcept

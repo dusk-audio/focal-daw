@@ -1358,6 +1358,28 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                                 session.setBusSoloed (b.targetIndex, ! was);
                             }
                             break;
+                        case MidiBindingTarget::TrackPluginParam:
+                        {
+                            // CC 0..127 -> 0..1 normalised. Targets the
+                            // strip's plugin slot at the param index
+                            // stored in the binding (filled at learn-
+                            // resolve time from the slot's last-touched
+                            // tracker). paramIndex >= 0 is enforced
+                            // here so the apply site matches the
+                            // inline-validation pattern other targets
+                            // use; setParamNormalised also no-ops on
+                            // out-of-range as a second line of defence.
+                            if (b.targetIndex >= 0
+                                && b.targetIndex < Session::kNumTracks
+                                && b.paramIndex >= 0)
+                            {
+                                const float v = (float) val / 127.0f;
+                                getChannelStrip (b.targetIndex)
+                                    .getPluginSlot()
+                                    .setParamNormalised (b.paramIndex, v);
+                            }
+                            break;
+                        }
                         case MidiBindingTarget::AuxLaneFader:
                             if (b.targetIndex >= 0 && b.targetIndex < Session::kNumAuxLanes)
                             {

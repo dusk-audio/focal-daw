@@ -1328,6 +1328,14 @@ void ChannelStripComponent::showPluginSlotMenu()
             menu.addItem (2004, "Re-enable plugin (crashed)");
         else if (pluginSlot.wasAutoBypassed())
             menu.addItem (2004, "Re-enable plugin (auto-bypassed)");
+        // MIDI Learn for the last parameter the user touched via the
+        // plugin's own UI. Disabled when no parameter has been touched
+        // since the slot loaded (no last-touched stamp to bind to).
+        menu.addSeparator();
+        const int lastParam = pluginSlot.getLastTouchedParamIndex();
+        menu.addItem (2005,
+                       "MIDI Learn last-touched parameter",
+                       lastParam >= 0);
     }
     else
     {
@@ -1346,6 +1354,19 @@ void ChannelStripComponent::showPluginSlotMenu()
                 case 2002: self->openPluginPicker();               break;
                 case 2003: self->unloadPluginSlot();               break;
                 case 2004: self->pluginSlot.clearAutoBypass();     break;
+                case 2005:
+                    // Fire the MIDI Learn workflow targeting THIS
+                    // track's plugin slot. The pending state stores
+                    // only the track; the resolve site (TransportBar's
+                    // timer) reads the slot's last-touched param at
+                    // the moment a MIDI source arrives so the param
+                    // index reflects what the user moved between
+                    // clicking Learn and triggering the controller.
+                    midilearn::showLearnMenu (
+                        self->pluginSlotButton, self->session,
+                        MidiBindingTarget::TrackPluginParam,
+                        self->trackIndex);
+                    break;
                 case 2010: self->openPluginPicker();               break;
                 default: break;
             }

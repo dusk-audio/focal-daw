@@ -113,6 +113,15 @@ PluginSlot::~PluginSlot()
     // device callback). Belt-and-suspenders: clear the atomic first so
     // nothing reads from the instance during destruction.
     currentInstance.store (nullptr, std::memory_order_release);
+    // Detach the parameter listener before the instance destructs so
+    // JUCE's listener list (held inside each param) doesn't dangle on
+    // the released LastTouchedListener. Same detach-first ordering as
+    // unload() - closes the window where a plugin-UI-thread callback
+    // could race the destructor.
+    if (ownedInstance != nullptr && lastTouchedListener != nullptr)
+        for (auto* p : ownedInstance->getParameters())
+            if (p != nullptr) p->removeListener (lastTouchedListener.get());
+    lastTouchedListener.reset();
     if (ownedInstance != nullptr)
         ownedInstance->releaseResources();
     if (previousInstance != nullptr)
@@ -416,6 +425,14 @@ bool PluginSlot::loadFromFile (const juce::File& pluginFile, juce::String& error
         ownedInstance->setPlayHead (hostPlayHead);
     cachedLatencySamples.store (ownedInstance->getLatencySamples(),
                                   std::memory_order_relaxed);
+    // MIDI Learn last-touched: install a parameter listener on every
+    // exposed parameter so the user's plugin-UI moves stamp
+    // lastTouchedParamIndex. Cheap on load (small enum) and lock-free
+    // at runtime.
+    lastTouchedParamIndex.store (-1, std::memory_order_relaxed);
+    lastTouchedListener = std::make_unique<LastTouchedListener> (lastTouchedParamIndex);
+    for (auto* p : ownedInstance->getParameters())
+        if (p != nullptr) p->addListener (lastTouchedListener.get());
     currentInstance.store (ownedInstance.get(), std::memory_order_release);
     return true;
 }
@@ -567,6 +584,10 @@ bool PluginSlot::loadFromDescription (const juce::PluginDescription& desc,
         ownedInstance->setPlayHead (hostPlayHead);
     cachedLatencySamples.store (ownedInstance->getLatencySamples(),
                                   std::memory_order_relaxed);
+    lastTouchedParamIndex.store (-1, std::memory_order_relaxed);
+    lastTouchedListener = std::make_unique<LastTouchedListener> (lastTouchedParamIndex);
+    for (auto* p : ownedInstance->getParameters())
+        if (p != nullptr) p->addListener (lastTouchedListener.get());
     currentInstance.store (ownedInstance.get(), std::memory_order_release);
     return true;
 }
@@ -579,6 +600,17 @@ void PluginSlot::unload()
     // destruction here races the audio thread.
     currentInstance.store (nullptr, std::memory_order_release);
     cachedLatencySamples.store (0, std::memory_order_relaxed);
+    // Detach parameter listeners BEFORE clearing lastTouchedParamIndex
+    // and BEFORE the instance moves into previousInstance. Detach-first
+    // closes the window where an in-flight plugin-UI-thread parameter
+    // callback could fire on the listener and over-write the -1 we're
+    // about to store into the atom. Once the listener is removed from
+    // each param's listener list, JUCE guarantees no further callbacks.
+    if (ownedInstance != nullptr && lastTouchedListener != nullptr)
+        for (auto* p : ownedInstance->getParameters())
+            if (p != nullptr) p->removeListener (lastTouchedListener.get());
+    lastTouchedListener.reset();
+    lastTouchedParamIndex.store (-1, std::memory_order_relaxed);
     if (previousInstance != nullptr)
         previousInstance->releaseResources();
     previousInstance = std::move (ownedInstance);
@@ -1194,5 +1226,20 @@ void PluginSlot::processStereoBlock (float* L, float* R, int numSamples,
         }
     }
     if (blocksSinceLoad < kGraceBlocks) ++blocksSinceLoad;
+}
+
+void PluginSlot::setParamNormalised (int paramIndex, float value01) noexcept
+{
+    // Audio-thread entry. Read the current instance via acquire so we
+    // don't race the load/unload swap. setValue (not
+    // setValueNotifyingHost) avoids the host-notify path's listener
+    // calls from the audio thread - the plugin will pick up the new
+    // value on its next processBlock either way.
+    auto* p = currentInstance.load (std::memory_order_acquire);
+    if (p == nullptr) return;
+    const auto& params = p->getParameters();
+    if (paramIndex < 0 || paramIndex >= params.size()) return;
+    if (auto* param = params[paramIndex])
+        param->setValue (juce::jlimit (0.0f, 1.0f, value01));
 }
 } // namespace focal
