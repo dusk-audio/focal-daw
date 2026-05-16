@@ -228,6 +228,7 @@ target_sources(Focal PRIVATE
     src/ui/MasteringLimiterEditor.cpp
     src/ui/MasteringView.cpp
     src/ui/MasterStripComponent.cpp
+    src/ui/MidiBindingsPanel.cpp
     src/ui/PianoRollComponent.cpp
     src/ui/PluginPickerHelpers.cpp
     src/ui/SystemStatusBar.cpp

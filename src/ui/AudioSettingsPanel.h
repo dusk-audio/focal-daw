@@ -3,6 +3,7 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <memory>
+#include "EmbeddedModal.h"
 
 // The ALSA "periods per buffer" knob is owned by Focal's custom ALSA
 // backend now (see AlsaAudioIODevice::set/getRequestedPeriods); the UI
@@ -82,6 +83,12 @@ private:
     juce::Label    syncOutputLabel { {}, "MIDI Sync Output" };
     juce::ComboBox syncOutputCombo;
     juce::ToggleButton syncEmitClockToggle { "Emit clock (Focal as master)" };
+
+    // Central MIDI bindings audit / cleanup. Per-target right-click is
+    // still the primary add path; this modal lists everything in one
+    // place so the user can review + remove without hunting controls.
+    juce::TextButton midiBindingsButton { "MIDI Bindings..." };
+    EmbeddedModal    midiBindingsModal;
 
     juce::Label  uiScaleLabel  { {}, "UI scale" };
     juce::Slider uiScaleSlider;

@@ -1,5 +1,6 @@
 #include "AudioSettingsPanel.h"
 #include "AppConfig.h"
+#include "MidiBindingsPanel.h"
 #include "SelfTestPanel.h"
 #include "../engine/AudioEngine.h"
 #include "../session/Session.h"
@@ -140,6 +141,19 @@ AudioSettingsPanel::AudioSettingsPanel (juce::AudioDeviceManager& dm,
     };
     addAndMakeVisible (syncEmitClockToggle);
 
+    midiBindingsButton.setTooltip (
+        "Open the MIDI Bindings panel: list everything currently mapped, "
+        "remove individual bindings, or clear all. Use right-click on "
+        "any fader / knob / button to add new bindings.");
+    midiBindingsButton.onClick = [this]
+    {
+        auto body = std::make_unique<MidiBindingsPanel> (
+            session, engine,
+            [this] { midiBindingsModal.close(); });
+        midiBindingsModal.show (*this, std::move (body));
+    };
+    addAndMakeVisible (midiBindingsButton);
+
     // Subscribe to the engine's ChangeBroadcaster so a hot-plug MIDI
     // device rebuild repopulates the sync-source combo. Without this,
     // a user who plugs in a new MIDI device after opening the panel
@@ -219,6 +233,12 @@ void AudioSettingsPanel::resized()
     syncSourceLabel.setBounds (syncRow.removeFromLeft (180).reduced (4, 2));
     syncSourceCombo.setBounds (syncRow.removeFromLeft (300).reduced (4, 2));
     syncChaseTransportToggle.setBounds (syncRow.reduced (8, 2));
+
+    // MIDI Bindings entry button. Right-aligned on its own row so the
+    // sync rows above stay clean.
+    auto bindingsRow = area.removeFromBottom (28);
+    midiBindingsButton.setBounds (
+        bindingsRow.removeFromLeft (180).reduced (4, 2));
 
     selector->setBounds (area);
 }

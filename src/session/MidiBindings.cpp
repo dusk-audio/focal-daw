@@ -1,9 +1,93 @@
 #include "MidiBindings.h"
 #include "Session.h"
+#include "../engine/AudioEngine.h"
+#include "../engine/PluginSlot.h"
 #include <algorithm>
 
 namespace focal
 {
+juce::String describeBindingSource (const MidiBinding& b)
+{
+    const auto chStr = b.channel == 0 ? juce::String ("Ch -")
+                                       : "Ch " + juce::String (b.channel);
+    const auto kindStr = b.trigger == MidiBindingTrigger::CC
+                            ? juce::String ("CC ") : juce::String ("Note ");
+    return chStr + " " + kindStr + juce::String (b.dataNumber);
+}
+
+juce::String describeBindingTarget (const MidiBinding& b,
+                                     const AudioEngine* engine)
+{
+    // Centralised so the menu, the readout, and the bindings panel
+    // all render the same label for any binding.
+    auto trk = [&] { return juce::String (b.targetIndex + 1); };
+    switch (b.target)
+    {
+        case MidiBindingTarget::None:            return "(unbound)";
+        case MidiBindingTarget::TransportPlay:   return "Transport: Play";
+        case MidiBindingTarget::TransportStop:   return "Transport: Stop";
+        case MidiBindingTarget::TransportRecord: return "Transport: Record";
+        case MidiBindingTarget::TransportToggle: return "Transport: Play/Stop";
+        case MidiBindingTarget::TrackFader:      return "Track " + trk() + " fader";
+        case MidiBindingTarget::TrackPan:        return "Track " + trk() + " pan";
+        case MidiBindingTarget::TrackMute:       return "Track " + trk() + " mute";
+        case MidiBindingTarget::TrackSolo:       return "Track " + trk() + " solo";
+        case MidiBindingTarget::TrackArm:        return "Track " + trk() + " arm";
+        case MidiBindingTarget::TrackAuxSend:
+        {
+            const int track = unpackTrackAuxTrack (b.targetIndex);
+            const int aux   = unpackTrackAuxLane  (b.targetIndex);
+            return "Track " + juce::String (track + 1)
+                 + " AUX " + juce::String (aux + 1) + " send";
+        }
+        case MidiBindingTarget::TrackHpfFreq:    return "Track " + trk() + " HPF";
+        case MidiBindingTarget::TrackEqGain:
+        {
+            const int track = unpackTrackEqTrack (b.targetIndex);
+            const int band  = unpackTrackEqBand  (b.targetIndex);
+            static const char* kBandNames[] = { "LF", "LM", "HM", "HF" };
+            const char* bandName = (band >= 0 && band < 4) ? kBandNames[band] : "?";
+            return "Track " + juce::String (track + 1)
+                 + " EQ " + juce::String (bandName) + " gain";
+        }
+        case MidiBindingTarget::TrackCompThresh: return "Track " + trk() + " comp threshold";
+        case MidiBindingTarget::TrackCompMakeup: return "Track " + trk() + " comp makeup";
+        case MidiBindingTarget::TrackPluginParam:
+        {
+            // Try to resolve the parameter's name via the engine. If
+            // no plugin is loaded or paramIndex is out of range, fall
+            // back to the index so the user still sees something
+            // identifiable (and can right-click → Remove it).
+            juce::String paramName;
+            if (engine != nullptr
+                && b.targetIndex >= 0
+                && b.targetIndex < Session::kNumTracks)
+            {
+                const auto& slot = engine->getChannelStrip (b.targetIndex)
+                                          .getPluginSlot();
+                if (auto* instance = slot.getInstance())
+                {
+                    const auto& params = instance->getParameters();
+                    if (b.paramIndex >= 0 && b.paramIndex < params.size())
+                        if (auto* p = params[b.paramIndex])
+                            paramName = p->getName (32);
+                }
+            }
+            if (paramName.isEmpty())
+                paramName = "param " + juce::String (b.paramIndex);
+            return "Track " + trk() + " " + paramName;
+        }
+        case MidiBindingTarget::BusFader:        return "Bus " + trk() + " fader";
+        case MidiBindingTarget::BusPan:          return "Bus " + trk() + " pan";
+        case MidiBindingTarget::BusMute:         return "Bus " + trk() + " mute";
+        case MidiBindingTarget::BusSolo:         return "Bus " + trk() + " solo";
+        case MidiBindingTarget::AuxLaneFader:    return "AUX " + trk() + " return";
+        case MidiBindingTarget::AuxLaneMute:     return "AUX " + trk() + " mute";
+        case MidiBindingTarget::MasterFader:     return "Master fader";
+    }
+    return "(unknown target)";
+}
+
 const char* nameForTarget (MidiBindingTarget t) noexcept
 {
     switch (t)

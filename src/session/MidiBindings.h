@@ -247,6 +247,22 @@ constexpr int unpackLearnCaptureDataNumber (juce::int64 packed) noexcept
 // index here; the menu builder appends it.
 const char* nameForTarget (MidiBindingTarget t) noexcept;
 
+// Full human-readable description of a binding's TARGET, including
+// resolved indices (e.g. "Track 3 fader", "Bus 2 mute", "AUX 1 return",
+// "Track 4 EQ LM gain"). For TrackPluginParam, looks up the loaded
+// plugin via the engine and resolves the paramIndex to a parameter
+// name when possible; falls back to "Track N plugin param M" when no
+// plugin is loaded or the index is out of range. Engine reference
+// optional - pass nullptr for callers that don't need plugin-param
+// resolution (the rest still resolves cleanly).
+class AudioEngine;
+juce::String describeBindingTarget (const MidiBinding& b,
+                                     const AudioEngine* engine);
+
+// Source description: "Ch - CC 23", "Ch 1 Note 60", etc. Single line,
+// channel "-" for omni.
+juce::String describeBindingSource (const MidiBinding& b);
+
 class Session;
 } // namespace focal
 
