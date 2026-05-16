@@ -60,7 +60,15 @@ private:
     juce::Component rowsContainer;
     std::vector<std::unique_ptr<Row>> rows;
 
+    juce::TextButton exportButton   { "Export..." };
+    juce::TextButton importButton   { "Import..." };
     juce::TextButton clearAllButton { "Clear all" };
     juce::TextButton doneButton     { "Done" };
+    // Async file chooser kept alive across the OS dialog's lifetime.
+    // Single slot is fine - export and import never run concurrently.
+    std::unique_ptr<juce::FileChooser> presetChooser;
+
+    void exportPreset();
+    void importPreset();
 };
 } // namespace focal

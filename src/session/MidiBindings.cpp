@@ -174,4 +174,98 @@ void showLearnMenu (juce::Component& target,
     m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&target));
 }
 } // namespace midilearn
+
+juce::String serializeBindingsPreset (const std::vector<MidiBinding>& binds)
+{
+    // Preset wire format: { format_version: 1, bindings: [ {channel,
+    // data, trigger, target, target_idx, param_idx}, ... ] }. Keeps
+    // the per-entry shape identical to the session serializer's
+    // embedded array so future code can share the same parser without
+    // duplicating field names.
+    auto* root = new juce::DynamicObject();
+    root->setProperty ("format_version", 1);
+    juce::Array<juce::var> arr;
+    for (const auto& b : binds)
+    {
+        auto* o = new juce::DynamicObject();
+        o->setProperty ("channel",     b.channel);
+        o->setProperty ("data",        b.dataNumber);
+        o->setProperty ("trigger",     (int) b.trigger);
+        o->setProperty ("target",      (int) b.target);
+        o->setProperty ("target_idx",  b.targetIndex);
+        o->setProperty ("param_idx",   b.paramIndex);
+        arr.add (juce::var (o));
+    }
+    root->setProperty ("bindings", arr);
+    return juce::JSON::toString (juce::var (root), false /*allOnOneLine*/);
+}
+
+std::vector<MidiBinding> deserializeBindingsPreset (const juce::String& json)
+{
+    // Parses the format produced by serializeBindingsPreset. Returns
+    // empty on a malformed file or version mismatch - the caller surfaces
+    // the failure to the user. Per-entry isValid() filter drops garbage
+    // entries without rejecting the whole preset.
+    std::vector<MidiBinding> out;
+    auto parsed = juce::JSON::parse (json);
+    if (! parsed.isObject()) return out;
+    auto* root = parsed.getDynamicObject();
+    if (root == nullptr) return out;
+    const auto arr = root->getProperty ("bindings");
+    if (! arr.isArray()) return out;
+    for (int i = 0; i < arr.size(); ++i)
+    {
+        auto v = arr[i];
+        if (! v.isObject()) continue;
+        MidiBinding b;
+        b.channel    = juce::jlimit (0, 16,
+            v.hasProperty ("channel") ? (int) v["channel"] : 0);
+        b.dataNumber = juce::jlimit (0, 127,
+            v.hasProperty ("data") ? (int) v["data"] : 0);
+        const int rawTrig = v.hasProperty ("trigger") ? (int) v["trigger"]
+                                                      : (int) MidiBindingTrigger::CC;
+        b.trigger = (rawTrig == (int) MidiBindingTrigger::Note)
+                       ? MidiBindingTrigger::Note : MidiBindingTrigger::CC;
+        const int rawTgt = v.hasProperty ("target") ? (int) v["target"]
+                                                    : (int) MidiBindingTarget::None;
+        // Reject unknown target ints up front so a malformed / forward-
+        // version preset never injects an out-of-range enum into the
+        // bindings vector (apply / describe switches have fallbacks but
+        // an unknown target is dead weight either way).
+        switch ((MidiBindingTarget) rawTgt)
+        {
+            case MidiBindingTarget::None:
+            case MidiBindingTarget::TransportPlay:
+            case MidiBindingTarget::TransportStop:
+            case MidiBindingTarget::TransportRecord:
+            case MidiBindingTarget::TransportToggle:
+            case MidiBindingTarget::TrackFader:
+            case MidiBindingTarget::TrackPan:
+            case MidiBindingTarget::TrackMute:
+            case MidiBindingTarget::TrackSolo:
+            case MidiBindingTarget::TrackArm:
+            case MidiBindingTarget::TrackAuxSend:
+            case MidiBindingTarget::TrackHpfFreq:
+            case MidiBindingTarget::TrackEqGain:
+            case MidiBindingTarget::TrackCompThresh:
+            case MidiBindingTarget::TrackCompMakeup:
+            case MidiBindingTarget::TrackPluginParam:
+            case MidiBindingTarget::BusFader:
+            case MidiBindingTarget::BusPan:
+            case MidiBindingTarget::BusMute:
+            case MidiBindingTarget::BusSolo:
+            case MidiBindingTarget::AuxLaneFader:
+            case MidiBindingTarget::AuxLaneMute:
+            case MidiBindingTarget::MasterFader:
+                b.target = (MidiBindingTarget) rawTgt;
+                break;
+            default:
+                continue; // skip this entry, unknown target
+        }
+        b.targetIndex = v.hasProperty ("target_idx") ? (int) v["target_idx"] : 0;
+        b.paramIndex  = v.hasProperty ("param_idx")  ? (int) v["param_idx"]  : 0;
+        if (b.isValid()) out.push_back (b);
+    }
+    return out;
+}
 } // namespace focal

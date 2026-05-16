@@ -263,6 +263,15 @@ juce::String describeBindingTarget (const MidiBinding& b,
 // channel "-" for omni.
 juce::String describeBindingSource (const MidiBinding& b);
 
+// JSON serialize / deserialize for a bindings preset file. Same wire
+// format the session serializer uses for the embedded `midi_bindings`
+// array, wrapped in a top-level object with a `format_version` field so
+// future schema changes can detect old files. UI uses these to export
+// the current binding set to a .json file for sharing across sessions
+// / machines and to import one back.
+juce::String serializeBindingsPreset (const std::vector<MidiBinding>& binds);
+std::vector<MidiBinding> deserializeBindingsPreset (const juce::String& json);
+
 class Session;
 } // namespace focal
 

@@ -58,6 +58,16 @@ MidiBindingsPanel::MidiBindingsPanel (Session& s,
     rowsViewport.setScrollBarsShown (true, false);
     addAndMakeVisible (rowsViewport);
 
+    exportButton.setTooltip ("Save the current bindings to a .json file "
+                              "for sharing across sessions or machines.");
+    exportButton.onClick = [this] { exportPreset(); };
+    addAndMakeVisible (exportButton);
+
+    importButton.setTooltip ("Replace the current bindings with a saved "
+                              "preset. Existing bindings are dropped.");
+    importButton.onClick = [this] { importPreset(); };
+    addAndMakeVisible (importButton);
+
     clearAllButton.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff3a2a2a));
     clearAllButton.setColour (juce::TextButton::textColourOffId, juce::Colour (0xffd0a0a0));
     clearAllButton.onClick = [this] { clearAll(); };
@@ -136,10 +146,100 @@ void MidiBindingsPanel::resized()
     doneButton.setBounds (footer.removeFromRight (100).reduced (2, 4));
     footer.removeFromRight (8);
     clearAllButton.setBounds (footer.removeFromRight (110).reduced (2, 4));
+    // Left-aligned preset I/O buttons so the destructive "Clear all"
+    // stays visually separated from them on the right.
+    exportButton.setBounds (footer.removeFromLeft (100).reduced (2, 4));
+    footer.removeFromLeft (8);
+    importButton.setBounds (footer.removeFromLeft (100).reduced (2, 4));
     bounds.removeFromBottom (8);
 
     rowsViewport.setBounds (bounds);
     emptyHint.setBounds (bounds);
     rebuildRows();  // viewport width changed; re-flow rows
+}
+
+void MidiBindingsPanel::exportPreset()
+{
+    // Default to ~/Documents/<focal-bindings>.json. The user picks the
+    // final path; we just seed the dialog with something sensible.
+    const auto defaultDir = juce::File::getSpecialLocation (
+        juce::File::userDocumentsDirectory);
+    presetChooser = std::make_unique<juce::FileChooser> (
+        "Save MIDI bindings preset",
+        defaultDir.getChildFile ("focal-bindings.json"),
+        "*.json");
+    juce::Component::SafePointer<MidiBindingsPanel> safe (this);
+    presetChooser->launchAsync (
+        juce::FileBrowserComponent::saveMode
+            | juce::FileBrowserComponent::canSelectFiles
+            | juce::FileBrowserComponent::warnAboutOverwriting,
+        [safe] (const juce::FileChooser& fc)
+        {
+            auto* self = safe.getComponent();
+            if (self == nullptr) return;
+            const auto file = fc.getResult();
+            if (file == juce::File()) { self->presetChooser.reset(); return; }
+            const auto json = serializeBindingsPreset (
+                self->session.midiBindings.current());
+            // Append .json if the user typed a bare name.
+            auto target = file.hasFileExtension ("json")
+                            ? file : file.withFileExtension ("json");
+            if (! target.replaceWithText (json))
+            {
+                juce::AlertWindow::showAsync (
+                    juce::MessageBoxOptions()
+                        .withIconType (juce::MessageBoxIconType::WarningIcon)
+                        .withTitle ("Export failed")
+                        .withMessage ("Could not write to " + target.getFullPathName())
+                        .withButton ("OK"),
+                    nullptr);
+            }
+            self->presetChooser.reset();
+        });
+}
+
+void MidiBindingsPanel::importPreset()
+{
+    const auto defaultDir = juce::File::getSpecialLocation (
+        juce::File::userDocumentsDirectory);
+    presetChooser = std::make_unique<juce::FileChooser> (
+        "Load MIDI bindings preset",
+        defaultDir,
+        "*.json");
+    juce::Component::SafePointer<MidiBindingsPanel> safe (this);
+    presetChooser->launchAsync (
+        juce::FileBrowserComponent::openMode
+            | juce::FileBrowserComponent::canSelectFiles,
+        [safe] (const juce::FileChooser& fc)
+        {
+            auto* self = safe.getComponent();
+            if (self == nullptr) return;
+            const auto file = fc.getResult();
+            if (file == juce::File()) { self->presetChooser.reset(); return; }
+            const auto json = file.loadFileAsString();
+            auto parsed = deserializeBindingsPreset (json);
+            if (parsed.empty())
+            {
+                juce::AlertWindow::showAsync (
+                    juce::MessageBoxOptions()
+                        .withIconType (juce::MessageBoxIconType::WarningIcon)
+                        .withTitle ("Import failed")
+                        .withMessage ("Could not read bindings from " + file.getFullPathName()
+                                    + ". File may be missing, empty, or malformed.")
+                        .withButton ("OK"),
+                    nullptr);
+                self->presetChooser.reset();
+                return;
+            }
+            // Replace semantics. Atomic snapshot publish so the audio
+            // thread sees the new set whole, not mid-transition.
+            self->session.midiBindings.mutate (
+                [&parsed] (std::vector<MidiBinding>& binds)
+                {
+                    binds = parsed;
+                });
+            self->rebuildRows();
+            self->presetChooser.reset();
+        });
 }
 } // namespace focal
