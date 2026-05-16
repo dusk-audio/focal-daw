@@ -1895,11 +1895,14 @@ void MainComponent::runAudioImportFlow (const juce::File& source,
             // Re-check transport state — the user could have hit Play
             // between opening the picker and confirming a target. The
             // success path mutates Track::regions in place, which is
-            // only safe with playback halted.
+            // only safe with playback halted. Abort the WHOLE chain on
+            // mid-batch play so the user sees one error rather than
+            // silently dropping every remaining queued file.
             if (! self->engine.getTransport().isStopped())
             {
                 showImportError ("Import audio",
                                          "Stop playback before importing files.");
+                self->cancelImportChain();
                 return;
             }
 
@@ -2001,11 +2004,13 @@ void MainComponent::runMidiImportFlow (const juce::File& source,
             // so this isn't a strict data-race guard, but importing a
             // region mid-playback produces confusing UX (notes appear
             // partway through the take). Bail consistently with the
-            // audio path.
+            // audio path - cancel the whole chain so a multi-file batch
+            // doesn't silently drop everything after the first play-edge.
             if (! self->engine.getTransport().isStopped())
             {
                 showImportError ("Import MIDI",
                                          "Stop playback before importing files.");
+                self->cancelImportChain();
                 return;
             }
 
